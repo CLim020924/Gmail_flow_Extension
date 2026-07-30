@@ -26,6 +26,7 @@ New-Item -ItemType Directory -Path $extensionRoot -Force | Out-Null
 $runtimeFiles = @(
   'background.js',
   'core.js',
+  'desktop-shim.js',
   'popup.html',
   'popup.js',
   'styles.css'

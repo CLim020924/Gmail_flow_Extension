@@ -2,3 +2,5 @@
 Thumbs.db
 *.log
 dist/
+desktop-dist/
+node_modules/

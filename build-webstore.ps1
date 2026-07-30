@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 $runtimeFiles = @(
   'background.js',
   'core.js',
+  'desktop-shim.js',
   'popup.html',
   'popup.js',
   'styles.css'

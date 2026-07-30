@@ -57,4 +57,15 @@
 
 일반 사용자의 Windows·macOS Chrome은 웹 스토어 밖의 ZIP/CRX 원클릭 설치를 허용하지 않습니다. 검토 전에 공유해야 한다면 저장소를 ZIP으로 전달하고 사용자가 압축을 푼 뒤 개발자 모드에서 직접 불러와야 합니다. 조직에서 관리하는 브라우저라면 Chrome Enterprise 정책을 통한 강제 설치를 사용할 수 있습니다.
 
-검토 전 외부 테스터에게 전달할 패키지는 `./build-tester.ps1`로 만듭니다. 결과물은 `dist/Gmail-Flow-v버전-tester.zip`이며 고정 확장 ID `edmpcifdaknahhchkmipankimonidldo`와 전용 OAuth 클라이언트를 사용합니다. ZIP 내부의 `설치방법.txt`에 설치 및 Gmail 연결 방법이 포함됩니다.
+검토 전 외부 테스터에게 전달할 패키지는 `./build-tester.ps1`로 만듭니다. 결과물은 `dist/Gmail-Flow-v버전-tester.zip`이며 고정 확장 ID `edmpcifdaknahhchkmipankimonidldo`와 전용 OAuth 클라이언트를 사용합니다. ZIP 내부의 `INSTALL-KO.txt`에 설치 및 Gmail 연결 방법이 포함됩니다.
+
+## Windows 데스크톱 앱
+
+Electron 기반 Windows 앱은 기존 확장 프로그램 UI와 메일 작업 로직을 공유합니다. 앱 전용 저장소, Google 데스크톱 OAuth(PKCE), Windows DPAPI 토큰 암호화, 트레이 상주 작업 큐를 사용합니다.
+
+```powershell
+npm install
+npm run build:windows
+```
+
+결과물은 `desktop-dist/Gmail-Flow-버전-Windows.exe`입니다. 휴대용 실행 파일이므로 별도 설치 없이 더블클릭하면 바로 실행됩니다. 창을 닫으면 트레이에 남아 예약 작업을 처리하며, 트레이 메뉴의 `종료`를 선택하면 완전히 종료됩니다. 컴퓨터가 꺼져 있거나 앱이 완전히 종료된 동안에는 예약 발송을 처리할 수 없습니다.

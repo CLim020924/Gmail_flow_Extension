@@ -1,0 +1,40 @@
+{
+  "name": "gmail-flow-desktop",
+  "version": "0.3.4",
+  "description": "사용자 정의 명단과 변수를 사용하는 Gmail 메일 자동화 Windows 앱",
+  "main": "desktop/main.js",
+  "author": "CLim020924",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "desktop": "electron .",
+    "build:windows": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.gmailflow.desktop",
+    "productName": "Gmail Flow",
+    "artifactName": "Gmail-Flow-${version}-Windows.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "files": [
+      "background.js",
+      "core.js",
+      "popup.html",
+      "popup.js",
+      "styles.css",
+      "desktop-shim.js",
+      "desktop/**/*",
+      "icons/**/*"
+    ],
+    "win": {
+      "target": ["portable"],
+      "icon": "assets/icon-master.png"
+    }
+  }
+}

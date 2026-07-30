@@ -866,23 +866,27 @@ function bindEvents() {
     const open = $('#app').classList.contains('drawer-open');
     $('#drawerToggle').textContent = open ? '≪' : '≫';
   });
-  $('#openWindowButton').addEventListener('click', async () => {
-    $('#openWindowButton').disabled = true;
-    try {
-      await storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
-      await chrome.windows.create({
-        url: chrome.runtime.getURL('popup.html?mode=window'),
-        type: 'popup',
-        width: 920,
-        height: 760,
-        focused: true
-      });
-      globalThis.close();
-    } catch (error) {
-      alert(`창을 열지 못했습니다. ${error.message}`);
-      $('#openWindowButton').disabled = false;
-    }
-  });
+  if (globalThis.gmailFlowDesktop) {
+    $('#openWindowButton').hidden = true;
+  } else {
+    $('#openWindowButton').addEventListener('click', async () => {
+      $('#openWindowButton').disabled = true;
+      try {
+        await storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
+        await chrome.windows.create({
+          url: chrome.runtime.getURL('popup.html?mode=window'),
+          type: 'popup',
+          width: 920,
+          height: 760,
+          focused: true
+        });
+        globalThis.close();
+      } catch (error) {
+        alert(`창을 열지 못했습니다. ${error.message}`);
+        $('#openWindowButton').disabled = false;
+      }
+    });
+  }
   $('#backButton').addEventListener('click', goBack);
   $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
   $('#sendMethod').addEventListener('change', updateComposeState);
