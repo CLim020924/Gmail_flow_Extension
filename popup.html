@@ -95,7 +95,6 @@
             <details class="menu">
               <summary class="ghost more-button">•••</summary>
               <div class="menu-panel right">
-                <button id="validateRoster" type="button">명단 검사</button>
                 <button id="saveStructure" type="button">현재 구조 저장</button>
                 <button id="resetRoster" type="button">초기화</button>
               </div>
@@ -122,9 +121,20 @@
         </div>
 
         <div id="savedRosterDetail" hidden>
-          <div class="section-heading"><div><h2 id="savedRosterName"></h2><p id="savedRosterMeta" class="muted"></p></div><button id="loadSelectedRoster" class="primary" type="button">불러오기</button></div>
+          <div class="section-heading"><div><h2 id="savedRosterName"></h2><p id="savedRosterMeta" class="muted"></p><p id="savedRosterTemplate" class="muted"></p></div><button id="loadSelectedRoster" class="primary" type="button">불러오기</button></div>
           <div class="sheet-wrap"><table id="savedRosterPreview" class="sheet"></table></div>
           <div class="toolbar"><button id="renameRoster" class="button" type="button">이름 변경</button><button id="deleteRoster" class="button danger" type="button">삭제</button></div>
+        </div>
+
+        <div id="structureTemplateList" hidden>
+          <div class="section-heading"><div><h2>명단 템플릿</h2><p class="muted">저장된 컬럼 구조를 선택하세요.</p></div></div>
+          <div id="structureTemplateItems" class="list"></div>
+        </div>
+
+        <div id="structureTemplateDetail" hidden>
+          <div class="section-heading"><div><h2 id="structureTemplateName"></h2><p id="structureTemplateMeta" class="muted"></p></div><button id="applyStructureTemplate" class="primary" type="button">이 구조 사용</button></div>
+          <div class="sheet-wrap"><table id="structureTemplatePreview" class="sheet"></table></div>
+          <div class="toolbar"><button id="renameStructureTemplate" class="button" type="button">이름 변경</button><button id="deleteStructureTemplate" class="button danger" type="button">삭제</button></div>
         </div>
       </section>
 
@@ -135,8 +145,10 @@
         </div>
         <div id="templateDetailView" hidden>
           <div class="section-heading"><div><h2 id="templateDetailName"></h2><p class="muted">저장된 메일 템플릿</p></div><button id="applyTemplate" class="primary" type="button">이 템플릿 사용</button></div>
+          <div class="detail-block"><small>발송 방식 · 라벨(구분)</small><p id="templateDetailMeta"></p></div>
           <div class="detail-block"><small>제목</small><p id="templateDetailSubject"></p></div>
           <div class="detail-block"><small>본문</small><p id="templateDetailBody" class="preline"></p></div>
+          <div class="toolbar"><button id="renameTemplate" class="button" type="button">이름 변경</button><button id="deleteTemplate" class="button danger" type="button">삭제</button></div>
         </div>
       </section>
 

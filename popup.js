@@ -21,8 +21,12 @@ const state = {
   activeRosterName: '',
   savedRosters: [],
   templates: [],
+  structureTemplates: [],
   selectedRosterId: '',
   selectedTemplateId: '',
+  selectedStructureTemplateId: '',
+  activeTemplateId: '',
+  activeStructureTemplateId: '',
   emptyDraftEnabled: false
 };
 
@@ -61,6 +65,8 @@ function resetSubViews() {
   $('#savedRosterDetail').hidden = true;
   $('#templateListView').hidden = false;
   $('#templateDetailView').hidden = true;
+  $('#structureTemplateList').hidden = true;
+  $('#structureTemplateDetail').hidden = true;
   $('#historyListView').hidden = false;
   $('#historyRecipientsView').hidden = true;
   $('#historyMessageView').hidden = true;
@@ -77,6 +83,12 @@ function goBack() {
   } else if (current === 'template-detail') {
     $('#templateDetailView').hidden = true;
     $('#templateListView').hidden = false;
+  } else if (current === 'structure-template-detail') {
+    $('#structureTemplateDetail').hidden = true;
+    $('#structureTemplateList').hidden = false;
+  } else if (current === 'structure-templates') {
+    $('#structureTemplateList').hidden = true;
+    $('#rosterEditor').hidden = false;
   } else if (current === 'history-message') {
     $('#historyMessageView').hidden = true;
     $('#historyRecipientsView').hidden = false;
@@ -247,6 +259,7 @@ function addColumn(name, role = 'variable') {
   const clean = String(name || '').trim().replace(/[{}]/g, '');
   if (!clean) return;
   state.columns.push({ id: makeId(), name: clean, role });
+  state.activeStructureTemplateId = '';
   renderRoster();
   updateComposeState();
 }
@@ -298,6 +311,9 @@ function applyTable(matrix) {
     name: inferredEmailIndex === index && !looksLikeHeader ? '이메일' : (name || `컬럼${index + 1}`),
     role: /^(이메일|메일|email|e-mail|email address)$/i.test(name) || inferredEmailIndex === index ? 'email' : 'variable'
   }));
+  state.activeRosterName = '';
+  state.activeStructureTemplateId = '';
+  $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음';
   state.rows = dataRows.filter((row) => row.some((value) => String(value || '').trim())).map((row) => {
     const record = {};
     state.columns.forEach((column, index) => { record[column.id] = row[index] || ''; });
@@ -342,7 +358,16 @@ async function saveCurrentRoster() {
   const name = prompt('저장할 명단 이름을 입력하세요.', state.activeRosterName || '새 명단');
   if (!name?.trim()) return;
   const now = new Date().toISOString();
-  const item = { id: makeId(), name: name.trim(), columns: structuredClone(state.columns), rows: structuredClone(state.rows), createdAt: now, updatedAt: now };
+  const item = {
+    id: makeId(),
+    name: name.trim(),
+    columns: structuredClone(state.columns),
+    rows: structuredClone(state.rows),
+    linkedTemplateId: state.activeTemplateId,
+    linkedStructureTemplateId: state.activeStructureTemplateId,
+    createdAt: now,
+    updatedAt: now
+  };
   state.savedRosters.unshift(item);
   state.activeRosterName = item.name;
   await storage.set('savedRosters', state.savedRosters);
@@ -374,6 +399,8 @@ function showRosterDetail(id) {
   $('#savedRosterDetail').hidden = false;
   $('#savedRosterName').textContent = roster.name;
   $('#savedRosterMeta').textContent = `${roster.rows.length}명 · 컬럼 ${roster.columns.length}개`;
+  const linkedTemplate = state.templates.find((template) => template.id === roster.linkedTemplateId);
+  $('#savedRosterTemplate').textContent = linkedTemplate ? `연결된 메일 템플릿: ${linkedTemplate.name}` : '연결된 메일 템플릿 없음';
   renderReadOnlyTable($('#savedRosterPreview'), roster.columns, roster.rows.slice(0, 6));
   pushSubView('saved-roster-detail');
 }
@@ -397,6 +424,60 @@ function renderReadOnlyTable(table, columns, rows) {
     body.append(tr);
   });
   table.replaceChildren(head, body);
+}
+
+async function saveStructureTemplate() {
+  if (!state.columns.length) {
+    alert('저장할 컬럼 구조가 없습니다.');
+    return;
+  }
+  const name = prompt('저장할 명단 템플릿 이름을 입력하세요.', '새 명단 템플릿');
+  if (!name?.trim()) return;
+  const now = new Date().toISOString();
+  const item = { id: makeId(), name: name.trim(), columns: structuredClone(state.columns), createdAt: now, updatedAt: now };
+  state.structureTemplates.unshift(item);
+  state.activeStructureTemplateId = item.id;
+  await storage.set('structureTemplates', state.structureTemplates);
+  $('#rosterContext').textContent = `새 명단 · 명단 템플릿: ${item.name}`;
+  renderStructureTemplates();
+}
+
+function renderStructureTemplates() {
+  const container = $('#structureTemplateItems');
+  if (!state.structureTemplates.length) {
+    container.innerHTML = '<div class="empty-state">저장된 명단 템플릿이 없습니다.</div>';
+    return;
+  }
+  container.replaceChildren(...state.structureTemplates.map((template) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'list-row';
+    button.dataset.structureTemplateId = template.id;
+    button.innerHTML = `<span>${escapeHtml(template.name)}</span><span class="muted">컬럼 ${template.columns.length}개</span>`;
+    return button;
+  }));
+}
+
+function showStructureTemplateDetail(id) {
+  const template = state.structureTemplates.find((item) => item.id === id);
+  if (!template) return;
+  state.selectedStructureTemplateId = id;
+  $('#structureTemplateList').hidden = true;
+  $('#structureTemplateDetail').hidden = false;
+  $('#structureTemplateName').textContent = template.name;
+  $('#structureTemplateMeta').textContent = `컬럼 ${template.columns.length}개`;
+  renderReadOnlyTable($('#structureTemplatePreview'), template.columns, []);
+  pushSubView('structure-template-detail');
+}
+
+function applyMailTemplate(template) {
+  if (!template) return;
+  state.activeTemplateId = template.id;
+  $('#subject').value = template.subject || '';
+  $('#body').value = template.body || '';
+  $('#gmailLabel').value = template.label || '';
+  $('#sendMethod').value = template.sendMethod || '임시 저장';
+  updateComposeState();
 }
 
 function updateActiveRosterText() {
@@ -438,8 +519,11 @@ function renderTemplates() {
 async function saveTemplate() {
   const name = prompt('저장할 메일 템플릿 이름을 입력하세요.', '새 템플릿');
   if (!name?.trim()) return;
-  const template = { id: makeId(), name: name.trim(), subject: $('#subject').value, body: $('#body').value, label: $('#gmailLabel').value, sendMethod: $('#sendMethod').value };
+  if (name.trim().length > 50) { alert('템플릿 이름은 50자 이하여야 합니다.'); return; }
+  if (!$('#subject').value.trim() && !$('#body').value.trim()) { alert('제목이나 본문 중 하나는 입력해야 합니다.'); return; }
+  const template = { id: makeId(), name: name.trim(), subject: $('#subject').value, body: $('#body').value, label: $('#gmailLabel').value, sendMethod: $('#sendMethod').value, createdAt: new Date().toISOString() };
   state.templates.unshift(template);
+  state.activeTemplateId = template.id;
   await storage.set('templates', state.templates);
   renderTemplates();
 }
@@ -451,6 +535,7 @@ function showTemplateDetail(id) {
   $('#templateListView').hidden = true;
   $('#templateDetailView').hidden = false;
   $('#templateDetailName').textContent = template.name;
+  $('#templateDetailMeta').textContent = `${template.sendMethod || '임시 저장'} · ${template.label ? `라벨 ${template.label}` : '라벨 없음'}`;
   $('#templateDetailSubject').textContent = template.subject || '(제목 없음)';
   $('#templateDetailBody').textContent = template.body || '(본문 없음)';
   pushSubView('template-detail');
@@ -525,11 +610,10 @@ function bindEvents() {
     applyTable(parseDelimited(await file.text())); closeMenus(); event.target.value = '';
   });
   $('#loadStructure').addEventListener('click', () => {
-    closeMenus(); state.columns = []; state.rows = []; addColumn('이메일', 'email'); addColumn('이름'); addColumn('회사명'); $('#rosterContext').textContent = '새 명단 · 구조 템플릿: 채용 기본 구조';
+    closeMenus(); renderStructureTemplates(); $('#rosterEditor').hidden = true; $('#structureTemplateList').hidden = false; pushSubView('structure-templates');
   });
-  $('#saveStructure').addEventListener('click', () => { closeMenus(); const name = prompt('저장할 구조 템플릿 이름을 입력하세요.', '새 구조'); if (name?.trim()) $('#rosterContext').textContent = `새 명단 · 구조 템플릿: ${name.trim()}`; });
-  $('#resetRoster').addEventListener('click', () => { closeMenus(); if (!confirm('현재 명단 편집 내용을 초기화할까요?')) return; state.columns = []; state.rows = []; state.activeRosterName = ''; renderRoster(); updateActiveRosterText(); updateComposeState(); });
-  $('#validateRoster').addEventListener('click', () => { closeMenus(); const email = state.columns.find((column) => column.role === 'email'); updateRosterStatus(email ? '수신 이메일 컬럼을 확인했습니다.' : '수신 이메일 역할을 지정해야 실제 발송할 수 있습니다.'); });
+  $('#saveStructure').addEventListener('click', async () => { closeMenus(); await saveStructureTemplate(); });
+  $('#resetRoster').addEventListener('click', () => { closeMenus(); if (!confirm('현재 명단 편집 내용을 초기화할까요?')) return; state.columns = []; state.rows = []; state.activeRosterName = ''; state.activeStructureTemplateId = ''; $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음'; renderRoster(); updateActiveRosterText(); updateComposeState(); });
   $('#useRoster').addEventListener('click', () => { state.activeRosterName ||= '현재 명단'; updateActiveRosterText(); updateComposeState(); showPage('compose'); });
   $('#rosterHead').addEventListener('click', (event) => {
     if (event.target.id === 'addColumn') { const name = prompt('새 컬럼 이름을 입력하세요.', '이름'); if (name?.trim()) addColumn(name); return; }
@@ -542,6 +626,7 @@ function bindEvents() {
     const role = prompt('컬럼 역할을 입력하세요.\n수신 이메일 / 일반 변수 / 제외', column.role === 'email' ? '수신 이메일' : '일반 변수');
     column.name = name.trim().replace(/[{}]/g, '');
     column.role = role?.includes('수신') ? 'email' : role?.includes('제외') ? 'excluded' : 'variable';
+    state.activeStructureTemplateId = '';
     renderRoster(); updateComposeState();
   });
   $('#rosterBody').addEventListener('input', (event) => {
@@ -571,6 +656,9 @@ function bindEvents() {
     const roster = state.savedRosters.find((item) => item.id === state.selectedRosterId);
     if (!roster) return;
     state.columns = structuredClone(roster.columns); state.rows = structuredClone(roster.rows); state.activeRosterName = roster.name;
+    state.activeStructureTemplateId = roster.linkedStructureTemplateId || '';
+    const linkedTemplate = state.templates.find((template) => template.id === roster.linkedTemplateId);
+    if (linkedTemplate) applyMailTemplate(linkedTemplate); else state.activeTemplateId = '';
     renderRoster(); updateActiveRosterText(); updateComposeState(); resetSubViews(); state.backStack = []; $('#backButton').hidden = true;
   });
   $('#renameRoster').addEventListener('click', async () => {
@@ -585,7 +673,38 @@ function bindEvents() {
   $('#templateItems').addEventListener('click', (event) => { const button = event.target.closest('[data-template-id]'); if (button) showTemplateDetail(button.dataset.templateId); });
   $('#applyTemplate').addEventListener('click', () => {
     const template = state.templates.find((item) => item.id === state.selectedTemplateId); if (!template) return;
-    $('#subject').value = template.subject; $('#body').value = template.body; $('#gmailLabel').value = template.label; $('#sendMethod').value = template.sendMethod; updateComposeState(); showPage('compose');
+    applyMailTemplate(template); showPage('compose');
+  });
+  $('#renameTemplate').addEventListener('click', async () => {
+    const template = state.templates.find((item) => item.id === state.selectedTemplateId); if (!template) return;
+    const name = prompt('새 템플릿 이름을 입력하세요.', template.name); if (!name?.trim() || name.trim().length > 50) return;
+    template.name = name.trim(); await storage.set('templates', state.templates); renderTemplates(); showTemplateDetail(template.id); state.backStack.pop();
+  });
+  $('#deleteTemplate').addEventListener('click', async () => {
+    const template = state.templates.find((item) => item.id === state.selectedTemplateId); if (!template || !confirm(`“${template.name}” 템플릿을 삭제할까요?`)) return;
+    state.templates = state.templates.filter((item) => item.id !== template.id);
+    if (state.activeTemplateId === template.id) state.activeTemplateId = '';
+    await storage.set('templates', state.templates); renderTemplates(); $('#templateDetailView').hidden = true; $('#templateListView').hidden = false; state.backStack.pop();
+  });
+  $('#structureTemplateItems').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-structure-template-id]'); if (button) showStructureTemplateDetail(button.dataset.structureTemplateId);
+  });
+  $('#applyStructureTemplate').addEventListener('click', () => {
+    const template = state.structureTemplates.find((item) => item.id === state.selectedStructureTemplateId); if (!template) return;
+    state.columns = structuredClone(template.columns); state.rows = []; state.activeRosterName = ''; state.activeStructureTemplateId = template.id;
+    $('#rosterContext').textContent = `새 명단 · 명단 템플릿: ${template.name}`;
+    renderRoster(); updateComposeState(); resetSubViews(); state.backStack = []; $('#backButton').hidden = true;
+  });
+  $('#renameStructureTemplate').addEventListener('click', async () => {
+    const template = state.structureTemplates.find((item) => item.id === state.selectedStructureTemplateId); if (!template) return;
+    const name = prompt('새 명단 템플릿 이름을 입력하세요.', template.name); if (!name?.trim()) return;
+    template.name = name.trim(); template.updatedAt = new Date().toISOString(); await storage.set('structureTemplates', state.structureTemplates); renderStructureTemplates(); showStructureTemplateDetail(template.id); state.backStack.pop();
+  });
+  $('#deleteStructureTemplate').addEventListener('click', async () => {
+    const template = state.structureTemplates.find((item) => item.id === state.selectedStructureTemplateId); if (!template || !confirm(`“${template.name}” 명단 템플릿을 삭제할까요?`)) return;
+    state.structureTemplates = state.structureTemplates.filter((item) => item.id !== template.id);
+    if (state.activeStructureTemplateId === template.id) state.activeStructureTemplateId = '';
+    await storage.set('structureTemplates', state.structureTemplates); renderStructureTemplates(); $('#structureTemplateDetail').hidden = true; $('#structureTemplateList').hidden = false; state.backStack.pop();
   });
   $('#demoHistory').addEventListener('click', () => { $('#historyListView').hidden = true; $('#historyRecipientsView').hidden = false; pushSubView('history-recipients'); });
   $('#historyRecipients').addEventListener('click', (event) => {
@@ -601,10 +720,12 @@ function bindEvents() {
 async function init() {
   state.savedRosters = await storage.get('savedRosters', []);
   state.templates = await storage.get('templates', []);
+  state.structureTemplates = await storage.get('structureTemplates', []);
   bindEvents();
   renderRoster();
   renderSavedRosters();
   renderTemplates();
+  renderStructureTemplates();
   renderHistoryRecipients();
   updateComposeState();
 }
