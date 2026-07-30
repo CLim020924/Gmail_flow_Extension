@@ -7,7 +7,7 @@
   "permissions": ["storage", "unlimitedStorage", "identity", "identity.email", "alarms"],
   "host_permissions": ["https://gmail.googleapis.com/*"],
   "oauth2": {
-    "client_id": "1055778436707-d0mf03fgja6s9bgpmtltmmd9nt04lsdo.apps.googleusercontent.com",
+    "client_id": "1055778436707-nuc2nk7k6oepgt8ff865clgpdmkd58a5.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/gmail.modify"]
   },
   "background": {

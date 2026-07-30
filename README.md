@@ -21,8 +21,8 @@
 
 1. Google Cloud Console에서 프로젝트를 만들고 Gmail API를 활성화합니다.
 2. OAuth 동의 화면을 구성합니다. 테스트 상태라면 사용할 Google 계정을 테스트 사용자로 추가합니다.
-3. OAuth 클라이언트 ID를 만들 때 배포 환경에 맞는 Chrome 확장 프로그램 ID를 등록합니다. 웹스토어 배포 ID는 `lgepaiahgdmaempfplpfgmgjiiobohnf`입니다.
-4. 발급된 클라이언트 ID를 `manifest.json`의 `oauth2.client_id`에 입력합니다.
+3. OAuth 클라이언트 ID를 만들 때 개발자 모드에 표시되는 Chrome 확장 프로그램 ID를 등록합니다.
+4. 발급된 개발용 클라이언트 ID를 `manifest.json`의 `oauth2.client_id`에 입력합니다. 웹 스토어용 ID를 이 파일에 직접 넣으면 개발자 모드 로그인이 실패합니다.
 5. `chrome://extensions`에서 확장 프로그램을 새로고침합니다.
 6. 팝업 오른쪽 위 설정에서 `Gmail 연결`을 누르고 권한을 승인합니다.
 
@@ -42,9 +42,10 @@
 1. Chrome 웹 스토어 개발자 대시보드에서 개발자 계정을 등록합니다.
 2. 배포 ZIP을 새 항목으로 업로드하되, 처음에는 심사를 제출하지 않습니다.
 3. 생성된 웹 스토어 항목의 확장 프로그램 ID를 확인합니다.
-4. Google Cloud에서 해당 ID용 `Chrome 확장 프로그램` OAuth 클라이언트를 만들고 `manifest.json`의 `oauth2.client_id`를 교체합니다.
-5. 새 ZIP을 다시 업로드한 뒤 스토어 등록정보와 개인정보 보호 항목을 작성합니다.
-6. 배포 공개 상태를 `미등록(Unlisted)`으로 설정하고 심사를 제출합니다.
+4. Google Cloud에서 해당 ID용 `Chrome 확장 프로그램` OAuth 클라이언트를 만듭니다. 현재 웹 스토어 ID는 `lgepaiahgdmaempfplpfgmgjiiobohnf`입니다.
+5. `./build-webstore.ps1`을 실행합니다. 이 스크립트는 개발용 `manifest.json`을 변경하지 않고 웹 스토어용 OAuth 클라이언트를 넣은 `dist/Gmail-Flow-v버전-webstore.zip`을 만듭니다.
+6. 생성된 ZIP을 업로드한 뒤 스토어 등록정보와 개인정보 보호 항목을 작성합니다.
+7. 배포 공개 상태를 `미등록(Unlisted)`으로 설정하고 심사를 제출합니다.
 
 `미등록`은 검색·카테고리에서 발견되지 않지만 링크 전달 자체를 막지는 않습니다. 승인된 계정만 설치하게 제한하려면 공개 상태를 `비공개(Private)`로 설정하고 Google 그룹 또는 허용 사용자를 구성해야 합니다.
 
@@ -53,3 +54,5 @@
 ## 개발
 
 빌드 과정이 없는 정적 Manifest V3 프로젝트입니다. 파일을 수정한 뒤 확장 프로그램 관리 화면에서 새로고침하면 됩니다.
+
+일반 사용자의 Windows·macOS Chrome은 웹 스토어 밖의 ZIP/CRX 원클릭 설치를 허용하지 않습니다. 검토 전에 공유해야 한다면 저장소를 ZIP으로 전달하고 사용자가 압축을 푼 뒤 개발자 모드에서 직접 불러와야 합니다. 조직에서 관리하는 브라우저라면 Chrome Enterprise 정책을 통한 강제 설치를 사용할 수 있습니다.
