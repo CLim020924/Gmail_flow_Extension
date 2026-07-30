@@ -41,6 +41,7 @@ const columnLetter = (index) => {
 };
 
 function showPage(page) {
+  closeMenus();
   state.page = page;
   $$('.page').forEach((panel) => panel.classList.toggle('active', panel.dataset.pagePanel === page));
   $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
@@ -363,6 +364,15 @@ function closeMenus() {
 }
 
 function bindEvents() {
+  document.addEventListener('click', (event) => {
+    const clickedMenu = event.target.closest('details.menu');
+    $$('details.menu[open]').forEach((menu) => {
+      if (menu !== clickedMenu) menu.open = false;
+    });
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeMenus();
+  });
   $('#drawerToggle').addEventListener('click', () => {
     $('#app').classList.toggle('drawer-open');
     const open = $('#app').classList.contains('drawer-open');
