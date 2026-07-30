@@ -1,0 +1,14 @@
+Gmail Flow 테스터 버전 설치 방법
+
+1. 이 ZIP 파일을 마우스 오른쪽 버튼으로 눌러 "압축 풀기"를 선택합니다.
+2. Chrome 주소창에 chrome://extensions 를 입력합니다.
+3. 화면 오른쪽 위의 "개발자 모드"를 켭니다.
+4. "압축해제된 확장 프로그램을 로드합니다"를 누릅니다.
+5. 압축을 푼 곳의 "Gmail-Flow-Tester" 폴더를 선택합니다.
+6. Chrome 도구 모음의 퍼즐 아이콘을 눌러 Gmail Flow Tester를 고정하고 실행합니다.
+7. 확장 프로그램 오른쪽 위의 계정 버튼에서 Gmail을 연결합니다.
+
+Google이 아직 OAuth 인증을 완료하지 않은 경우 경고 화면이 표시될 수 있습니다.
+테스트를 계속하려면 "고급"을 누른 뒤 "Gmail Flow(안전하지 않음)로 이동"을 선택합니다.
+
+확장 프로그램 ID: edmpcifdaknahhchkmipankimonidldo
