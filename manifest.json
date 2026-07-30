@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Gmail Flow",
+  "version": "0.1.0",
+  "description": "사용자 정의 명단과 변수를 사용하는 Gmail 메일 자동화 확장 프로그램",
+  "permissions": ["storage"],
+  "action": {
+    "default_title": "Gmail Flow",
+    "default_popup": "popup.html"
+  }
+}

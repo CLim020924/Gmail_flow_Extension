@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gmail Flow</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="app drawer-open">
+    <aside id="drawer" class="drawer" aria-label="기능 메뉴">
+      <div class="drawer-title">추가 기능</div>
+      <button class="nav-item active" data-page="compose">메일 작성</button>
+      <button class="nav-item" data-page="roster">명단 가져오기</button>
+      <button class="nav-item" data-page="templates">저장된 템플릿</button>
+      <button class="nav-item" data-page="history">발송 기록</button>
+      <button class="nav-item" data-page="queue">작업 큐</button>
+    </aside>
+
+    <main class="main">
+      <header class="header">
+        <div class="header-left">
+          <button id="drawerToggle" class="ghost icon-button" type="button" aria-label="기능 메뉴 접기">≪</button>
+          <h1>메일 자동화</h1>
+          <button id="backButton" class="back-button" type="button" hidden>뒤로가기</button>
+        </div>
+        <button class="ghost icon-button" type="button" aria-label="설정">⚙</button>
+      </header>
+
+      <section id="page-compose" class="page active" data-page-panel="compose">
+        <div class="top-tools">
+          <span id="activeRosterText" class="muted">현재 명단 없음 · 사용 가능한 변수 0개</span>
+          <details class="menu">
+            <summary class="button">템플릿 관리 ▾</summary>
+            <div class="menu-panel">
+              <button id="loadMailTemplate" type="button">템플릿 가져오기</button>
+              <button id="saveMailTemplate" type="button">템플릿 저장</button>
+            </div>
+          </details>
+        </div>
+
+        <label class="field">발송 방식
+          <span id="recipientBadge" class="badge">대상 0명</span>
+          <select id="sendMethod">
+            <option>임시 저장</option>
+            <option>예약 발송</option>
+            <option>즉시 발송</option>
+          </select>
+        </label>
+
+        <label id="labelField" class="field">라벨(구분) <small>선택</small>
+          <input id="gmailLabel" type="text" placeholder="Gmail 라벨 입력">
+        </label>
+
+        <div id="scheduleField" class="schedule-grid" hidden>
+          <label class="field">예약 날짜<input id="scheduleDate" type="date"></label>
+          <label class="field">예약 시간<input id="scheduleTime" type="time" value="09:00"></label>
+        </div>
+
+        <div id="emptyDraftControl" class="inline-control">
+          <span>빈 초안 생성</span>
+          <button id="emptyDraftToggle" class="ghost icon-button" type="button" aria-expanded="false">＋</button>
+        </div>
+        <input id="emptyDraftCount" class="compact-input" type="number" min="1" max="100" value="1" aria-label="빈 초안 생성 개수" hidden>
+
+        <label class="field">제목
+          <input id="subject" type="text" placeholder="명단 컬럼을 만든 뒤 변수를 사용할 수 있습니다">
+        </label>
+        <label class="field">내용
+          <textarea id="body" placeholder="현재 사용할 수 있는 변수가 없습니다"></textarea>
+        </label>
+        <p id="composeHint" class="muted">명단을 선택하거나 빈 초안 기능을 켜주세요.</p>
+        <div class="footer-actions">
+          <button id="composeAction" class="primary" type="button" disabled>임시 저장</button>
+          <button id="previewButton" class="button" type="button">미리보기</button>
+        </div>
+      </section>
+
+      <section id="page-roster" class="page" data-page-panel="roster">
+        <div id="rosterEditor">
+          <div class="section-heading">
+            <div><h2>명단 가져오기</h2><p class="muted">명단을 만들거나 저장된 데이터를 불러옵니다.</p></div>
+          </div>
+          <div class="toolbar">
+            <button id="saveRoster" class="primary" type="button" disabled>명단 저장</button>
+            <details class="menu">
+              <summary class="button">불러오기 ▾</summary>
+              <div class="menu-panel">
+                <button id="openSavedRosters" type="button">저장된 명단</button>
+                <label class="menu-file">Excel / CSV<input id="fileInput" type="file" accept=".csv,.tsv,.txt"></label>
+                <button id="pasteTable" type="button">표 데이터 붙여넣기</button>
+                <button id="loadStructure" type="button">구조 템플릿</button>
+              </div>
+            </details>
+            <details class="menu">
+              <summary class="ghost more-button">•••</summary>
+              <div class="menu-panel right">
+                <button id="validateRoster" type="button">명단 검사</button>
+                <button id="saveStructure" type="button">현재 구조 저장</button>
+                <button id="resetRoster" type="button">초기화</button>
+              </div>
+            </details>
+          </div>
+          <p id="rosterContext" class="muted">새 명단 · 연결된 구조 템플릿 없음</p>
+          <div id="pasteBox" class="paste-box" hidden>
+            <textarea id="pasteInput" placeholder="Excel에서 복사한 표를 여기에 붙여넣으세요"></textarea>
+            <div class="toolbar"><button id="applyPaste" class="primary" type="button">표 적용</button><button id="cancelPaste" class="button" type="button">취소</button></div>
+          </div>
+          <div class="sheet-wrap">
+            <table id="rosterTable" class="sheet" aria-label="명단 편집 표">
+              <thead id="rosterHead"></thead>
+              <tbody id="rosterBody"></tbody>
+            </table>
+          </div>
+          <div class="sheet-status"><span id="rosterStats">컬럼 0개 · 데이터 0행</span><span id="rosterMessage">첫 컬럼을 추가하거나 표를 붙여넣으세요.</span></div>
+          <div class="footer-actions"><button id="useRoster" class="primary" type="button" disabled>이 명단 사용</button></div>
+        </div>
+
+        <div id="savedRosterList" hidden>
+          <div class="section-heading"><div><h2>저장된 명단</h2><p class="muted">조회할 명단을 선택하세요.</p></div></div>
+          <div id="savedRosterItems" class="list"></div>
+        </div>
+
+        <div id="savedRosterDetail" hidden>
+          <div class="section-heading"><div><h2 id="savedRosterName"></h2><p id="savedRosterMeta" class="muted"></p></div><button id="loadSelectedRoster" class="primary" type="button">불러오기</button></div>
+          <div class="sheet-wrap"><table id="savedRosterPreview" class="sheet"></table></div>
+          <div class="toolbar"><button id="renameRoster" class="button" type="button">이름 변경</button><button id="deleteRoster" class="button danger" type="button">삭제</button></div>
+        </div>
+      </section>
+
+      <section id="page-templates" class="page" data-page-panel="templates">
+        <div id="templateListView">
+          <div class="section-heading"><div><h2>저장된 템플릿</h2><p class="muted">이름을 누르면 실제 내용을 확인합니다.</p></div></div>
+          <div id="templateItems" class="list"></div>
+        </div>
+        <div id="templateDetailView" hidden>
+          <div class="section-heading"><div><h2 id="templateDetailName"></h2><p class="muted">저장된 메일 템플릿</p></div><button id="applyTemplate" class="primary" type="button">이 템플릿 사용</button></div>
+          <div class="detail-block"><small>제목</small><p id="templateDetailSubject"></p></div>
+          <div class="detail-block"><small>본문</small><p id="templateDetailBody" class="preline"></p></div>
+        </div>
+      </section>
+
+      <section id="page-history" class="page" data-page-panel="history">
+        <div id="historyListView">
+          <div class="section-heading"><div><h2>발송 기록</h2><p class="muted">작업을 누르면 대상자별 결과를 확인합니다.</p></div></div>
+          <div class="list"><button id="demoHistory" class="list-row" type="button"><span>인터뷰 안내</span><span class="muted">12/12 완료</span></button></div>
+        </div>
+        <div id="historyRecipientsView" hidden>
+          <div class="section-heading"><div><h2>인터뷰 안내</h2><p class="muted">2026-07-30 14:20 · 성공 12</p></div></div>
+          <div id="historyRecipients" class="list"></div>
+        </div>
+        <div id="historyMessageView" hidden>
+          <div class="section-heading"><div><h2 id="historyMessageName"></h2><p id="historyMessageMeta" class="muted"></p></div><span class="badge">발송 성공</span></div>
+          <div class="detail-block"><small>실제로 발송된 제목</small><p id="historyMessageSubject"></p></div>
+          <div class="detail-block"><small>실제로 발송된 본문</small><p id="historyMessageBody" class="preline"></p></div>
+        </div>
+      </section>
+
+      <section id="page-queue" class="page" data-page-panel="queue">
+        <div class="section-heading"><div><h2>작업 큐</h2><p class="muted">예약·대기·재시도 작업을 표시합니다.</p></div></div>
+        <div class="empty-state">아직 등록된 작업이 없습니다.</div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="previewDialog">
+    <form method="dialog">
+      <div class="section-heading"><h2>메일 미리보기</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <div class="detail-block"><small>제목</small><p id="previewSubject"></p></div>
+      <div class="detail-block"><small>본문</small><p id="previewBody" class="preline"></p></div>
+      <button class="primary" value="cancel">확인</button>
+    </form>
+  </dialog>
+  <script src="popup.js"></script>
+</body>
+</html>
