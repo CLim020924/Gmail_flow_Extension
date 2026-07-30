@@ -160,17 +160,28 @@ function renderRoster() {
     rowNumber.className = 'row-number';
     rowNumber.textContent = String(rowIndex + 1);
     tr.append(rowNumber);
-    state.columns.forEach((column) => {
+    state.columns.forEach((column, columnIndex) => {
       const td = document.createElement('td');
       const input = document.createElement('input');
       input.className = 'cell-input';
       input.dataset.rowIndex = String(rowIndex);
       input.dataset.columnId = column.id;
+      input.dataset.columnIndex = String(columnIndex);
       input.value = state.rows[rowIndex]?.[column.id] || '';
       td.append(input);
       tr.append(td);
     });
-    tr.append(document.createElement('td'));
+    const trailingCell = document.createElement('td');
+    if (state.columns.length === 0) {
+      const pasteAnchor = document.createElement('input');
+      pasteAnchor.className = 'cell-input';
+      pasteAnchor.dataset.rowIndex = String(rowIndex);
+      pasteAnchor.dataset.columnIndex = '0';
+      pasteAnchor.dataset.pasteAnchor = 'true';
+      pasteAnchor.setAttribute('aria-label', `${rowIndex + 1}행 A열 붙여넣기`);
+      trailingCell.append(pasteAnchor);
+    }
+    tr.append(trailingCell);
     fragment.append(tr);
   }
   body.replaceChildren(fragment);
@@ -193,8 +204,14 @@ function addColumn(name, role = 'variable') {
 }
 
 function parseDelimited(text) {
-  const normalized = String(text || '').replace(/\r\n?/g, '\n').trimEnd();
+  let normalized = String(text || '').replace(/\r\n?/g, '\n').trimEnd();
   if (!normalized) return [];
+  if (!normalized.includes('\t') && !normalized.includes(',') && /\S[ ]{2,}\S/.test(normalized)) {
+    normalized = normalized
+      .split('\n')
+      .map((line) => line.trim().split(/[ ]{2,}/).join('\t'))
+      .join('\n');
+  }
   const delimiter = normalized.includes('\t') ? '\t' : ',';
   const rows = [];
   let row = [];
@@ -218,13 +235,20 @@ function applyTable(matrix) {
   if (!matrix.length) return;
   const width = Math.max(...matrix.map((row) => row.length));
   const first = matrix[0].map((value) => String(value || '').trim());
-  const looksLikeHeader = first.filter(Boolean).length === width && new Set(first.map((value) => value.toLowerCase())).size === width;
+  const dataLike = (value) => /@|https?:\/\/|^\+?[\d\s()-]{7,}$|^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(value);
+  const looksLikeHeader = first.filter(Boolean).length === width
+    && new Set(first.map((value) => value.toLowerCase())).size === width
+    && !first.some(dataLike);
   const headers = looksLikeHeader ? first : Array.from({ length: width }, (_, index) => `컬럼${index + 1}`);
   const dataRows = looksLikeHeader ? matrix.slice(1) : matrix;
+  const inferredEmailIndex = dataRows.length
+    ? Array.from({ length: width }, (_, index) => dataRows.filter((row) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(row[index] || '').trim())).length)
+      .findIndex((matches) => matches > 0 && matches >= Math.ceil(dataRows.length / 2))
+    : -1;
   state.columns = headers.map((name, index) => ({
     id: makeId(),
-    name: name || `컬럼${index + 1}`,
-    role: /^(이메일|메일|email|e-mail|email address)$/i.test(name) ? 'email' : 'variable'
+    name: inferredEmailIndex === index && !looksLikeHeader ? '이메일' : (name || `컬럼${index + 1}`),
+    role: /^(이메일|메일|email|e-mail|email address)$/i.test(name) || inferredEmailIndex === index ? 'email' : 'variable'
   }));
   state.rows = dataRows.filter((row) => row.some((value) => String(value || '').trim())).map((row) => {
     const record = {};
@@ -233,6 +257,36 @@ function applyTable(matrix) {
   });
   renderRoster();
   updateRosterStatus(`${width}열 × ${state.rows.length}행 구조를 자동 생성했습니다.`);
+  updateComposeState();
+}
+
+function applyMatrixAt(matrix, startRow, startColumn) {
+  if (!matrix.length) return;
+  const width = Math.max(...matrix.map((row) => row.length));
+  while (state.columns.length < startColumn + width) {
+    const index = state.columns.length;
+    state.columns.push({ id: makeId(), name: `컬럼${index + 1}`, role: 'variable' });
+  }
+  matrix.forEach((values, rowOffset) => {
+    const rowIndex = startRow + rowOffset;
+    while (state.rows.length <= rowIndex) state.rows.push({});
+    values.forEach((value, columnOffset) => {
+      const column = state.columns[startColumn + columnOffset];
+      state.rows[rowIndex][column.id] = value;
+    });
+  });
+  if (!state.columns.some((column) => column.role === 'email')) {
+    const emailOffset = Array.from({ length: width }, (_, index) => matrix.filter((row) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(row[index] || '').trim())).length)
+      .findIndex((matches) => matches > 0 && matches >= Math.ceil(matrix.length / 2));
+    if (emailOffset >= 0) {
+      const emailColumn = state.columns[startColumn + emailOffset];
+      emailColumn.role = 'email';
+      if (/^컬럼\d+$/.test(emailColumn.name)) emailColumn.name = '이메일';
+    }
+  }
+  while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
+  renderRoster();
+  updateRosterStatus(`${matrix.length}행 × ${width}열을 셀에 붙여넣었습니다.`);
   updateComposeState();
 }
 
@@ -450,6 +504,19 @@ function bindEvents() {
     state.rows[rowIndex][input.dataset.columnId] = input.value;
     while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
     updateRosterStatus(); updateComposeState();
+  });
+  $('#rosterBody').addEventListener('paste', (event) => {
+    const input = event.target.closest('.cell-input');
+    if (!input) return;
+    const text = event.clipboardData?.getData('text/plain') || '';
+    const matrix = parseDelimited(text);
+    const isStructured = matrix.length > 1 || matrix.some((row) => row.length > 1);
+    if (!isStructured) return;
+    event.preventDefault();
+    const rowIndex = Number(input.dataset.rowIndex) || 0;
+    const columnIndex = Number(input.dataset.columnIndex) || 0;
+    if (input.dataset.pasteAnchor === 'true' && state.columns.length === 0 && rowIndex === 0) applyTable(matrix);
+    else applyMatrixAt(matrix, rowIndex, columnIndex);
   });
   $('#savedRosterItems').addEventListener('click', (event) => { const button = event.target.closest('[data-roster-id]'); if (button) showRosterDetail(button.dataset.rosterId); });
   $('#loadSelectedRoster').addEventListener('click', () => {
