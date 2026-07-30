@@ -15,12 +15,15 @@ button:focus-visible, summary:focus-visible { outline: 1px solid #686868; outlin
 
 .app { display: grid; grid-template-columns: 176px minmax(0, 1fr); min-height: 580px; transition: grid-template-columns .16s ease; }
 .app:not(.drawer-open) { grid-template-columns: 0 minmax(0, 1fr); }
-.drawer { overflow: hidden; background: #f3f3f1; border-right: 1px solid #dededb; padding: 18px 9px; }
+.drawer { display: flex; flex-direction: column; overflow: hidden; background: #f3f3f1; border-right: 1px solid #dededb; padding: 18px 9px; }
 .app:not(.drawer-open) .drawer { padding-inline: 0; border-right: 0; }
 .drawer-title { color: #858585; font-size: 11px; font-weight: 600; letter-spacing: .03em; padding: 0 10px 12px; white-space: nowrap; }
 .nav-item { display: block; width: 100%; border: 0; border-radius: 4px; background: transparent; padding: 9px 10px; text-align: left; color: #5b5b5b; white-space: nowrap; }
 .nav-item:hover { background: #eaeae7; color: #252525; }
 .nav-item.active { background: #e3e3df; color: #1f1f1f; font-weight: 600; }
+.drawer-footer { margin-top: auto; padding-top: 14px; }
+.window-button { border-top: 1px solid #dededb; border-radius: 0; padding-top: 12px; font-size: 12px; }
+.window-button span { display: inline-block; margin-right: 7px; font-size: 14px; }
 
 .main { min-width: 0; padding: 17px 20px 22px; background: #fdfdfc; }
 .header, .header-left, .top-tools, .section-heading, .field > span.badge, .sheet-status, .footer-actions, .inline-control { display: flex; align-items: center; }
@@ -127,6 +130,12 @@ dialog { width: 430px; border: 1px solid #cfcfcb; border-radius: 5px; padding: 1
 dialog::backdrop { background: rgba(32,33,36,.38); }
 dialog form { margin: 0; }
 .connection-status { margin: 4px 0 10px; font-size: 14px; }
+
+body.window-mode { width: 100vw; min-width: 760px; min-height: 100vh; max-height: none; overflow: auto; }
+body.window-mode .app { min-height: 100vh; }
+body.window-mode .main { padding: 22px 28px 32px; }
+body.window-mode .page { max-width: 960px; }
+body.window-mode #openWindowButton { display: none; }
 
 @media (max-width: 520px) {
   body { width: 100vw; }

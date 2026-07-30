@@ -35,6 +35,11 @@ const state = {
 };
 
 const sendReviewState = { items: [], approved: new Set(), index: 0, senderEmail: '', method: '', scheduledAt: '', resolve: null };
+const WORKSPACE_DRAFT_KEY = 'workspaceDraft';
+const isWindowMode = new URLSearchParams(globalThis.location?.search || '').get('mode') === 'window';
+let workspaceSaveTimer = null;
+let restoringWorkspace = false;
+if (isWindowMode) document.body.classList.add('window-mode');
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -59,6 +64,7 @@ function showPage(page) {
   $('#backButton').hidden = true;
   resetSubViews();
   if (page === 'history' || page === 'queue') refreshMailActivity();
+  scheduleWorkspaceSave();
 }
 
 function pushSubView(view) {
@@ -126,6 +132,67 @@ function getCurrentWork() {
   return GmailFlowCore.createWorkItems(getComposeInput());
 }
 
+function captureWorkspace() {
+  return {
+    version: 1,
+    page: state.page,
+    columns: structuredClone(state.columns),
+    rows: structuredClone(state.rows),
+    activeRosterName: state.activeRosterName,
+    activeTemplateId: state.activeTemplateId,
+    activeStructureTemplateId: state.activeStructureTemplateId,
+    emptyDraftEnabled: state.emptyDraftEnabled,
+    compose: {
+      sendMethod: $('#sendMethod').value,
+      label: $('#gmailLabel').value,
+      scheduleDate: $('#scheduleDate').value,
+      scheduleTime: $('#scheduleTime').value,
+      subject: $('#subject').value,
+      body: $('#body').value,
+      postscript: $('#postscript').value,
+      emptyDraftCount: $('#emptyDraftCount').value
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function scheduleWorkspaceSave() {
+  if (restoringWorkspace) return;
+  clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer = setTimeout(flushWorkspaceSave, 120);
+}
+
+function flushWorkspaceSave() {
+  if (restoringWorkspace) return Promise.resolve();
+  clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer = null;
+  return storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
+}
+
+async function restoreWorkspace() {
+  const saved = await storage.get(WORKSPACE_DRAFT_KEY, null);
+  if (!saved?.compose) return;
+  restoringWorkspace = true;
+  state.page = ['compose', 'roster', 'templates', 'history', 'queue'].includes(saved.page) ? saved.page : 'compose';
+  state.columns = Array.isArray(saved.columns) ? saved.columns : [];
+  state.rows = Array.isArray(saved.rows) ? saved.rows : [];
+  state.activeRosterName = saved.activeRosterName || '';
+  state.activeTemplateId = saved.activeTemplateId || '';
+  state.activeStructureTemplateId = saved.activeStructureTemplateId || '';
+  state.emptyDraftEnabled = Boolean(saved.emptyDraftEnabled);
+  $('#sendMethod').value = saved.compose.sendMethod || '임시 저장';
+  $('#gmailLabel').value = saved.compose.label || '';
+  $('#scheduleDate').value = saved.compose.scheduleDate || '';
+  $('#scheduleTime').value = saved.compose.scheduleTime || '09:00';
+  $('#subject').value = saved.compose.subject || '';
+  $('#body').value = saved.compose.body || '';
+  $('#postscript').value = saved.compose.postscript || '';
+  $('#emptyDraftCount').value = saved.compose.emptyDraftCount || '1';
+  $('#emptyDraftToggle').textContent = state.emptyDraftEnabled ? '－' : '＋';
+  $('#emptyDraftToggle').setAttribute('aria-expanded', String(state.emptyDraftEnabled));
+  restoringWorkspace = false;
+}
+
 function updateComposeState() {
   updateActiveRosterText();
   const method = $('#sendMethod').value;
@@ -156,6 +223,7 @@ function updateComposeState() {
   }
   $('#composeHint').classList.toggle('error-text', work.validation.errors.length > 0);
   $('#composeAction').disabled = !work.validation.valid;
+  scheduleWorkspaceSave();
 }
 
 function renderPreviewItem(index) {
@@ -755,6 +823,8 @@ function closeMenus() {
 }
 
 function bindEvents() {
+  document.addEventListener('visibilitychange', () => { if (document.hidden) void flushWorkspaceSave(); });
+  globalThis.addEventListener('pagehide', () => { void flushWorkspaceSave(); });
   document.addEventListener('click', (event) => {
     const clickedMenu = event.target.closest('details.menu');
     $$('details.menu[open]').forEach((menu) => {
@@ -768,6 +838,23 @@ function bindEvents() {
     $('#app').classList.toggle('drawer-open');
     const open = $('#app').classList.contains('drawer-open');
     $('#drawerToggle').textContent = open ? '≪' : '≫';
+  });
+  $('#openWindowButton').addEventListener('click', async () => {
+    $('#openWindowButton').disabled = true;
+    try {
+      await storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
+      await chrome.windows.create({
+        url: chrome.runtime.getURL('popup.html?mode=window'),
+        type: 'popup',
+        width: 920,
+        height: 760,
+        focused: true
+      });
+      globalThis.close();
+    } catch (error) {
+      alert(`창을 열지 못했습니다. ${error.message}`);
+      $('#openWindowButton').disabled = false;
+    }
   });
   $('#backButton').addEventListener('click', goBack);
   $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
@@ -997,6 +1084,7 @@ async function init() {
   state.templates = await storage.get('templates', []);
   state.structureTemplates = await storage.get('structureTemplates', []);
   state.mailBatches = await storage.get('mailBatches', []);
+  await restoreWorkspace();
   bindEvents();
   renderRoster();
   renderSavedRosters();
@@ -1005,6 +1093,7 @@ async function init() {
   renderHistory();
   renderQueue();
   updateComposeState();
+  showPage(state.page);
   try { await updateConnectionStatus(); } catch (_) {}
 }
 
