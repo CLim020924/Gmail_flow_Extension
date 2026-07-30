@@ -32,10 +32,19 @@ h2 { font-size: 16px; font-weight: 650; margin: 0 0 3px; }
 p { margin: 0; }
 .back-button { border: 0; background: transparent; color: #aaa; font-size: 12px; padding: 5px 3px; }
 .back-button:hover, .back-button:focus-visible { color: #252525; }
+.account-button { display: flex; align-items: center; gap: 7px; border: 0; border-radius: 18px; background: transparent; color: #4b4b4b; padding: 3px 7px 3px 3px; font-size: 12px; }
+.account-button:hover { background: #efefed; color: #202124; }
+.account-button #accountButtonText { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-avatar { display: grid; place-items: center; flex: 0 0 auto; width: 27px; height: 27px; border-radius: 50%; background: #5f6368; color: #fff; font-size: 11px; font-weight: 650; }
+.account-avatar.disconnected { background: #fff; border: 1px solid #dadce0; color: #4285f4; }
+.account-avatar.large { width: 42px; height: 42px; font-size: 15px; }
 
 .page { display: none; }
 .page.active { display: block; }
 .muted { color: #8a8a8a; font-size: 12px; }
+.compose-context { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: #454545; }
+.compose-context strong { font-size: 12px; font-weight: 650; white-space: nowrap; }
+.compose-context small { overflow: hidden; color: #8a8a8a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .error-text { color: #a12620; }
 .badge { display: inline-flex; align-items: center; border: 1px solid #d8d8d5; border-radius: 3px; background: #f1f1ef; color: #555; padding: 2px 6px; font-size: 11px; font-weight: 500; }
 .field { display: block; margin-bottom: 12px; font-size: 13px; font-weight: 550; color: #3b3b3b; }
@@ -104,6 +113,14 @@ p { margin: 0; }
 .gmail-message-body { min-height: 150px; padding: 13px 4px 18px 44px; line-height: 1.65; }
 .gmail-message-link { display: inline-block; margin: 2px 0 12px 44px; }
 .preview-message { margin: 9px 0 14px; }
+.account-summary { display: flex; align-items: center; gap: 11px; border-block: 1px solid #e1e5eb; padding: 14px 0; }
+.account-summary strong { display: block; margin-bottom: 2px; font-size: 13px; }
+.send-review-dialog { width: min(660px, calc(100vw - 24px)); }
+.send-review-message { max-height: 310px; overflow-y: auto; }
+.review-check { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0; color: #333; font-size: 13px; }
+.review-check input { margin-top: 2px; }
+.send-review-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.send-review-actions > div { display: flex; gap: 6px; }
 .empty-state { padding: 40px 20px; text-align: center; color: #70757a; }
 
 dialog { width: 430px; border: 1px solid #cfcfcb; border-radius: 5px; padding: 18px; box-shadow: 0 15px 40px rgba(0,0,0,.18); }

@@ -30,8 +30,11 @@ const state = {
   mailBatches: [],
   selectedHistoryBatchId: '',
   selectedHistoryItemId: '',
-  emptyDraftEnabled: false
+  emptyDraftEnabled: false,
+  connectedEmail: ''
 };
+
+const sendReviewState = { items: [], approved: new Set(), index: 0, senderEmail: '', method: '', scheduledAt: '', resolve: null };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -492,13 +495,15 @@ function updateActiveRosterText() {
     .filter((column) => column.role !== 'excluded' && column.name)
     .map((column) => column.name.trim());
   const variableText = variables.map((name) => `{${name}}`).join(', ');
-  const context = state.activeRosterName
-    ? `현재 명단: ${state.activeRosterName} · ${state.rows.length}행`
-    : (state.columns.length ? '편집 중인 명단' : '현재 명단 없음');
-
-  $('#activeRosterText').textContent = variableText
-    ? `${context} · 사용 가능한 변수 ${variableText}`
-    : `${context} · 사용 가능한 변수 0개`;
+  const primary = state.activeRosterName || (state.columns.length ? '편집 중인 명단' : '명단 미선택');
+  const secondary = state.columns.length
+    ? `${state.rows.length}명${variableText ? ` · ${variableText}` : ''}`
+    : '명단을 선택하면 변수가 표시됩니다';
+  const primaryText = document.createElement('strong');
+  const secondaryText = document.createElement('small');
+  primaryText.textContent = primary;
+  secondaryText.textContent = secondary;
+  $('#activeRosterText').replaceChildren(primaryText, secondaryText);
   $('#subject').placeholder = variableText
     ? `사용 가능: ${variableText}`
     : '명단 컬럼을 만든 뒤 변수를 사용할 수 있습니다';
@@ -659,14 +664,86 @@ function showHistoryMessage(itemId) {
   pushSubView('history-message');
 }
 
+function renderSendReviewItem() {
+  const item = sendReviewState.items[sendReviewState.index];
+  if (!item) return;
+  $('#sendReviewRecipient').value = String(sendReviewState.index);
+  $('#sendReviewProgress').textContent = `${sendReviewState.approved.size}/${sendReviewState.items.length}명 확인 · ${sendReviewState.index + 1}/${sendReviewState.items.length}`;
+  $('#sendReviewSubject').textContent = item.subject || '(제목 없음)';
+  $('#sendReviewSender').textContent = sendReviewState.senderEmail ? `나 <${sendReviewState.senderEmail}>` : '나';
+  $('#sendReviewTo').textContent = `받는 사람: ${item.email || '없음'}`;
+  $('#sendReviewBody').textContent = item.body || '(본문 없음)';
+  $('#sendReviewApproved').checked = sendReviewState.approved.has(sendReviewState.index);
+  $('#previousSendReview').disabled = sendReviewState.index === 0;
+  $('#nextSendReview').disabled = sendReviewState.index >= sendReviewState.items.length - 1;
+  $('#confirmSendReview').disabled = sendReviewState.approved.size !== sendReviewState.items.length;
+}
+
+function finishSendReview(approved) {
+  const resolve = sendReviewState.resolve;
+  sendReviewState.resolve = null;
+  if ($('#sendReviewDialog').open) $('#sendReviewDialog').close();
+  resolve?.(approved);
+}
+
+function openSendReview(items, method, scheduledAt, senderEmail) {
+  sendReviewState.items = items;
+  sendReviewState.approved = new Set();
+  sendReviewState.index = 0;
+  sendReviewState.senderEmail = senderEmail;
+  sendReviewState.method = method;
+  sendReviewState.scheduledAt = scheduledAt;
+  $('#sendReviewTitle').textContent = method === '예약 발송' ? '예약 발송 최종 확인' : '즉시 발송 최종 확인';
+  $('#sendReviewRecipient').replaceChildren(...items.map((item, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `${index + 1}. ${item.variables?.이름 || item.email} · ${item.email}`;
+    return option;
+  }));
+  renderSendReviewItem();
+  $('#sendReviewDialog').showModal();
+  return new Promise((resolve) => { sendReviewState.resolve = resolve; });
+}
+
+function accountInitial(email) {
+  return email ? email.trim().charAt(0).toUpperCase() : 'G';
+}
+
 async function updateConnectionStatus() {
   const status = await sendRuntimeMessage({ type: 'connection-status' });
+  state.connectedEmail = status.connected ? status.email || '' : '';
   $('#oauthSetupHelp').hidden = status.configured;
   $('#connectGmail').hidden = status.connected || !status.configured;
+  $('#switchGmail').hidden = !status.connected;
   $('#disconnectGmail').hidden = !status.connected;
+  $('#accountAvatar').textContent = accountInitial(state.connectedEmail);
+  $('#accountSummaryAvatar').textContent = accountInitial(state.connectedEmail);
+  $('#accountAvatar').classList.toggle('disconnected', !status.connected);
+  $('#accountSummaryAvatar').classList.toggle('disconnected', !status.connected);
+  $('#accountButtonText').textContent = status.connected ? (status.email || '연결됨') : 'Google 계정';
+  $('#accountSummaryEmail').textContent = status.connected ? (status.email || 'Google 계정') : '연결된 계정 없음';
   $('#gmailConnectionStatus').textContent = !status.configured
     ? 'OAuth 클라이언트 ID 설정이 필요합니다.'
-    : (status.connected ? `${status.email || 'Google 계정'}에 연결되었습니다.` : 'Gmail 계정이 연결되지 않았습니다.');
+    : (status.connected ? 'Gmail 발송 권한이 연결되어 있습니다.' : 'Google 계정을 연결해 주세요.');
+  return status;
+}
+
+async function requestGmailConnection() {
+  const buttons = [$('#connectGmail'), $('#switchGmail')];
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    await chrome.identity.clearAllCachedAuthTokens();
+    const result = await chrome.identity.getAuthToken({ interactive: true });
+    const token = typeof result === 'string' ? result : result?.token;
+    if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
+    await sendRuntimeMessage({ type: 'resume-after-auth' });
+    await updateConnectionStatus();
+    await refreshMailActivity();
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 
 function escapeHtml(value) {
@@ -707,13 +784,23 @@ function bindEvents() {
   $('#emptyDraftCount').addEventListener('input', updateComposeState);
   $('#previewButton').addEventListener('click', openPersonalizedPreview);
   $('#previewRecipient').addEventListener('change', (event) => renderPreviewItem(Number(event.target.value)));
+  $('#sendReviewRecipient').addEventListener('change', (event) => { sendReviewState.index = Number(event.target.value); renderSendReviewItem(); });
+  $('#sendReviewApproved').addEventListener('change', (event) => {
+    if (event.target.checked) sendReviewState.approved.add(sendReviewState.index);
+    else sendReviewState.approved.delete(sendReviewState.index);
+    renderSendReviewItem();
+  });
+  $('#previousSendReview').addEventListener('click', () => { if (sendReviewState.index > 0) { sendReviewState.index -= 1; renderSendReviewItem(); } });
+  $('#nextSendReview').addEventListener('click', () => { if (sendReviewState.index < sendReviewState.items.length - 1) { sendReviewState.index += 1; renderSendReviewItem(); } });
+  $('#confirmSendReview').addEventListener('click', () => { if (sendReviewState.approved.size === sendReviewState.items.length) finishSendReview(true); });
+  $('#cancelSendReview').addEventListener('click', () => finishSendReview(false));
+  $('#cancelSendReviewTop').addEventListener('click', () => finishSendReview(false));
+  $('#sendReviewDialog').addEventListener('cancel', (event) => { event.preventDefault(); finishSendReview(false); });
   $('#composeAction').addEventListener('click', async () => {
     const work = getCurrentWork();
     if (!work.validation.valid) { alert(work.validation.errors.join('\n')); return; }
     const method = $('#sendMethod').value;
     const count = work.items.length;
-    const message = method === '임시 저장' ? `${count}개의 Gmail 초안을 생성할까요?` : method === '예약 발송' ? `${count}개의 메일을 예약할까요?` : `${count}개의 메일을 지금 발송할까요?`;
-    if (!confirm(message)) return;
     const connection = await sendRuntimeMessage({ type: 'connection-status' });
     if (!connection.configured || !connection.connected) {
       alert(connection.configured ? '먼저 설정에서 Gmail 계정을 연결해주세요.' : '먼저 manifest.json에 Google OAuth 클라이언트 ID를 설정해주세요.');
@@ -728,6 +815,16 @@ function bindEvents() {
       return;
     }
     const scheduledAt = method === '예약 발송' ? new Date(`${$('#scheduleDate').value}T${$('#scheduleTime').value}`).toISOString() : '';
+    if (method === '임시 저장') {
+      if (!confirm(`${count}개의 Gmail 초안을 생성할까요?`)) return;
+    } else {
+      const firstWarning = method === '예약 발송'
+        ? `예약 발송 형식입니다.\n${count}명에게 ${formatDateTime(scheduledAt)}에 발송하시겠습니까?`
+        : `즉시 발송 형식입니다.\n${count}명에게 지금 바로 발송하시겠습니까?`;
+      if (!confirm(firstWarning)) return;
+      const individuallyApproved = await openSendReview(rechecked.items, method, scheduledAt, connection.email || '');
+      if (!individuallyApproved) return;
+    }
     $('#composeAction').disabled = true;
     try {
       const batch = await sendRuntimeMessage({
@@ -862,28 +959,14 @@ function bindEvents() {
     if (state.activeStructureTemplateId === template.id) state.activeStructureTemplateId = '';
     await storage.set('structureTemplates', state.structureTemplates); renderStructureTemplates(); $('#structureTemplateDetail').hidden = true; $('#structureTemplateList').hidden = false; state.backStack.pop();
   });
-  $('#settingsButton').addEventListener('click', async () => {
+  $('#accountButton').addEventListener('click', async () => {
     $('#settingsDialog').showModal();
     try { await updateConnectionStatus(); } catch (error) { $('#gmailConnectionStatus').textContent = error.message; }
   });
-  $('#connectGmail').addEventListener('click', async () => {
-    $('#connectGmail').disabled = true;
-    try {
-      // A previous denial or token can make getAuthToken reuse the old account
-      // without showing a fresh consent window. Reset Identity state only when
-      // the user explicitly asks to connect.
-      await chrome.identity.clearAllCachedAuthTokens();
-      const result = await chrome.identity.getAuthToken({ interactive: true });
-      const token = typeof result === 'string' ? result : result?.token;
-      if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
-      await sendRuntimeMessage({ type: 'resume-after-auth' });
-      await updateConnectionStatus();
-      await refreshMailActivity();
-    } catch (error) { alert(error.message); }
-    finally { $('#connectGmail').disabled = false; }
-  });
+  $('#connectGmail').addEventListener('click', requestGmailConnection);
+  $('#switchGmail').addEventListener('click', requestGmailConnection);
   $('#disconnectGmail').addEventListener('click', async () => {
-    if (!confirm('Gmail 연결을 해제할까요? 예약 작업은 연결 전까지 대기합니다.')) return;
+    if (!confirm('Google 계정에서 로그아웃할까요? 예약 작업은 다시 연결할 때까지 대기합니다.')) return;
     await chrome.identity.clearAllCachedAuthTokens();
     await updateConnectionStatus();
   });
@@ -922,6 +1005,7 @@ async function init() {
   renderHistory();
   renderQueue();
   updateComposeState();
+  try { await updateConnectionStatus(); } catch (_) {}
 }
 
 init();

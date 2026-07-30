@@ -24,12 +24,15 @@
           <h1>메일 자동화</h1>
           <button id="backButton" class="back-button" type="button" hidden>뒤로가기</button>
         </div>
-        <button id="settingsButton" class="ghost icon-button" type="button" aria-label="설정">⚙</button>
+        <button id="accountButton" class="account-button" type="button" aria-label="Google 계정">
+          <span id="accountAvatar" class="account-avatar" aria-hidden="true">G</span>
+          <span id="accountButtonText">Google 계정</span>
+        </button>
       </header>
 
       <section id="page-compose" class="page active" data-page-panel="compose">
         <div class="top-tools">
-          <span id="activeRosterText" class="muted">현재 명단 없음 · 사용 가능한 변수 0개</span>
+          <span id="activeRosterText" class="compose-context"><strong>명단 미선택</strong><small>명단을 선택하면 변수가 표시됩니다</small></span>
           <details class="menu">
             <summary class="button">템플릿 관리 ▾</summary>
             <div class="menu-panel">
@@ -204,12 +207,28 @@
       <button class="primary" value="cancel">확인</button>
     </form>
   </dialog>
+  <dialog id="sendReviewDialog" class="send-review-dialog">
+    <div class="section-heading"><div><h2 id="sendReviewTitle">최종 발송 확인</h2><p id="sendReviewProgress" class="muted"></p></div><button id="cancelSendReviewTop" class="ghost icon-button" type="button" aria-label="닫기">×</button></div>
+    <label class="field">확인할 대상
+      <select id="sendReviewRecipient"></select>
+    </label>
+    <div class="gmail-preview send-review-message">
+      <h3 id="sendReviewSubject" class="gmail-message-subject"></h3>
+      <div class="gmail-message-header"><span class="gmail-avatar" aria-hidden="true">나</span><div><strong id="sendReviewSender">나</strong><p id="sendReviewTo" class="muted"></p></div></div>
+      <div id="sendReviewBody" class="gmail-message-body preline"></div>
+    </div>
+    <label class="review-check"><input id="sendReviewApproved" type="checkbox"> 이 대상에게 전송될 받는 사람·제목·본문을 확인했습니다.</label>
+    <div class="send-review-actions">
+      <button id="cancelSendReview" class="button" type="button">취소</button>
+      <div><button id="previousSendReview" class="button" type="button">이전</button><button id="nextSendReview" class="button" type="button">다음</button><button id="confirmSendReview" class="primary" type="button" disabled>모두 확인하고 발송</button></div>
+    </div>
+  </dialog>
   <dialog id="settingsDialog">
     <form method="dialog">
-      <div class="section-heading"><h2>Gmail 연결</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
-      <p id="gmailConnectionStatus" class="connection-status">연결 상태를 확인하고 있습니다.</p>
+      <div class="section-heading"><h2>Google 계정</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <div class="account-summary"><span id="accountSummaryAvatar" class="account-avatar large" aria-hidden="true">G</span><div><strong id="accountSummaryEmail">연결된 계정 없음</strong><p id="gmailConnectionStatus" class="muted">연결 상태를 확인하고 있습니다.</p></div></div>
       <p id="oauthSetupHelp" class="muted" hidden>Google Cloud에서 Gmail API를 활성화하고 이 확장 프로그램 ID로 만든 OAuth 클라이언트 ID를 manifest.json에 입력해야 합니다.</p>
-      <div class="toolbar"><button id="connectGmail" class="primary" type="button">Gmail 연결</button><button id="disconnectGmail" class="button" type="button" hidden>연결 해제</button></div>
+      <div class="toolbar"><button id="connectGmail" class="primary" type="button">Google 계정 연결</button><button id="switchGmail" class="button" type="button" hidden>계정 변경</button><button id="disconnectGmail" class="button danger" type="button" hidden>로그아웃</button></div>
     </form>
   </dialog>
   <script src="core.js"></script>
