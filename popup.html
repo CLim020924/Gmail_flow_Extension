@@ -151,10 +151,12 @@
         </div>
         <div id="templateDetailView" hidden>
           <div class="section-heading"><div><h2 id="templateDetailName"></h2><p class="muted">저장된 메일 템플릿</p></div><button id="applyTemplate" class="primary" type="button">이 템플릿 사용</button></div>
-          <div class="detail-block"><small>발송 방식 · 라벨(구분)</small><p id="templateDetailMeta"></p></div>
-          <div class="detail-block"><small>제목</small><p id="templateDetailSubject"></p></div>
-          <div class="detail-block"><small>본문</small><p id="templateDetailBody" class="preline"></p></div>
-          <div class="detail-block"><small>추신</small><p id="templateDetailPostscript" class="preline"></p></div>
+          <p id="templateDetailMeta" class="muted gmail-preview-context"></p>
+          <div class="gmail-preview">
+            <h3 id="templateDetailSubject" class="gmail-message-subject"></h3>
+            <div class="gmail-message-header"><span class="gmail-avatar" aria-hidden="true">나</span><div><strong>나</strong><p class="muted">받는 사람: 명단 적용 시 결정</p></div></div>
+            <div id="templateDetailBody" class="gmail-message-body preline"></div>
+          </div>
           <div class="toolbar"><button id="renameTemplate" class="button" type="button">이름 변경</button><button id="deleteTemplate" class="button danger" type="button">삭제</button></div>
         </div>
       </section>
@@ -169,9 +171,13 @@
           <div id="historyRecipients" class="list"></div>
         </div>
         <div id="historyMessageView" hidden>
-          <div class="section-heading"><div><h2 id="historyMessageName"></h2><p id="historyMessageMeta" class="muted"></p></div><span id="historyMessageStatus" class="badge"></span></div>
-          <div class="detail-block"><small>실제로 발송된 제목</small><p id="historyMessageSubject"></p></div>
-          <div class="detail-block"><small>실제로 발송된 본문</small><p id="historyMessageBody" class="preline"></p></div>
+          <div class="section-heading"><div><h2 id="historyMessageSubject"></h2><p id="historyMessageMeta" class="muted"></p></div><span id="historyMessageStatus" class="badge"></span></div>
+          <div class="gmail-message-header">
+            <span class="gmail-avatar" aria-hidden="true">나</span>
+            <div><strong id="historyMessageSender">나</strong><p id="historyMessageRecipient" class="muted"></p></div>
+          </div>
+          <div id="historyMessageBody" class="gmail-message-body preline"></div>
+          <a id="historyMessageGmailLink" class="button gmail-message-link" target="_blank" rel="noopener noreferrer" hidden></a>
           <div id="historyMessageErrorBlock" class="detail-block" hidden><small>오류</small><p id="historyMessageError"></p></div>
         </div>
       </section>
@@ -190,8 +196,11 @@
         <select id="previewRecipient"></select>
       </label>
       <p id="previewMeta" class="muted"></p>
-      <div class="detail-block"><small>제목</small><p id="previewSubject"></p></div>
-      <div class="detail-block"><small>본문</small><p id="previewBody" class="preline"></p></div>
+      <div class="gmail-preview preview-message">
+        <h3 id="previewSubject" class="gmail-message-subject"></h3>
+        <div class="gmail-message-header"><span class="gmail-avatar" aria-hidden="true">나</span><div><strong>나</strong><p id="previewTo" class="muted"></p></div></div>
+        <div id="previewBody" class="gmail-message-body preline"></div>
+      </div>
       <button class="primary" value="cancel">확인</button>
     </form>
   </dialog>

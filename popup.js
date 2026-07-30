@@ -162,6 +162,7 @@ function renderPreviewItem(index) {
   $('#previewMeta').textContent = item.type === 'blank'
     ? `추가 빈 초안 ${index - work.items.filter((entry) => entry.type === 'roster').length + 1}`
     : `명단 ${item.rowNumber}행 · ${item.email || '받는 사람 없음'}`;
+  $('#previewTo').textContent = `받는 사람: ${item.email || '없음'}`;
   $('#previewSubject').textContent = item.subject || '(제목 없음)';
   $('#previewBody').textContent = item.body || '(본문 없음)';
 }
@@ -546,8 +547,7 @@ function showTemplateDetail(id) {
   $('#templateDetailName').textContent = template.name;
   $('#templateDetailMeta').textContent = `${template.sendMethod || '임시 저장'} · ${template.label ? `라벨 ${template.label}` : '라벨 없음'}`;
   $('#templateDetailSubject').textContent = template.subject || '(제목 없음)';
-  $('#templateDetailBody').textContent = template.body || '(본문 없음)';
-  $('#templateDetailPostscript').textContent = template.postscript || '(추신 없음)';
+  $('#templateDetailBody').textContent = [template.body, template.postscript].filter((value) => String(value || '').trim()).join('\n\n') || '(본문 없음)';
   pushSubView('template-detail');
 }
 
@@ -619,11 +619,17 @@ function showHistoryBatch(id) {
     button.type = 'button';
     button.className = 'list-row';
     button.dataset.historyItemId = item.id;
-    const displayName = item.variables?.이름 || item.email || (item.type === 'blank' ? `빈 초안 ${index + 1}` : `데이터 ${index + 1}`);
-    button.innerHTML = `<span>${escapeHtml(displayName)}<br><small class="muted">${escapeHtml(item.email || '받는 사람 없음')}</small></span><span class="badge">${escapeHtml(statusText(item.status))}</span>`;
+    const recipient = getHistoryRecipient(item);
+    const displayName = item.variables?.이름 || recipient || (item.type === 'blank' ? `빈 초안 ${index + 1}` : `데이터 ${index + 1}`);
+    button.innerHTML = `<span>${escapeHtml(displayName)}<br><small class="muted">${escapeHtml(recipient || '받는 사람 없음')}</small></span><span class="badge">${escapeHtml(statusText(item.status))}</span>`;
     return button;
   }));
   pushSubView('history-recipients');
+}
+
+function getHistoryRecipient(item) {
+  if (item.email) return item.email;
+  return Object.entries(item.variables || {}).find(([name, value]) => /^(이메일|메일|email|e-mail|email address)$/i.test(name.trim()) && GmailFlowCore.isValidEmail(value))?.[1] || '';
 }
 
 function showHistoryMessage(itemId) {
@@ -633,11 +639,21 @@ function showHistoryMessage(itemId) {
   state.selectedHistoryItemId = itemId;
   $('#historyRecipientsView').hidden = true;
   $('#historyMessageView').hidden = false;
-  $('#historyMessageName').textContent = item.variables?.이름 ? `${item.variables.이름} 대상 메시지` : (item.email || '받는 사람 없는 초안');
-  $('#historyMessageMeta').textContent = `${item.email || '받는 사람 없음'} · ${formatDateTime(item.updatedAt)}`;
+  const recipient = getHistoryRecipient(item);
+  $('#historyMessageMeta').textContent = formatDateTime(item.updatedAt);
   $('#historyMessageStatus').textContent = statusText(item.status);
   $('#historyMessageSubject').textContent = item.subject || '(제목 없음)';
+  $('#historyMessageSender').textContent = batch.senderEmail ? `나 <${batch.senderEmail}>` : '나';
+  $('#historyMessageRecipient').textContent = `받는 사람: ${recipient || '없음'}`;
   $('#historyMessageBody').textContent = item.body || '(본문 없음)';
+  const isDraft = batch.method === '임시 저장' || item.status === 'scheduled';
+  const gmailId = isDraft ? (item.threadId || item.draftId) : (item.threadId || item.messageId);
+  const gmailLink = $('#historyMessageGmailLink');
+  gmailLink.hidden = !gmailId;
+  gmailLink.textContent = isDraft ? 'Gmail에서 임시메일 열기' : 'Gmail에서 메일 열기';
+  gmailLink.href = gmailId
+    ? `https://mail.google.com/mail/${batch.senderEmail ? `?authuser=${encodeURIComponent(batch.senderEmail)}` : ''}#${isDraft ? 'drafts' : 'sent'}/${encodeURIComponent(gmailId)}`
+    : '';
   $('#historyMessageErrorBlock').hidden = !item.error;
   $('#historyMessageError').textContent = item.error || '';
   pushSubView('history-message');
@@ -722,6 +738,7 @@ function bindEvents() {
           label: $('#gmailLabel').value,
           subject: $('#subject').value,
           scheduledAt,
+          senderEmail: connection.email || '',
           items: rechecked.items
         }
       });

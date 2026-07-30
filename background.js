@@ -278,6 +278,7 @@ async function enqueueBatch(payload) {
     id: crypto.randomUUID(),
     name: String(payload.name || payload.label || payload.subject || payload.method || '메일 작업').trim(),
     method: payload.method,
+    senderEmail: String(payload.senderEmail || '').trim(),
     label: payload.method === '즉시 발송' ? '' : String(payload.label || '').trim(),
     scheduleLabel: payload.method === '예약 발송' && payload.scheduledAt
       ? `예약_${new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(payload.scheduledAt)).replace(' ', '_').replace(':', '시')}분`

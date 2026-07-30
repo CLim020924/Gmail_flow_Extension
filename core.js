@@ -42,7 +42,10 @@
   }
 
   function getEmailColumns(columns) {
-    return (columns || []).filter((column) => column.role === 'email');
+    const explicit = (columns || []).filter((column) => column.role === 'email');
+    if (explicit.length) return explicit;
+    const inferred = usableColumns(columns).filter((column) => /^(이메일|메일|email|e-mail|email address)$/i.test(cleanText(column.name)));
+    return inferred.length === 1 ? inferred : [];
   }
 
   function validateLabel(label) {
