@@ -852,6 +852,10 @@ function bindEvents() {
   $('#connectGmail').addEventListener('click', async () => {
     $('#connectGmail').disabled = true;
     try {
+      // A previous denial or token can make getAuthToken reuse the old account
+      // without showing a fresh consent window. Reset Identity state only when
+      // the user explicitly asks to connect.
+      await chrome.identity.clearAllCachedAuthTokens();
       const result = await chrome.identity.getAuthToken({ interactive: true });
       const token = typeof result === 'string' ? result : result?.token;
       if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
