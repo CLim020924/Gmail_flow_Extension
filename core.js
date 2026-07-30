@@ -62,7 +62,7 @@
     const duplicateVariables = variableNames.filter((name, index) => variableNames.indexOf(name) !== index);
     if (duplicateVariables.length) errors.push(`중복된 컬럼 이름이 있습니다: ${[...new Set(duplicateVariables)].join(', ')}`);
 
-    const requestedVariables = extractVariables(input.subject, input.body);
+    const requestedVariables = extractVariables(input.subject, input.body, input.postscript);
     const unknownVariables = requestedVariables.filter((name) => !variableNames.includes(name));
     if (unknownVariables.length) errors.push(`명단에 없는 변수가 있습니다: ${unknownVariables.map((name) => `{${name}}`).join(', ')}`);
 
@@ -107,6 +107,7 @@
   function createWorkItems(input) {
     const validation = validateCompose(input);
     const emailColumn = validation.emailColumns[0];
+    const bodyTemplate = [String(input.body || '').trim(), String(input.postscript || '').trim()].filter(Boolean).join('\n\n');
     const items = validation.rows.map((row, index) => {
       const variables = createVariableMap(input.columns, row);
       const email = emailColumn ? cleanText(row[emailColumn.id]).toLowerCase() : '';
@@ -117,7 +118,7 @@
         email,
         variables,
         subject: renderText(input.subject, variables),
-        body: renderText(input.body, variables)
+        body: renderText(bodyTemplate, variables)
       };
     });
 
@@ -133,7 +134,7 @@
         email: '',
         variables: { ...blankVariables },
         subject: renderText(input.subject, blankVariables),
-        body: renderText(input.body, blankVariables)
+        body: renderText(bodyTemplate, blankVariables)
       });
     }
     return { validation, items };

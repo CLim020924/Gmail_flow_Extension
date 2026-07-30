@@ -24,7 +24,7 @@
           <h1>메일 자동화</h1>
           <button id="backButton" class="back-button" type="button" hidden>뒤로가기</button>
         </div>
-        <button class="ghost icon-button" type="button" aria-label="설정">⚙</button>
+        <button id="settingsButton" class="ghost icon-button" type="button" aria-label="설정">⚙</button>
       </header>
 
       <section id="page-compose" class="page active" data-page-panel="compose">
@@ -69,6 +69,12 @@
         <label class="field">내용
           <textarea id="body" placeholder="현재 사용할 수 있는 변수가 없습니다"></textarea>
         </label>
+        <details class="optional-section">
+          <summary>추신 추가</summary>
+          <label class="field">추신 <small>선택</small>
+            <textarea id="postscript" placeholder="본문 뒤에 빈 줄을 두고 추가됩니다"></textarea>
+          </label>
+        </details>
         <p id="composeHint" class="muted">명단을 선택하거나 빈 초안 기능을 켜주세요.</p>
         <div class="footer-actions">
           <button id="composeAction" class="primary" type="button" disabled>임시 저장</button>
@@ -148,29 +154,31 @@
           <div class="detail-block"><small>발송 방식 · 라벨(구분)</small><p id="templateDetailMeta"></p></div>
           <div class="detail-block"><small>제목</small><p id="templateDetailSubject"></p></div>
           <div class="detail-block"><small>본문</small><p id="templateDetailBody" class="preline"></p></div>
+          <div class="detail-block"><small>추신</small><p id="templateDetailPostscript" class="preline"></p></div>
           <div class="toolbar"><button id="renameTemplate" class="button" type="button">이름 변경</button><button id="deleteTemplate" class="button danger" type="button">삭제</button></div>
         </div>
       </section>
 
       <section id="page-history" class="page" data-page-panel="history">
         <div id="historyListView">
-          <div class="section-heading"><div><h2>발송 기록</h2><p class="muted">작업을 누르면 대상자별 결과를 확인합니다.</p></div></div>
-          <div class="list"><button id="demoHistory" class="list-row" type="button"><span>인터뷰 안내</span><span class="muted">12/12 완료</span></button></div>
+          <div class="section-heading"><div><h2>발송 기록</h2><p class="muted">작업을 더블클릭하면 대상자별 결과를 확인합니다.</p></div></div>
+          <div id="historyItems" class="list"></div>
         </div>
         <div id="historyRecipientsView" hidden>
-          <div class="section-heading"><div><h2>인터뷰 안내</h2><p class="muted">2026-07-30 14:20 · 성공 12</p></div></div>
+          <div class="section-heading"><div><h2 id="historyBatchName"></h2><p id="historyBatchMeta" class="muted"></p></div><button id="deleteHistoryBatch" class="button danger" type="button">기록 삭제</button></div>
           <div id="historyRecipients" class="list"></div>
         </div>
         <div id="historyMessageView" hidden>
-          <div class="section-heading"><div><h2 id="historyMessageName"></h2><p id="historyMessageMeta" class="muted"></p></div><span class="badge">발송 성공</span></div>
+          <div class="section-heading"><div><h2 id="historyMessageName"></h2><p id="historyMessageMeta" class="muted"></p></div><span id="historyMessageStatus" class="badge"></span></div>
           <div class="detail-block"><small>실제로 발송된 제목</small><p id="historyMessageSubject"></p></div>
           <div class="detail-block"><small>실제로 발송된 본문</small><p id="historyMessageBody" class="preline"></p></div>
+          <div id="historyMessageErrorBlock" class="detail-block" hidden><small>오류</small><p id="historyMessageError"></p></div>
         </div>
       </section>
 
       <section id="page-queue" class="page" data-page-panel="queue">
         <div class="section-heading"><div><h2>작업 큐</h2><p class="muted">예약·대기·재시도 작업을 표시합니다.</p></div></div>
-        <div class="empty-state">아직 등록된 작업이 없습니다.</div>
+        <div id="queueItems" class="list"></div>
       </section>
     </main>
   </div>
@@ -185,6 +193,14 @@
       <div class="detail-block"><small>제목</small><p id="previewSubject"></p></div>
       <div class="detail-block"><small>본문</small><p id="previewBody" class="preline"></p></div>
       <button class="primary" value="cancel">확인</button>
+    </form>
+  </dialog>
+  <dialog id="settingsDialog">
+    <form method="dialog">
+      <div class="section-heading"><h2>Gmail 연결</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <p id="gmailConnectionStatus" class="connection-status">연결 상태를 확인하고 있습니다.</p>
+      <p id="oauthSetupHelp" class="muted" hidden>Google Cloud에서 Gmail API를 활성화하고 이 확장 프로그램 ID로 만든 OAuth 클라이언트 ID를 manifest.json에 입력해야 합니다.</p>
+      <div class="toolbar"><button id="connectGmail" class="primary" type="button">Gmail 연결</button><button id="disconnectGmail" class="button" type="button" hidden>연결 해제</button></div>
     </form>
   </dialog>
   <script src="core.js"></script>

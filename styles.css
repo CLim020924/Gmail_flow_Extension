@@ -46,6 +46,11 @@ p { margin: 0; }
 .field textarea { min-height: 116px; resize: vertical; }
 .schedule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .inline-control { justify-content: flex-start; gap: 0; margin: 2px 0 9px; font-size: 13px; font-weight: 550; color: #3b3b3b; }
+.optional-section { margin: -2px 0 12px; }
+.optional-section > summary { color: #777; cursor: pointer; font-size: 12px; }
+.optional-section[open] > summary { margin-bottom: 8px; color: #333; }
+.optional-section .field { margin-bottom: 0; }
+.optional-section textarea { min-height: 72px; }
 .compact-input { width: 120px; margin: 0 0 10px; }
 
 .button, .primary, .ghost, .menu-panel button, .menu-file { border: 1px solid #d2d2ce; border-radius: 4px; background: #fff; color: #333; padding: 8px 11px; text-decoration: none; }
@@ -86,6 +91,8 @@ p { margin: 0; }
 .list { display: grid; gap: 2px; }
 .list-row { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 0; border-bottom: 1px solid #e7eaee; background: transparent; padding: 11px 5px; text-align: left; }
 .list-row:hover { background: #f8fafd; }
+.queue-entry { cursor: default; }
+.compact-action { flex: 0 0 auto; padding: 5px 8px; font-size: 12px; }
 .detail-block { border-top: 1px solid #e1e5eb; padding: 11px 0; }
 .preline { white-space: pre-line; }
 .empty-state { padding: 40px 20px; text-align: center; color: #70757a; }
@@ -93,6 +100,7 @@ p { margin: 0; }
 dialog { width: 430px; border: 1px solid #cfcfcb; border-radius: 5px; padding: 18px; box-shadow: 0 15px 40px rgba(0,0,0,.18); }
 dialog::backdrop { background: rgba(32,33,36,.38); }
 dialog form { margin: 0; }
+.connection-status { margin: 4px 0 10px; font-size: 14px; }
 
 @media (max-width: 520px) {
   body { width: 100vw; }

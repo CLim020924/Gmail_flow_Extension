@@ -27,6 +27,9 @@ const state = {
   selectedStructureTemplateId: '',
   activeTemplateId: '',
   activeStructureTemplateId: '',
+  mailBatches: [],
+  selectedHistoryBatchId: '',
+  selectedHistoryItemId: '',
   emptyDraftEnabled: false
 };
 
@@ -52,6 +55,7 @@ function showPage(page) {
   state.backStack = [];
   $('#backButton').hidden = true;
   resetSubViews();
+  if (page === 'history' || page === 'queue') refreshMailActivity();
 }
 
 function pushSubView(view) {
@@ -109,6 +113,7 @@ function getComposeInput() {
     scheduleTime: $('#scheduleTime').value,
     subject: $('#subject').value,
     body: $('#body').value,
+    postscript: $('#postscript').value,
     emptyDraftEnabled: state.emptyDraftEnabled,
     emptyDraftCount: $('#emptyDraftCount').value
   };
@@ -475,6 +480,7 @@ function applyMailTemplate(template) {
   state.activeTemplateId = template.id;
   $('#subject').value = template.subject || '';
   $('#body').value = template.body || '';
+  $('#postscript').value = template.postscript || '';
   $('#gmailLabel').value = template.label || '';
   $('#sendMethod').value = template.sendMethod || '임시 저장';
   updateComposeState();
@@ -498,6 +504,9 @@ function updateActiveRosterText() {
   $('#body').placeholder = variableText
     ? `본문에 ${variableText} 형식으로 입력하세요`
     : '현재 사용할 수 있는 변수가 없습니다';
+  $('#postscript').placeholder = variableText
+    ? `추신에도 ${variableText} 형식으로 사용할 수 있습니다`
+    : '본문 뒤에 빈 줄을 두고 추가됩니다';
 }
 
 function renderTemplates() {
@@ -520,8 +529,8 @@ async function saveTemplate() {
   const name = prompt('저장할 메일 템플릿 이름을 입력하세요.', '새 템플릿');
   if (!name?.trim()) return;
   if (name.trim().length > 50) { alert('템플릿 이름은 50자 이하여야 합니다.'); return; }
-  if (!$('#subject').value.trim() && !$('#body').value.trim()) { alert('제목이나 본문 중 하나는 입력해야 합니다.'); return; }
-  const template = { id: makeId(), name: name.trim(), subject: $('#subject').value, body: $('#body').value, label: $('#gmailLabel').value, sendMethod: $('#sendMethod').value, createdAt: new Date().toISOString() };
+  if (!$('#subject').value.trim() && !$('#body').value.trim() && !$('#postscript').value.trim()) { alert('제목, 본문, 추신 중 하나는 입력해야 합니다.'); return; }
+  const template = { id: makeId(), name: name.trim(), subject: $('#subject').value, body: $('#body').value, postscript: $('#postscript').value, label: $('#gmailLabel').value, sendMethod: $('#sendMethod').value, createdAt: new Date().toISOString() };
   state.templates.unshift(template);
   state.activeTemplateId = template.id;
   await storage.set('templates', state.templates);
@@ -538,23 +547,110 @@ function showTemplateDetail(id) {
   $('#templateDetailMeta').textContent = `${template.sendMethod || '임시 저장'} · ${template.label ? `라벨 ${template.label}` : '라벨 없음'}`;
   $('#templateDetailSubject').textContent = template.subject || '(제목 없음)';
   $('#templateDetailBody').textContent = template.body || '(본문 없음)';
+  $('#templateDetailPostscript').textContent = template.postscript || '(추신 없음)';
   pushSubView('template-detail');
 }
 
-function renderHistoryRecipients() {
-  const people = [
-    { name: '김민아', email: 'mina@example.com', company: '코덱스랩' },
-    { name: '박지수', email: 'jisu@example.com', company: '오픈스튜디오' },
-    { name: '이준호', email: 'jun@example.com', company: '메일웍스' }
-  ];
-  $('#historyRecipients').replaceChildren(...people.map((person) => {
+const STATUS_TEXT = { queued: '대기', processing: '처리 중', scheduled: '예약 대기', 'waiting-auth': 'Gmail 연결 필요', completed: '완료', failed: '실패', canceled: '취소' };
+
+function statusText(status) { return STATUS_TEXT[status] || status || '대기'; }
+
+function formatDateTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+async function sendRuntimeMessage(message) {
+  if (!globalThis.chrome?.runtime?.sendMessage) throw new Error('확장 프로그램을 새로고침한 뒤 다시 시도해주세요.');
+  const response = await chrome.runtime.sendMessage(message);
+  if (!response?.ok) throw new Error(response?.error || '백그라운드 작업에 실패했습니다.');
+  return response.data;
+}
+
+async function refreshMailActivity() {
+  state.mailBatches = await storage.get('mailBatches', []);
+  renderHistory();
+  renderQueue();
+}
+
+function renderHistory() {
+  const container = $('#historyItems');
+  if (!state.mailBatches.length) {
+    container.innerHTML = '<div class="empty-state">아직 저장된 작업 기록이 없습니다.</div>';
+    return;
+  }
+  container.replaceChildren(...state.mailBatches.map((batch) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'list-row';
-    button.dataset.person = JSON.stringify(person);
-    button.innerHTML = `<span>${person.name}<br><small class="muted">${person.email}</small></span><span class="badge">성공</span>`;
+    button.dataset.historyBatchId = batch.id;
+    button.title = '더블클릭하여 대상별 기록 보기';
+    button.innerHTML = `<span>${escapeHtml(batch.name)}<br><small class="muted">${escapeHtml(formatDateTime(batch.createdAt))} · ${escapeHtml(batch.method)}</small></span><span class="badge">${escapeHtml(statusText(batch.status))} ${batch.completed || 0}/${batch.total || batch.items.length}</span>`;
     return button;
   }));
+}
+
+function renderQueue() {
+  const container = $('#queueItems');
+  const active = state.mailBatches.filter((batch) => !['completed', 'failed', 'canceled'].includes(batch.status));
+  if (!active.length) {
+    container.innerHTML = '<div class="empty-state">대기 중인 작업이 없습니다.</div>';
+    return;
+  }
+  container.replaceChildren(...active.map((batch) => {
+    const row = document.createElement('div');
+    row.className = 'list-row queue-entry';
+    row.innerHTML = `<span>${escapeHtml(batch.name)}<br><small class="muted">${escapeHtml(statusText(batch.status))}${batch.scheduledAt ? ` · ${escapeHtml(formatDateTime(batch.scheduledAt))}` : ''}</small></span><button class="button danger compact-action" type="button" data-cancel-batch-id="${escapeHtml(batch.id)}">취소</button>`;
+    return row;
+  }));
+}
+
+function showHistoryBatch(id) {
+  const batch = state.mailBatches.find((item) => item.id === id);
+  if (!batch) return;
+  state.selectedHistoryBatchId = id;
+  $('#historyListView').hidden = true;
+  $('#historyRecipientsView').hidden = false;
+  $('#historyBatchName').textContent = batch.name;
+  $('#historyBatchMeta').textContent = `${formatDateTime(batch.createdAt)} · ${batch.method} · ${statusText(batch.status)} ${batch.completed || 0}/${batch.total || batch.items.length}`;
+  $('#historyRecipients').replaceChildren(...batch.items.map((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'list-row';
+    button.dataset.historyItemId = item.id;
+    const displayName = item.variables?.이름 || item.email || (item.type === 'blank' ? `빈 초안 ${index + 1}` : `데이터 ${index + 1}`);
+    button.innerHTML = `<span>${escapeHtml(displayName)}<br><small class="muted">${escapeHtml(item.email || '받는 사람 없음')}</small></span><span class="badge">${escapeHtml(statusText(item.status))}</span>`;
+    return button;
+  }));
+  pushSubView('history-recipients');
+}
+
+function showHistoryMessage(itemId) {
+  const batch = state.mailBatches.find((entry) => entry.id === state.selectedHistoryBatchId);
+  const item = batch?.items.find((entry) => entry.id === itemId);
+  if (!batch || !item) return;
+  state.selectedHistoryItemId = itemId;
+  $('#historyRecipientsView').hidden = true;
+  $('#historyMessageView').hidden = false;
+  $('#historyMessageName').textContent = item.variables?.이름 ? `${item.variables.이름} 대상 메시지` : (item.email || '받는 사람 없는 초안');
+  $('#historyMessageMeta').textContent = `${item.email || '받는 사람 없음'} · ${formatDateTime(item.updatedAt)}`;
+  $('#historyMessageStatus').textContent = statusText(item.status);
+  $('#historyMessageSubject').textContent = item.subject || '(제목 없음)';
+  $('#historyMessageBody').textContent = item.body || '(본문 없음)';
+  $('#historyMessageErrorBlock').hidden = !item.error;
+  $('#historyMessageError').textContent = item.error || '';
+  pushSubView('history-message');
+}
+
+async function updateConnectionStatus() {
+  const status = await sendRuntimeMessage({ type: 'connection-status' });
+  $('#oauthSetupHelp').hidden = status.configured;
+  $('#connectGmail').hidden = status.connected || !status.configured;
+  $('#disconnectGmail').hidden = !status.connected;
+  $('#gmailConnectionStatus').textContent = !status.configured
+    ? 'OAuth 클라이언트 ID 설정이 필요합니다.'
+    : (status.connected ? `${status.email || 'Google 계정'}에 연결되었습니다.` : 'Gmail 계정이 연결되지 않았습니다.');
 }
 
 function escapeHtml(value) {
@@ -583,7 +679,7 @@ function bindEvents() {
   $('#backButton').addEventListener('click', goBack);
   $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
   $('#sendMethod').addEventListener('change', updateComposeState);
-  ['gmailLabel', 'scheduleDate', 'scheduleTime', 'subject', 'body'].forEach((id) => {
+  ['gmailLabel', 'scheduleDate', 'scheduleTime', 'subject', 'body', 'postscript'].forEach((id) => {
     $(`#${id}`).addEventListener('input', updateComposeState);
   });
   $('#emptyDraftToggle').addEventListener('click', () => {
@@ -595,6 +691,49 @@ function bindEvents() {
   $('#emptyDraftCount').addEventListener('input', updateComposeState);
   $('#previewButton').addEventListener('click', openPersonalizedPreview);
   $('#previewRecipient').addEventListener('change', (event) => renderPreviewItem(Number(event.target.value)));
+  $('#composeAction').addEventListener('click', async () => {
+    const work = getCurrentWork();
+    if (!work.validation.valid) { alert(work.validation.errors.join('\n')); return; }
+    const method = $('#sendMethod').value;
+    const count = work.items.length;
+    const message = method === '임시 저장' ? `${count}개의 Gmail 초안을 생성할까요?` : method === '예약 발송' ? `${count}개의 메일을 예약할까요?` : `${count}개의 메일을 지금 발송할까요?`;
+    if (!confirm(message)) return;
+    const connection = await sendRuntimeMessage({ type: 'connection-status' });
+    if (!connection.configured || !connection.connected) {
+      alert(connection.configured ? '먼저 설정에서 Gmail 계정을 연결해주세요.' : '먼저 manifest.json에 Google OAuth 클라이언트 ID를 설정해주세요.');
+      $('#settingsDialog').showModal();
+      await updateConnectionStatus();
+      return;
+    }
+    const rechecked = getCurrentWork();
+    if (!rechecked.validation.valid || rechecked.items.length !== count || $('#sendMethod').value !== method) {
+      alert('확인 중 명단이나 발송 설정이 변경되었습니다. 다시 확인해주세요.');
+      updateComposeState();
+      return;
+    }
+    const scheduledAt = method === '예약 발송' ? new Date(`${$('#scheduleDate').value}T${$('#scheduleTime').value}`).toISOString() : '';
+    $('#composeAction').disabled = true;
+    try {
+      const batch = await sendRuntimeMessage({
+        type: 'enqueue-mail-batch',
+        payload: {
+          name: $('#gmailLabel').value.trim() || $('#subject').value.trim() || method,
+          method,
+          label: $('#gmailLabel').value,
+          subject: $('#subject').value,
+          scheduledAt,
+          items: rechecked.items
+        }
+      });
+      await refreshMailActivity();
+      alert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}`);
+      showPage(method === '예약 발송' ? 'queue' : 'history');
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      updateComposeState();
+    }
+  });
   $('#saveMailTemplate').addEventListener('click', async () => { closeMenus(); await saveTemplate(); });
   $('#loadMailTemplate').addEventListener('click', () => { closeMenus(); showPage('templates'); });
   $('#saveRoster').addEventListener('click', saveCurrentRoster);
@@ -706,27 +845,61 @@ function bindEvents() {
     if (state.activeStructureTemplateId === template.id) state.activeStructureTemplateId = '';
     await storage.set('structureTemplates', state.structureTemplates); renderStructureTemplates(); $('#structureTemplateDetail').hidden = true; $('#structureTemplateList').hidden = false; state.backStack.pop();
   });
-  $('#demoHistory').addEventListener('click', () => { $('#historyListView').hidden = true; $('#historyRecipientsView').hidden = false; pushSubView('history-recipients'); });
-  $('#historyRecipients').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-person]'); if (!button) return;
-    const person = JSON.parse(button.dataset.person); $('#historyRecipientsView').hidden = true; $('#historyMessageView').hidden = false;
-    $('#historyMessageName').textContent = `${person.name}님에게 보낸 메시지`; $('#historyMessageMeta').textContent = `${person.email} · 2026-07-30 14:20`;
-    $('#historyMessageSubject').textContent = `${person.name}님, 1차 인터뷰 안내입니다`;
-    $('#historyMessageBody').textContent = `안녕하세요 ${person.name}님.\n${person.company}의 1차 인터뷰 일정을 안내드립니다.`;
-    pushSubView('history-message');
+  $('#settingsButton').addEventListener('click', async () => {
+    $('#settingsDialog').showModal();
+    try { await updateConnectionStatus(); } catch (error) { $('#gmailConnectionStatus').textContent = error.message; }
   });
+  $('#connectGmail').addEventListener('click', async () => {
+    $('#connectGmail').disabled = true;
+    try {
+      const result = await chrome.identity.getAuthToken({ interactive: true });
+      const token = typeof result === 'string' ? result : result?.token;
+      if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
+      await sendRuntimeMessage({ type: 'resume-after-auth' });
+      await updateConnectionStatus();
+      await refreshMailActivity();
+    } catch (error) { alert(error.message); }
+    finally { $('#connectGmail').disabled = false; }
+  });
+  $('#disconnectGmail').addEventListener('click', async () => {
+    if (!confirm('Gmail 연결을 해제할까요? 예약 작업은 연결 전까지 대기합니다.')) return;
+    await chrome.identity.clearAllCachedAuthTokens();
+    await updateConnectionStatus();
+  });
+  $('#historyItems').addEventListener('dblclick', (event) => {
+    const button = event.target.closest('[data-history-batch-id]'); if (button) showHistoryBatch(button.dataset.historyBatchId);
+  });
+  $('#historyRecipients').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-history-item-id]'); if (button) showHistoryMessage(button.dataset.historyItemId);
+  });
+  $('#deleteHistoryBatch').addEventListener('click', async () => {
+    const batch = state.mailBatches.find((item) => item.id === state.selectedHistoryBatchId); if (!batch || !confirm(`“${batch.name}” 기록을 삭제할까요?`)) return;
+    try {
+      await sendRuntimeMessage({ type: 'delete-mail-batch', batchId: batch.id });
+      await refreshMailActivity(); $('#historyRecipientsView').hidden = true; $('#historyListView').hidden = false; state.backStack.pop(); $('#backButton').hidden = state.backStack.length === 0;
+    } catch (error) { alert(error.message); }
+  });
+  $('#queueItems').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-cancel-batch-id]'); if (!button) return;
+    const batch = state.mailBatches.find((item) => item.id === button.dataset.cancelBatchId); if (!batch || !confirm(`“${batch.name}” 작업을 취소할까요?`)) return;
+    try { await sendRuntimeMessage({ type: 'cancel-mail-batch', batchId: batch.id }); await refreshMailActivity(); }
+    catch (error) { alert(error.message); }
+  });
+  if (globalThis.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && changes.mailBatches) refreshMailActivity(); });
 }
 
 async function init() {
   state.savedRosters = await storage.get('savedRosters', []);
   state.templates = await storage.get('templates', []);
   state.structureTemplates = await storage.get('structureTemplates', []);
+  state.mailBatches = await storage.get('mailBatches', []);
   bindEvents();
   renderRoster();
   renderSavedRosters();
   renderTemplates();
   renderStructureTemplates();
-  renderHistoryRecipients();
+  renderHistory();
+  renderQueue();
   updateComposeState();
 }
 
