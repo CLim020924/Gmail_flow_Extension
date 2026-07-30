@@ -589,12 +589,38 @@ function renderTemplates() {
     container.innerHTML = '<div class="empty-state">저장된 템플릿이 없습니다.</div>';
     return;
   }
-  container.replaceChildren(...state.templates.map((template) => {
+  container.replaceChildren(...getTemplatesNewestFirst().map((template) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'list-row';
     button.dataset.templateId = template.id;
     button.innerHTML = `<span>${escapeHtml(template.name)}</span><span class="muted">상세 보기</span>`;
+    return button;
+  }));
+}
+
+function getTemplatesNewestFirst() {
+  return [...state.templates].sort((a, b) => {
+    const bTime = Date.parse(b.updatedAt || b.createdAt || 0) || 0;
+    const aTime = Date.parse(a.updatedAt || a.createdAt || 0) || 0;
+    return bTime - aTime;
+  });
+}
+
+function renderQuickTemplateMenu() {
+  const container = $('#quickTemplateList');
+  const templates = getTemplatesNewestFirst();
+  if (!templates.length) {
+    container.innerHTML = '<div class="template-quick-empty">저장된 템플릿이 없습니다.</div>';
+    return;
+  }
+  container.replaceChildren(...templates.map((template) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.quickTemplateId = template.id;
+    button.setAttribute('role', 'menuitem');
+    const savedAt = formatDateTime(template.updatedAt || template.createdAt);
+    button.innerHTML = `<span>${escapeHtml(template.name)}</span><small>${escapeHtml(savedAt || '저장됨')}</small>`;
     return button;
   }));
 }
@@ -609,6 +635,7 @@ async function saveTemplate() {
   state.activeTemplateId = template.id;
   await storage.set('templates', state.templates);
   renderTemplates();
+  renderQuickTemplateMenu();
 }
 
 function showTemplateDetail(id) {
@@ -937,6 +964,14 @@ function bindEvents() {
   });
   $('#saveMailTemplate').addEventListener('click', async () => { closeMenus(); await saveTemplate(); });
   $('#loadMailTemplate').addEventListener('click', () => { closeMenus(); showPage('templates'); });
+  $('#quickTemplateList').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-quick-template-id]');
+    if (!button) return;
+    const template = state.templates.find((item) => item.id === button.dataset.quickTemplateId);
+    if (!template) return;
+    applyMailTemplate(template);
+    closeMenus();
+  });
   $('#saveRoster').addEventListener('click', saveCurrentRoster);
   $('#openSavedRosters').addEventListener('click', () => {
     closeMenus(); renderSavedRosters(); $('#rosterEditor').hidden = true; $('#savedRosterList').hidden = false; pushSubView('saved-rosters');
@@ -1018,13 +1053,13 @@ function bindEvents() {
   $('#renameTemplate').addEventListener('click', async () => {
     const template = state.templates.find((item) => item.id === state.selectedTemplateId); if (!template) return;
     const name = prompt('새 템플릿 이름을 입력하세요.', template.name); if (!name?.trim() || name.trim().length > 50) return;
-    template.name = name.trim(); await storage.set('templates', state.templates); renderTemplates(); showTemplateDetail(template.id); state.backStack.pop();
+    template.name = name.trim(); template.updatedAt = new Date().toISOString(); await storage.set('templates', state.templates); renderTemplates(); renderQuickTemplateMenu(); showTemplateDetail(template.id); state.backStack.pop();
   });
   $('#deleteTemplate').addEventListener('click', async () => {
     const template = state.templates.find((item) => item.id === state.selectedTemplateId); if (!template || !confirm(`“${template.name}” 템플릿을 삭제할까요?`)) return;
     state.templates = state.templates.filter((item) => item.id !== template.id);
     if (state.activeTemplateId === template.id) state.activeTemplateId = '';
-    await storage.set('templates', state.templates); renderTemplates(); $('#templateDetailView').hidden = true; $('#templateListView').hidden = false; state.backStack.pop();
+    await storage.set('templates', state.templates); renderTemplates(); renderQuickTemplateMenu(); $('#templateDetailView').hidden = true; $('#templateListView').hidden = false; state.backStack.pop();
   });
   $('#structureTemplateItems').addEventListener('click', (event) => {
     const button = event.target.closest('[data-structure-template-id]'); if (button) showStructureTemplateDetail(button.dataset.structureTemplateId);
@@ -1089,6 +1124,7 @@ async function init() {
   renderRoster();
   renderSavedRosters();
   renderTemplates();
+  renderQuickTemplateMenu();
   renderStructureTemplates();
   renderHistory();
   renderQueue();

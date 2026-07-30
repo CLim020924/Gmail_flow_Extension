@@ -37,7 +37,10 @@
           <details class="menu">
             <summary class="button">템플릿 관리 ▾</summary>
             <div class="menu-panel">
-              <button id="loadMailTemplate" type="button">템플릿 가져오기</button>
+              <div class="template-load-menu">
+                <button id="loadMailTemplate" type="button" aria-haspopup="menu">템플릿 가져오기 <span aria-hidden="true">‹</span></button>
+                <div id="quickTemplateList" class="template-quick-list" role="menu" aria-label="저장된 템플릿"></div>
+              </div>
               <button id="saveMailTemplate" type="button">템플릿 저장</button>
             </div>
           </details>
