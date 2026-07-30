@@ -88,6 +88,7 @@ function goBack() {
 }
 
 function updateComposeState() {
+  updateActiveRosterText();
   const method = $('#sendMethod').value;
   const recipientCount = state.rows.filter((row) => {
     const emailColumn = state.columns.find((column) => column.role === 'email');
@@ -188,6 +189,7 @@ function addColumn(name, role = 'variable') {
   if (!clean) return;
   state.columns.push({ id: makeId(), name: clean, role });
   renderRoster();
+  updateComposeState();
 }
 
 function parseDelimited(text) {
@@ -296,10 +298,23 @@ function renderReadOnlyTable(table, columns, rows) {
 }
 
 function updateActiveRosterText() {
-  const variables = state.columns.length;
-  $('#activeRosterText').textContent = state.activeRosterName
-    ? `현재 명단: ${state.activeRosterName} · ${state.rows.length}행 · 변수 ${variables}개`
-    : `현재 명단 없음 · 사용 가능한 변수 ${variables}개`;
+  const variables = state.columns
+    .filter((column) => column.role !== 'excluded' && column.name)
+    .map((column) => column.name.trim());
+  const variableText = variables.map((name) => `{${name}}`).join(', ');
+  const context = state.activeRosterName
+    ? `현재 명단: ${state.activeRosterName} · ${state.rows.length}행`
+    : (state.columns.length ? '편집 중인 명단' : '현재 명단 없음');
+
+  $('#activeRosterText').textContent = variableText
+    ? `${context} · 사용 가능한 변수 ${variableText}`
+    : `${context} · 사용 가능한 변수 0개`;
+  $('#subject').placeholder = variableText
+    ? `사용 가능: ${variableText}`
+    : '명단 컬럼을 만든 뒤 변수를 사용할 수 있습니다';
+  $('#body').placeholder = variableText
+    ? `본문에 ${variableText} 형식으로 입력하세요`
+    : '현재 사용할 수 있는 변수가 없습니다';
 }
 
 function renderTemplates() {
