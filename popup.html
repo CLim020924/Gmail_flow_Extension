@@ -166,11 +166,16 @@
   <dialog id="previewDialog">
     <form method="dialog">
       <div class="section-heading"><h2>메일 미리보기</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
+      <label id="previewRecipientField" class="field">대상
+        <select id="previewRecipient"></select>
+      </label>
+      <p id="previewMeta" class="muted"></p>
       <div class="detail-block"><small>제목</small><p id="previewSubject"></p></div>
       <div class="detail-block"><small>본문</small><p id="previewBody" class="preline"></p></div>
       <button class="primary" value="cancel">확인</button>
     </form>
   </dialog>
+  <script src="core.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

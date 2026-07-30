@@ -87,15 +87,33 @@ function goBack() {
   $('#backButton').hidden = state.backStack.length === 0;
 }
 
+function getComposeInput() {
+  return {
+    columns: state.columns,
+    rows: state.rows,
+    method: $('#sendMethod').value,
+    label: $('#gmailLabel').value,
+    scheduleDate: $('#scheduleDate').value,
+    scheduleTime: $('#scheduleTime').value,
+    subject: $('#subject').value,
+    body: $('#body').value,
+    emptyDraftEnabled: state.emptyDraftEnabled,
+    emptyDraftCount: $('#emptyDraftCount').value
+  };
+}
+
+function getCurrentWork() {
+  return GmailFlowCore.createWorkItems(getComposeInput());
+}
+
 function updateComposeState() {
   updateActiveRosterText();
   const method = $('#sendMethod').value;
-  const recipientCount = state.rows.filter((row) => {
-    const emailColumn = state.columns.find((column) => column.role === 'email');
-    return emailColumn && String(row[emailColumn.id] || '').trim();
-  }).length;
-  const blankRowCount = state.rows.length - recipientCount;
-  const emptyCount = state.emptyDraftEnabled ? Math.max(Number($('#emptyDraftCount').value) || 1, 1) : 0;
+  const work = getCurrentWork();
+  const rosterItems = work.items.filter((item) => item.type === 'roster');
+  const recipientCount = rosterItems.filter((item) => item.email).length;
+  const blankRowCount = rosterItems.length - recipientCount;
+  const emptyCount = work.items.filter((item) => item.type === 'blank').length;
 
   $('#recipientBadge').textContent = `대상 ${recipientCount}명`;
   $('#labelField').hidden = method === '즉시 발송';
@@ -104,21 +122,51 @@ function updateComposeState() {
   $('#emptyDraftCount').hidden = method !== '임시 저장' || !state.emptyDraftEnabled;
 
   if (method === '임시 저장') {
-    const total = state.rows.length + emptyCount;
+    const total = work.items.length;
     $('#composeAction').textContent = total ? `초안 ${total}개 저장` : '임시 저장';
-    $('#composeAction').disabled = total === 0;
-    $('#composeHint').textContent = state.rows.length
-      ? `명단 ${state.rows.length}행${blankRowCount ? ` 중 이메일 없는 ${blankRowCount}행 포함` : ''}${emptyCount ? ` + 빈 초안 ${emptyCount}개` : ''}`
-      : (emptyCount ? `받는 사람 없는 빈 초안 ${emptyCount}개를 만듭니다.` : '명단을 선택하거나 빈 초안 기능을 켜주세요.');
+    $('#composeHint').textContent = work.validation.errors[0] || (rosterItems.length
+      ? `명단 ${rosterItems.length}행${blankRowCount ? ` 중 이메일 없는 ${blankRowCount}행 포함` : ''}${emptyCount ? ` + 빈 초안 ${emptyCount}개` : ''}`
+      : (emptyCount ? `받는 사람 없는 빈 초안 ${emptyCount}개를 만듭니다.` : '명단을 선택하거나 빈 초안 기능을 켜주세요.'));
   } else if (method === '예약 발송') {
     $('#composeAction').textContent = '예약 발송 등록';
-    $('#composeAction').disabled = recipientCount === 0;
-    $('#composeHint').textContent = recipientCount ? '예약 날짜와 시간을 확인한 뒤 등록합니다.' : '예약 발송에는 수신 이메일이 있는 명단이 필요합니다.';
+    $('#composeHint').textContent = work.validation.errors[0] || `${recipientCount}명에게 예약 발송합니다.`;
   } else {
     $('#composeAction').textContent = '즉시 발송';
-    $('#composeAction').disabled = recipientCount === 0;
-    $('#composeHint').textContent = recipientCount ? `${recipientCount}명에게 지금 바로 발송합니다.` : '즉시 발송에는 수신 이메일이 있는 명단이 필요합니다.';
+    $('#composeHint').textContent = work.validation.errors[0] || `${recipientCount}명에게 지금 바로 발송합니다.`;
   }
+  $('#composeHint').classList.toggle('error-text', work.validation.errors.length > 0);
+  $('#composeAction').disabled = !work.validation.valid;
+}
+
+function renderPreviewItem(index) {
+  const work = getCurrentWork();
+  const item = work.items[index];
+  if (!item) return;
+  $('#previewMeta').textContent = item.type === 'blank'
+    ? `추가 빈 초안 ${index - work.items.filter((entry) => entry.type === 'roster').length + 1}`
+    : `명단 ${item.rowNumber}행 · ${item.email || '받는 사람 없음'}`;
+  $('#previewSubject').textContent = item.subject || '(제목 없음)';
+  $('#previewBody').textContent = item.body || '(본문 없음)';
+}
+
+function openPersonalizedPreview() {
+  const work = getCurrentWork();
+  if (!work.items.length) {
+    alert(work.validation.errors[0] || '미리 볼 대상이 없습니다.');
+    return;
+  }
+  const selector = $('#previewRecipient');
+  selector.replaceChildren(...work.items.map((item, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = item.type === 'blank'
+      ? `빈 초안 ${index - work.items.filter((entry) => entry.type === 'roster').length + 1}`
+      : `${item.rowNumber}행 · ${item.email || '받는 사람 없음'}`;
+    return option;
+  }));
+  $('#previewRecipientField').hidden = work.items.length === 1;
+  renderPreviewItem(0);
+  $('#previewDialog').showModal();
 }
 
 function renderRoster() {
@@ -450,6 +498,9 @@ function bindEvents() {
   $('#backButton').addEventListener('click', goBack);
   $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
   $('#sendMethod').addEventListener('change', updateComposeState);
+  ['gmailLabel', 'scheduleDate', 'scheduleTime', 'subject', 'body'].forEach((id) => {
+    $(`#${id}`).addEventListener('input', updateComposeState);
+  });
   $('#emptyDraftToggle').addEventListener('click', () => {
     state.emptyDraftEnabled = !state.emptyDraftEnabled;
     $('#emptyDraftToggle').textContent = state.emptyDraftEnabled ? '－' : '＋';
@@ -457,11 +508,8 @@ function bindEvents() {
     updateComposeState();
   });
   $('#emptyDraftCount').addEventListener('input', updateComposeState);
-  $('#previewButton').addEventListener('click', () => {
-    $('#previewSubject').textContent = $('#subject').value || '(제목 없음)';
-    $('#previewBody').textContent = $('#body').value || '(본문 없음)';
-    $('#previewDialog').showModal();
-  });
+  $('#previewButton').addEventListener('click', openPersonalizedPreview);
+  $('#previewRecipient').addEventListener('change', (event) => renderPreviewItem(Number(event.target.value)));
   $('#saveMailTemplate').addEventListener('click', async () => { closeMenus(); await saveTemplate(); });
   $('#loadMailTemplate').addEventListener('click', () => { closeMenus(); showPage('templates'); });
   $('#saveRoster').addEventListener('click', saveCurrentRoster);
