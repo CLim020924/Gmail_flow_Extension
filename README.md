@@ -21,7 +21,7 @@
 
 1. Google Cloud Console에서 프로젝트를 만들고 Gmail API를 활성화합니다.
 2. OAuth 동의 화면을 구성합니다. 테스트 상태라면 사용할 Google 계정을 테스트 사용자로 추가합니다.
-3. OAuth 클라이언트 ID를 만들 때 Chrome 확장 프로그램 ID `chfahliclkpdeklinbplbadohncaejgo`를 등록합니다.
+3. OAuth 클라이언트 ID를 만들 때 배포 환경에 맞는 Chrome 확장 프로그램 ID를 등록합니다. 웹스토어 배포 ID는 `lgepaiahgdmaempfplpfgmgjiiobohnf`입니다.
 4. 발급된 클라이언트 ID를 `manifest.json`의 `oauth2.client_id`에 입력합니다.
 5. `chrome://extensions`에서 확장 프로그램을 새로고침합니다.
 6. 팝업 오른쪽 위 설정에서 `Gmail 연결`을 누르고 권한을 승인합니다.
