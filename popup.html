@@ -117,6 +117,9 @@
             <div><h2>명단 가져오기</h2><p class="muted">명단을 만들거나 저장된 데이터를 불러옵니다.</p></div>
           </div>
           <div class="toolbar">
+            <button id="rosterUndo" class="button compact-action" type="button" title="실행 취소 (Ctrl+Z)" disabled>↶ 실행 취소</button>
+            <button id="rosterRedo" class="button compact-action" type="button" title="다시 실행 (Ctrl+Y)" disabled>↷ 다시 실행</button>
+            <details class="menu"><summary class="button">셀 작업 ▾</summary><div class="menu-panel"><button id="rosterClearSelection" type="button">선택 셀 내용 지우기</button><button id="rosterFillDown" type="button">맨 위 값을 아래로 채우기</button><button id="rosterInsertRow" type="button">선택 위치에 행 삽입</button><button id="rosterDeleteRows" type="button">선택한 행 삭제</button><button id="rosterInsertColumn" type="button">선택 위치에 컬럼 삽입</button><button id="rosterDeleteColumns" type="button">선택한 컬럼 삭제</button></div></details>
             <details class="menu">
               <summary class="button">불러오기 ▾</summary>
               <div class="menu-panel roster-load-panel">

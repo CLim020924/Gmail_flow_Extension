@@ -529,9 +529,49 @@ button.variable-chip.valid:hover { border-color: #397c60; background: #e1f3e9; }
 .workflow-check-item button { min-height: 26px; padding: 2px 7px; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
 .tag-list .tag { padding: 5px 8px; border: 1px solid #cbd3db; border-radius: 2px; background: #f8fafb; color: #3d4b59; font-size: 11px; }
+.roster-view-panel { margin-top: 14px; }
+.roster-view-toolbar, .session-board-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-bottom: 11px; }
+.roster-view-toolbar label, .session-board-filters label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
+.roster-view-people { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 5px; }
+.roster-view-person { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 48px; padding: 5px 8px; border: 1px solid #d7dde2; background: #fff; }
+.roster-view-person strong, .roster-view-person small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster-view-person small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.roster-view-toggle { width: 28px; min-height: 28px; padding: 0; border-radius: 2px; }
+.roster-view-person.excluded { background: #f2f2f1; opacity: .64; }
+.roster-view-person.excluded strong { text-decoration: line-through; }
+.session-planner-panel { margin-top: 13px; }
+.session-planner { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 12px; min-height: 310px; }
+.session-planner > aside { padding: 10px; border: 1px solid #cbd2d9; background: #f6f8f9; }
+.session-planner > aside h3 { margin: 0 0 3px; font-size: 13px; }
+.session-planner > aside p { margin: 0 0 9px; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.session-person-pool { display: grid; gap: 5px; max-height: 520px; overflow: auto; }
+.session-person-chip { display: grid; width: 100%; min-height: 42px; padding: 6px 8px; border: 1px solid #c8d0d8; border-radius: 2px; background: #fff; text-align: left; cursor: grab; }
+.session-person-chip strong, .session-person-chip small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-person-chip small { color: var(--muted); font-size: 9px; }
+.session-person-chip.selected { border-color: var(--primary); background: #eaf4fb; box-shadow: inset 3px 0 0 var(--primary); }
+.session-calendar-board { display: flex; gap: 9px; overflow-x: auto; padding-bottom: 8px; }
+.session-date-column { flex: 0 0 270px; display: grid; align-content: start; gap: 7px; }
+.session-date-column > h3 { position: sticky; top: 0; z-index: 2; margin: 0; padding: 7px 8px; border: 1px solid #c7ced5; background: #e9edf0; font-size: 12px; }
+.session-slot-card { min-height: 128px; border: 1px solid #bfc8d0; border-left: 4px solid #66829a; background: #fff; transition: .12s ease; }
+.session-slot-card.status-confirmed { border-left-color: #35815e; }
+.session-slot-card.status-changed { border-left-color: #d18424; background: #fffaf1; }
+.session-slot-card.drag-over { border-color: var(--primary); background: #eaf4fb; box-shadow: 0 0 0 2px rgba(23,105,170,.2); }
+.session-slot-heading { display: flex; justify-content: space-between; gap: 6px; padding: 7px 8px; border-bottom: 1px solid #e0e4e7; }
+.session-slot-heading strong, .session-slot-heading small { display: block; }
+.session-slot-heading small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.session-slot-actions { display: flex; align-items: start; gap: 3px; }
+.session-slot-actions button { min-height: 24px; padding: 2px 5px; border: 0; background: transparent; color: #607080; font-size: 9px; }
+.session-assignments { display: grid; gap: 4px; min-height: 74px; padding: 6px; }
+.session-assignment-chip { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 5px 6px; border: 1px solid #ccd5dc; background: #f5f8fa; cursor: grab; font-size: 10px; }
+.session-assignment-chip button { width: 20px; min-height: 20px; padding: 0; border: 0; background: transparent; color: #8b3030; }
+.session-drop-hint { display: grid; place-items: center; min-height: 62px; border: 1px dashed #c6cdd4; color: #84909b; font-size: 10px; }
+.session-empty-drop { flex: 0 0 190px; min-height: 128px; align-self: start; border: 2px dashed #bfc8d0; background: #f7f9fa; color: #657584; }
+.session-empty-drop.drag-over { border-color: var(--primary); background: #eaf4fb; color: var(--primary); }
 
 @media (max-width: 900px) {
   .template-library-grid, .task-workbench-grid { grid-template-columns: 1fr; }
+  .session-planner { grid-template-columns: 1fr; }
+  .session-person-pool { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); max-height: 230px; }
   .workflow-editor-row { grid-template-columns: 28px minmax(0, 1fr) auto; }
   .workflow-editor-row [data-workflow-step-description] { grid-column: 2 / -1; }
 }

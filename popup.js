@@ -55,6 +55,8 @@ const workspaceProjectId = launchParams.get('projectId') || '';
 let workspaceSaveTimer = null;
 let restoringWorkspace = false;
 let cellSelection = null;
+let rosterHistory = [];
+let rosterFuture = [];
 let cloudSyncTimer = null;
 let cloudSyncBusy = false;
 let composeInsertionTarget = 'body';
@@ -786,6 +788,7 @@ function selectedHtml(matrix = selectedMatrix()) {
 function clearSelectedData() {
   const bounds = selectionBounds();
   if (!bounds) return false;
+  pushRosterHistory();
   for (let row = Math.max(0, bounds.minRow); row <= bounds.maxRow; row += 1) {
     state.columns.slice(bounds.minColumn, bounds.maxColumn + 1).forEach((column) => {
       if (state.rows[row]) state.rows[row][column.id] = '';
@@ -806,11 +809,31 @@ function updateRosterStatus(message = '') {
   const saveStructureButton = $('[data-structure-action="save"]');
   if (saveStructureButton) saveStructureButton.disabled = state.columns.length === 0;
   $('#useRoster').disabled = state.rows.length === 0;
+  $('#rosterUndo').disabled = rosterHistory.length === 0;
+  $('#rosterRedo').disabled = rosterFuture.length === 0;
+}
+
+function rosterSnapshot() { return JSON.stringify({ columns: state.columns, rows: state.rows, activeRosterName: state.activeRosterName, activeStructureTemplateId: state.activeStructureTemplateId }); }
+function pushRosterHistory() { rosterHistory.push(rosterSnapshot()); if (rosterHistory.length > 80) rosterHistory.shift(); rosterFuture = []; }
+function restoreRosterSnapshot(snapshot) { const value = JSON.parse(snapshot); state.columns = value.columns || []; state.rows = value.rows || []; state.activeRosterName = value.activeRosterName || ''; state.activeStructureTemplateId = value.activeStructureTemplateId || ''; cellSelection = null; renderRoster(); updateComposeState(); }
+function undoRoster() { if (!rosterHistory.length) return; rosterFuture.push(rosterSnapshot()); restoreRosterSnapshot(rosterHistory.pop()); updateRosterStatus('명단 편집을 실행 취소했습니다.'); }
+function redoRoster() { if (!rosterFuture.length) return; rosterHistory.push(rosterSnapshot()); restoreRosterSnapshot(rosterFuture.pop()); updateRosterStatus('명단 편집을 다시 실행했습니다.'); }
+
+function editRosterSelection(action, columnName = '새 컬럼') {
+  const bounds = selectionBounds(); if (!bounds && action !== 'insert-row') return false; pushRosterHistory();
+  if (action === 'fill-down') {
+    for (let col = bounds.minColumn; col <= bounds.maxColumn; col += 1) { const value = state.rows[Math.max(0, bounds.minRow)]?.[state.columns[col].id] || ''; for (let row = Math.max(0, bounds.minRow + 1); row <= bounds.maxRow; row += 1) { while (state.rows.length <= row) state.rows.push({}); state.rows[row][state.columns[col].id] = value; } }
+  } else if (action === 'insert-row') state.rows.splice(Math.max(0, bounds?.minRow || 0), 0, {});
+  else if (action === 'delete-rows') state.rows.splice(Math.max(0, bounds.minRow), bounds.maxRow - Math.max(0, bounds.minRow) + 1);
+  else if (action === 'insert-column') { const index = bounds.minColumn; const column = { id: makeId(), name: columnName, role: 'variable' }; state.columns.splice(index, 0, column); state.rows.forEach((row) => { row[column.id] = ''; }); }
+  else if (action === 'delete-columns') { const removed = state.columns.splice(bounds.minColumn, bounds.maxColumn - bounds.minColumn + 1); state.rows.forEach((row) => removed.forEach((column) => delete row[column.id])); }
+  cellSelection = null; renderRoster(); updateComposeState(); updateRosterStatus('명단 시트 작업을 적용했습니다.'); return true;
 }
 
 function addColumn(name, role = 'variable') {
   const clean = String(name || '').trim().replace(/[{}]/g, '');
   if (!clean) return;
+  pushRosterHistory();
   state.columns.push({ id: makeId(), name: clean, role });
   state.activeStructureTemplateId = '';
   renderRoster();
@@ -908,8 +931,9 @@ async function readDelimitedFile(file) {
   }
 }
 
-function applyTable(matrix) {
+function applyTable(matrix, trackHistory = true) {
   if (!matrix.length) return;
+  if (trackHistory) pushRosterHistory();
   const width = Math.max(...matrix.map((row) => row.length));
   const first = matrix[0].map((value) => String(value || '').trim());
   const dataLike = (value) => /@|https?:\/\/|^\+?[\d\s()-]{7,}$|^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(value);
@@ -940,8 +964,9 @@ function applyTable(matrix) {
   updateComposeState();
 }
 
-function applyMatrixAt(matrix, startRow, startColumn) {
+function applyMatrixAt(matrix, startRow, startColumn, trackHistory = true) {
   if (!matrix.length) return;
+  if (trackHistory) pushRosterHistory();
   const width = Math.max(...matrix.map((row) => row.length));
   while (state.columns.length < startColumn + width) {
     const index = state.columns.length;
@@ -1671,9 +1696,13 @@ function bindEvents() {
     }
     const activeInSheet = $('#rosterTable').contains(document.activeElement);
     if (state.page !== 'roster' || !activeInSheet) return;
-    if (event.key === 'Delete' && cellSelection) {
+    if ((event.key === 'Delete' || event.key === 'Backspace') && cellSelection) {
       event.preventDefault();
       clearSelectedData();
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault(); event.shiftKey ? redoRoster() : undoRoster();
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+      event.preventDefault(); redoRoster();
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !document.activeElement.matches('.cell-input')) {
       event.preventDefault();
       cellSelection = {
@@ -1705,6 +1734,22 @@ function bindEvents() {
     event.clipboardData.setData('text/html', selectedHtml(matrix));
     clearSelectedData();
   });
+  document.addEventListener('paste', (event) => {
+    if (state.page !== 'roster' || !cellSelection || !$('#rosterTable').contains(document.activeElement)) return;
+    const bounds = selectionBounds(); const text = event.clipboardData?.getData('text/plain') || '';
+    if (!bounds || !text) return;
+    const matrix = parseDelimited(text); if (!matrix.length) return;
+    event.preventDefault(); event.stopPropagation();
+    const singleValue = matrix.length === 1 && matrix[0].length === 1;
+    if (singleValue && (bounds.maxRow > bounds.minRow || bounds.maxColumn > bounds.minColumn)) {
+      pushRosterHistory();
+      for (let row = Math.max(0, bounds.minRow); row <= bounds.maxRow; row += 1) for (let col = bounds.minColumn; col <= bounds.maxColumn; col += 1) {
+        while (state.rows.length <= row) state.rows.push({}); state.rows[row][state.columns[col].id] = matrix[0][0];
+      }
+      renderRoster(); updateComposeState(); updateRosterStatus('선택한 모든 셀에 값을 붙여넣었습니다.');
+    } else if (!state.columns.length && bounds.minRow <= 0) applyTable(matrix);
+    else applyMatrixAt(matrix, Math.max(0, bounds.minRow), bounds.minColumn);
+  }, true);
   $('#drawerToggle').addEventListener('click', () => {
     $('#app').classList.toggle('drawer-open');
     const open = $('#app').classList.contains('drawer-open');
@@ -1893,7 +1938,15 @@ function bindEvents() {
     }
     closeMenus(); event.target.value = '';
   });
-  $('#resetRoster').addEventListener('click', async () => { closeMenus(); if (!await showConfirm('현재 명단 편집 내용을 초기화할까요?', '명단 초기화', '초기화')) return; state.columns = []; state.rows = []; cellSelection = null; state.activeRosterName = ''; state.activeStructureTemplateId = ''; $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음'; renderRoster(); updateActiveRosterText(); updateComposeState(); queueMicrotask(() => $('#addColumn')?.focus()); });
+  $('#resetRoster').addEventListener('click', async () => { closeMenus(); if (!await showConfirm('현재 명단 편집 내용을 초기화할까요?', '명단 초기화', '초기화')) return; pushRosterHistory(); state.columns = []; state.rows = []; cellSelection = null; state.activeRosterName = ''; state.activeStructureTemplateId = ''; $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음'; renderRoster(); updateActiveRosterText(); updateComposeState(); queueMicrotask(() => $('#addColumn')?.focus()); });
+  $('#rosterUndo').addEventListener('click', undoRoster);
+  $('#rosterRedo').addEventListener('click', redoRoster);
+  $('#rosterClearSelection').addEventListener('click', () => { closeMenus(); clearSelectedData(); });
+  $('#rosterFillDown').addEventListener('click', () => { closeMenus(); editRosterSelection('fill-down'); });
+  $('#rosterInsertRow').addEventListener('click', () => { closeMenus(); editRosterSelection('insert-row'); });
+  $('#rosterDeleteRows').addEventListener('click', () => { closeMenus(); editRosterSelection('delete-rows'); });
+  $('#rosterInsertColumn').addEventListener('click', async () => { closeMenus(); const name = await requestTextInput({ title: '컬럼 삽입', label: '컬럼 이름', defaultValue: '새 컬럼', maxLength: 100 }); if (name?.trim()) editRosterSelection('insert-column', name.trim()); });
+  $('#rosterDeleteColumns').addEventListener('click', () => { closeMenus(); editRosterSelection('delete-columns'); });
   $('#useRoster').addEventListener('click', async () => {
     state.activeRosterName ||= '현재 명단'; updateActiveRosterText(); updateComposeState();
     if (!rosterManagerMode) { showPage('compose'); return; }
@@ -1922,6 +1975,7 @@ function bindEvents() {
     if (!name?.trim()) return;
     const role = await requestColumnRole(column.role);
     if (!role) return;
+    pushRosterHistory();
     column.name = name.trim().replace(/[{}]/g, '');
     if (role === 'email') {
       state.columns.forEach((item) => { if (item.id !== column.id && item.role === 'email') item.role = 'variable'; });
@@ -2006,7 +2060,10 @@ function bindEvents() {
     while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
     updateRosterStatus(); updateComposeState();
   });
+  $('#rosterBody').addEventListener('focusin', (event) => { const input = event.target.closest('.cell-input'); if (input) input.dataset.beforeRosterEdit = rosterSnapshot(); });
+  $('#rosterBody').addEventListener('change', (event) => { const input = event.target.closest('.cell-input'); if (!input?.dataset.beforeRosterEdit) return; rosterHistory.push(input.dataset.beforeRosterEdit); if (rosterHistory.length > 80) rosterHistory.shift(); rosterFuture = []; delete input.dataset.beforeRosterEdit; updateRosterStatus(); });
   $('#rosterBody').addEventListener('paste', (event) => {
+    if (event.defaultPrevented) return;
     const input = event.target.closest('.cell-input');
     if (!input) return;
     const text = event.clipboardData?.getData('text/plain') || '';

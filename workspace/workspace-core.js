@@ -357,6 +357,16 @@
           roleIds: Array.isArray(person.roleIds) && person.roleIds.length ? person.roleIds : ['participant'],
           active: person.active !== false
         })) : [],
+        rosterViews: Array.isArray(data.rosterViews) ? data.rosterViews.map((view) => ({
+          id: view.id || makeId('roster-view'),
+          name: String(view.name || '단계 명단').trim(),
+          parentId: view.parentId || null,
+          personIds: [...new Set(Array.isArray(view.personIds) ? view.personIds : [])],
+          excludedPersonIds: [...new Set(Array.isArray(view.excludedPersonIds) ? view.excludedPersonIds : [])],
+          createdAt: view.createdAt || nowIso(),
+          updatedAt: view.updatedAt || nowIso()
+        })) : [],
+        activeRosterViewId: data.activeRosterViewId || null,
         workItems: Array.isArray(data.workItems) ? data.workItems.map((item) => ({
           id: item.id || makeId('work'),
           name: String(item.name || '이름 없는 작업').trim(),
@@ -387,7 +397,8 @@
           avoidRepeatPairing: data.scheduleRules?.avoidRepeatPairing !== false,
           avoidPastPairing: data.scheduleRules?.avoidPastPairing !== false,
           groupPreference: ['none', 'same', 'different'].includes(data.scheduleRules?.groupPreference) ? data.scheduleRules.groupPreference : 'none',
-          unmarkedMeansAvailable: Boolean(data.scheduleRules?.unmarkedMeansAvailable)
+          unmarkedMeansAvailable: Boolean(data.scheduleRules?.unmarkedMeansAvailable),
+          rosterViewId: data.scheduleRules?.rosterViewId || null
         },
         versions: Array.isArray(data.versions) ? data.versions : [],
         forms: {

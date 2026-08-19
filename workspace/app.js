@@ -42,6 +42,7 @@
   let scheduleHistory = [];
   let scheduleFuture = [];
   let schedulePersistTimer = null;
+  let selectedSessionPersonId = null;
   let sheetChoiceResolver = null;
   let templateInsertionTarget = 'body';
   let activeWorkflowStepId = null;
@@ -733,6 +734,7 @@
       : '아직 입력된 사람이 없습니다. 공용 명단 관리 창을 열어 첫 명단을 입력하세요.';
     const summary = $('#rosterColumnSummary');
     summary.replaceChildren(...project.data.columns.map((column) => element('span', 'tag', `${column.name} · ${column.type || '텍스트'}`)));
+    renderRosterViews(project);
     return;
 
     const rosterSelect = $('#sharedRosterSelect'); rosterSelect.replaceChildren(element('option', '', '저장한 명단 선택'));
@@ -800,6 +802,44 @@
     if (rosterSelection && [rosterSelection.anchor, rosterSelection.focus].some((point) => point.row > project.data.people.length || point.col >= project.data.columns.length)) rosterSelection = null;
     if (rosterSelection) updateRosterSelection(rosterSelection.anchor, rosterSelection.focus);
     else { $('#rosterSelectionStatus').textContent = '선택 없음'; $('#rosterCellAddress').textContent = '—'; $('#rosterCellValue').value = ''; $('#rosterCellValue').disabled = true; }
+  }
+
+  function activeRosterView(project = activeProject()) {
+    return project?.data.rosterViews?.find((view) => view.id === project.data.activeRosterViewId) || null;
+  }
+
+  function rosterViewIncludedIds(view, project) {
+    const source = view ? view.personIds : project.data.people.map((person) => person.id);
+    const excluded = new Set(view?.excludedPersonIds || []);
+    return source.filter((id) => !excluded.has(id) && project.data.people.some((person) => person.id === id));
+  }
+
+  function renderRosterViews(project) {
+    const select = $('#rosterViewSelect'); if (!select) return;
+    select.replaceChildren(element('option', '', '원본 명단'));
+    project.data.rosterViews.forEach((view) => { const option = element('option', '', view.name); option.value = view.id; select.append(option); });
+    select.value = project.data.activeRosterViewId || '';
+    const view = activeRosterView(project); const sourceIds = view?.personIds || project.data.people.map((person) => person.id); const excluded = new Set(view?.excludedPersonIds || []);
+    $('#saveRosterViewAs').disabled = !project.data.people.length;
+    $('#renameRosterView').disabled = !view; $('#deleteRosterView').disabled = !view;
+    $('#rosterViewSummary').textContent = view ? `${sourceIds.length - excluded.size}명 포함 · ${excluded.size}명 제외 · 원본은 변경되지 않음` : `원본 ${project.data.people.length}명 · 제외하려면 먼저 단계 명단을 만드세요`;
+    const rows = sourceIds.map((id) => project.data.people.find((person) => person.id === id)).filter(Boolean).map((person) => {
+      const row = element('div', `roster-view-person${excluded.has(person.id) ? ' excluded' : ''}`);
+      const toggle = element('button', 'roster-view-toggle', excluded.has(person.id) ? '↺' : '—'); toggle.type = 'button'; toggle.dataset.rosterViewToggle = person.id; toggle.disabled = !view; toggle.title = excluded.has(person.id) ? '다시 포함' : '이 단계 명단에서 제외';
+      const info = element('span'); const group = person.group ? ` · ${person.group}` : ''; info.append(element('strong', '', person.name || '이름 없음'), element('small', '', `${person.email || person.phone || ''}${group}`));
+      row.append(toggle, info); return row;
+    });
+    $('#rosterViewPeople').replaceChildren(...(rows.length ? rows : [element('div', 'list-empty', '원본 명단을 먼저 입력해주세요.')]));
+  }
+
+  async function createRosterViewFromCurrent(saveIncludedOnly = false) {
+    const project = activeProject(); if (!project?.data.people.length) { showToast('원본 명단을 먼저 입력해주세요.', 'error'); return; }
+    const current = activeRosterView(project); const sourceIds = saveIncludedOnly ? rosterViewIncludedIds(current, project) : project.data.people.map((person) => person.id);
+    const defaultName = saveIncludedOnly && current ? `${current.name} 다음 단계` : '새 단계 명단';
+    const name = await requestName(saveIncludedOnly ? '현재 포함 인원으로 새 단계 명단' : '원본에서 새 단계 명단', defaultName); if (!name) return;
+    const now = new Date().toISOString(); const view = { id: `roster-view-${Date.now().toString(36)}`, name, parentId: current?.id || null, personIds: [...sourceIds], excludedPersonIds: [], createdAt: now, updatedAt: now };
+    project.data.rosterViews.push(view); project.data.activeRosterViewId = view.id;
+    state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 저장됨'); renderPeoplePage(); showToast(`“${name}” 명단을 ${sourceIds.length}명으로 만들었습니다.`, 'success');
   }
 
   function activeWorkItem(project = activeProject()) {
@@ -943,7 +983,8 @@
   }
 
   function schedulePeopleWithRoleFilters(project) {
-    return project.data.people.map((person) => ({ ...person, roleIds: project.data.roles.filter((role) => roleCandidates(project, role).some((candidate) => candidate.id === person.id)).map((role) => role.id) }));
+    const view = project.data.rosterViews.find((item) => item.id === project.data.scheduleRules.rosterViewId) || null; const included = new Set(rosterViewIncludedIds(view, project));
+    return project.data.people.filter((person) => included.has(person.id)).map((person) => ({ ...person, roleIds: project.data.roles.filter((role) => roleCandidates(project, role).some((candidate) => candidate.id === person.id)).map((role) => role.id) }));
   }
 
   function renderAvailability(project) {
@@ -960,7 +1001,8 @@
     });
     head.append(headRow); table.append(head);
     const body = element('tbody');
-    project.data.people.filter((person) => person.active !== false).forEach((person) => {
+    const scheduleView = project.data.rosterViews.find((view) => view.id === project.data.scheduleRules.rosterViewId) || null; const scheduleIds = new Set(rosterViewIncludedIds(scheduleView, project));
+    project.data.people.filter((person) => person.active !== false && scheduleIds.has(person.id)).forEach((person) => {
       const row = element('tr');
       const nameCell = element('td');
       const allLabel = element('label', 'check-row');
@@ -1134,6 +1176,62 @@
     if (scheduleSelection && columns.length) updateScheduleSelection({ row: Math.min(scheduleSelection.anchor.row, visibleRows - 1), col: Math.min(scheduleSelection.anchor.col, columns.length - 1) }, { row: Math.min(scheduleSelection.focus.row, visibleRows - 1), col: Math.min(scheduleSelection.focus.col, columns.length - 1) }, scheduleSelection.mode);
     else { scheduleSelection = null; $('#scheduleSelectionStatus').textContent = '선택 없음'; $('#scheduleCellAddress').textContent = '—'; $('#scheduleCellValue').value = ''; $('#scheduleCellValue').disabled = true; }
     $('#scheduleUndo').disabled = !scheduleHistory.length; $('#scheduleRedo').disabled = !scheduleFuture.length;
+    renderSessionPlanner(project);
+  }
+
+  function sessionRosterPeople(project) {
+    const viewId = $('#sessionRosterView')?.value || project.data.scheduleRules.rosterViewId || '';
+    const view = project.data.rosterViews.find((item) => item.id === viewId) || null;
+    const ids = new Set(rosterViewIncludedIds(view, project));
+    const group = $('#sessionGroupFilter')?.value || '';
+    return project.data.people.filter((person) => person.active !== false && ids.has(person.id) && (!group || person.group === group));
+  }
+
+  function renderSessionPlanner(project) {
+    const viewSelect = $('#sessionRosterView'); const previousView = viewSelect.value || project.data.scheduleRules.rosterViewId || '';
+    viewSelect.replaceChildren(element('option', '', '원본 명단'));
+    project.data.rosterViews.forEach((view) => { const option = element('option', '', view.name); option.value = view.id; viewSelect.append(option); });
+    viewSelect.value = project.data.rosterViews.some((view) => view.id === previousView) ? previousView : '';
+    const roleSelect = $('#sessionRoleSelect'); const previousRole = roleSelect.value; roleSelect.replaceChildren(...project.data.roles.filter((role) => role.active).map((role) => { const option = element('option', '', role.name); option.value = role.id; return option; })); if ([...roleSelect.options].some((option) => option.value === previousRole)) roleSelect.value = previousRole;
+    const groupSelect = $('#sessionGroupFilter'); const previousGroup = groupSelect.value; groupSelect.replaceChildren(element('option', '', '전체'));
+    [...new Set(project.data.people.map((person) => person.group).filter(Boolean))].sort().forEach((group) => { const option = element('option', '', group); option.value = group; groupSelect.append(option); }); groupSelect.value = [...groupSelect.options].some((option) => option.value === previousGroup) ? previousGroup : '';
+    const dateSelect = $('#sessionDateFilter'); const previousDate = dateSelect.value; dateSelect.replaceChildren(element('option', '', '전체 날짜'));
+    [...new Set(project.data.slots.map((slot) => slot.date).filter(Boolean))].sort().forEach((date) => { const option = element('option', '', formatDate(date)); option.value = date; dateSelect.append(option); }); dateSelect.value = [...dateSelect.options].some((option) => option.value === previousDate) ? previousDate : '';
+    const people = sessionRosterPeople(project); const pool = $('#sessionPersonPool');
+    pool.replaceChildren(...(people.length ? people.map((person) => { const chip = element('button', `session-person-chip${selectedSessionPersonId === person.id ? ' selected' : ''}`); chip.type = 'button'; chip.draggable = true; chip.dataset.sessionPerson = person.id; chip.title = '끌어서 세션에 배정'; chip.append(element('strong', '', person.name || '이름 없음'), element('small', '', person.group || person.email || '')); return chip; }) : [element('div', 'list-empty', '선택한 단계 명단에 포함된 사람이 없습니다.')]));
+    const visibleDate = dateSelect.value; const slots = project.data.slots.slice().sort((a, b) => Ops.slotKey(a).localeCompare(Ops.slotKey(b))).filter((slot) => !visibleDate || slot.date === visibleDate);
+    const byDate = new Map(); slots.forEach((slot) => { if (!byDate.has(slot.date || '날짜 미정')) byDate.set(slot.date || '날짜 미정', []); byDate.get(slot.date || '날짜 미정').push(slot); });
+    const board = $('#sessionCalendarBoard'); const columns = [...byDate.entries()].map(([date, dateSlots]) => {
+      const column = element('section', 'session-date-column'); column.append(element('h3', '', date === '날짜 미정' ? date : formatDate(date)));
+      dateSlots.forEach((slot) => {
+        const card = element('article', `session-slot-card status-${slot.status || 'draft'}`); card.dataset.sessionSlot = slot.id; card.tabIndex = 0;
+        const heading = element('div', 'session-slot-heading'); const title = element('span'); title.append(element('strong', '', `${slot.startTime || '--:--'}–${slot.endTime || '--:--'}`), element('small', '', slot.label || '이름 없는 세션'));
+        const actions = element('span', 'session-slot-actions'); const edit = element('button', '', '시간 변경'); edit.type = 'button'; edit.dataset.sessionEdit = slot.id; const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.sessionRemove = slot.id; remove.title = '세션 삭제'; actions.append(edit, remove); heading.append(title, actions); card.append(heading);
+        const assignments = element('div', 'session-assignments');
+        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person) return; const chip = element('div', 'session-assignment-chip'); chip.draggable = true; chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.title = '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
+        if (!assignments.children.length) assignments.append(element('div', 'session-drop-hint', '인원을 여기에 놓으세요'));
+        card.append(assignments); column.append(card);
+      }); return column;
+    });
+    const emptyDrop = element('button', 'session-empty-drop', '＋ 빈 시간에 놓기'); emptyDrop.type = 'button'; emptyDrop.dataset.sessionEmptyDrop = 'true'; emptyDrop.title = '인원을 놓으면 날짜와 시간을 입력합니다.';
+    board.replaceChildren(...columns, emptyDrop);
+    $('#sessionBoardStatus').textContent = `표시 인원 ${people.length}명 · 세션 ${slots.length}개 · 배정 ${project.data.assignments.filter((item) => slots.some((slot) => slot.id === item.slotId)).length}건`;
+  }
+
+  async function assignPersonToSession(personId, slotId, assignmentId = '') {
+    const project = activeProject(); const person = project?.data.people.find((item) => item.id === personId); const slot = project?.data.slots.find((item) => item.id === slotId); if (!project || !person || !slot) return;
+    pushScheduleHistory(project);
+    const existing = assignmentId ? project.data.assignments.find((item) => item.id === assignmentId) : null;
+    if (project.data.assignments.some((item) => item.slotId === slotId && item.personId === personId && item.id !== assignmentId)) { showToast('이미 이 세션에 배정된 사람입니다.'); return; }
+    if (existing) existing.slotId = slotId;
+    else { const selectedRole = $('#sessionRoleSelect')?.value; const role = project.data.roles.find((item) => item.id === selectedRole && item.active) || project.data.roles.find((item) => item.active && roleCandidates(project, item).some((candidate) => candidate.id === personId)) || project.data.roles.find((item) => item.active); project.data.assignments.push({ id: `assignment-${Date.now().toString(36)}`, slotId, personId, roleId: role?.id || '', roleName: role?.name || '참여', locked: false, source: 'session-board' }); }
+    if (slot.status === 'confirmed') slot.status = 'changed'; refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 인원 배정 변경됨'); renderSchedulePage();
+  }
+
+  async function addSessionFromText(defaultValue = '') {
+    const project = activeProject(); if (!project) return null; const value = await requestName('새 세션 날짜·시간', defaultValue || `${new Date().toISOString().slice(0, 10)} 09:00-10:00 새 세션`); if (!value) return null;
+    const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '예: 2026-08-20 09:00-10:00 필기 교육', 'error'); return null; }
+    pushScheduleHistory(project); const slot = parsed.slots[0]; project.data.slots.push(slot); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('새 세션 추가됨'); renderSchedulePage(); return slot;
   }
 
   function renderSchedulePage() {
@@ -1989,6 +2087,24 @@
     });
     $('#scheduleCellValue').addEventListener('change', () => { delete $('#scheduleCellValue').dataset.scheduleEditing; });
     $('#openScheduleRosterManager').addEventListener('click', () => void openRosterManager());
+    $('#sessionRosterView').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.scheduleRules.rosterViewId = event.target.value || null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 단계 명단 변경됨'); renderAvailability(project); renderSessionPlanner(project); });
+    ['sessionRoleSelect', 'sessionGroupFilter', 'sessionDateFilter'].forEach((id) => $(`#${id}`).addEventListener('change', () => { const project = activeProject(); if (project) renderSessionPlanner(project); }));
+    $('#sessionShowAllDates').addEventListener('click', () => { $('#sessionDateFilter').value = ''; const project = activeProject(); if (project) renderSessionPlanner(project); });
+    $('#sessionAddEmptyTime').addEventListener('click', () => void addSessionFromText());
+    $('#sessionPersonPool').addEventListener('click', (event) => { const chip = event.target.closest('[data-session-person]'); if (!chip) return; selectedSessionPersonId = selectedSessionPersonId === chip.dataset.sessionPerson ? null : chip.dataset.sessionPerson; const project = activeProject(); if (project) renderSessionPlanner(project); });
+    $('#sessionPersonPool').addEventListener('dragstart', (event) => { const chip = event.target.closest('[data-session-person]'); if (!chip) return; event.dataTransfer.setData('application/x-cmoe-person', chip.dataset.sessionPerson); event.dataTransfer.effectAllowed = 'copy'; });
+    $('#sessionCalendarBoard').addEventListener('dragstart', (event) => { const chip = event.target.closest('[data-session-assignment]'); if (!chip) return; event.dataTransfer.setData('application/x-cmoe-assignment', chip.dataset.sessionAssignment); event.dataTransfer.setData('application/x-cmoe-person', chip.dataset.sessionPerson); event.dataTransfer.effectAllowed = 'move'; });
+    $('#sessionCalendarBoard').addEventListener('dragover', (event) => { const target = event.target.closest('[data-session-slot], [data-session-empty-drop]'); if (!target) return; event.preventDefault(); target.classList.add('drag-over'); });
+    $('#sessionCalendarBoard').addEventListener('dragleave', (event) => { event.target.closest('[data-session-slot]')?.classList.remove('drag-over'); });
+    $('#sessionCalendarBoard').addEventListener('drop', async (event) => { const target = event.target.closest('[data-session-slot], [data-session-empty-drop]'); if (!target) return; event.preventDefault(); target.classList.remove('drag-over'); const personId = event.dataTransfer.getData('application/x-cmoe-person'); const assignmentId = event.dataTransfer.getData('application/x-cmoe-assignment'); if (!personId) return; if (target.dataset.sessionEmptyDrop) { const slot = await addSessionFromText(); if (slot) await assignPersonToSession(personId, slot.id, assignmentId); } else await assignPersonToSession(personId, target.dataset.sessionSlot, assignmentId); });
+    $('#sessionCalendarBoard').addEventListener('click', async (event) => {
+      const project = activeProject(); if (!project) return;
+      if (event.target.closest('[data-session-empty-drop]')) { await addSessionFromText(); return; }
+      const unassign = event.target.closest('[data-session-unassign]'); if (unassign) { pushScheduleHistory(project); project.data.assignments = project.data.assignments.filter((item) => item.id !== unassign.dataset.sessionUnassign); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 인원 제외됨'); renderSchedulePage(); return; }
+      const edit = event.target.closest('[data-session-edit]'); if (edit) { const slot = project.data.slots.find((item) => item.id === edit.dataset.sessionEdit); const value = await requestName('세션 시간 변경', `${slot.date} ${slot.startTime}-${slot.endTime} ${slot.label || ''}`); if (!value) return; const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '날짜와 시간을 확인해주세요.', 'error'); return; } pushScheduleHistory(project); const next = parsed.slots[0]; Object.assign(slot, { date: next.date, startTime: next.startTime, endTime: next.endTime, label: next.label, status: 'changed' }); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 시간 변경됨'); renderSchedulePage(); return; }
+      const remove = event.target.closest('[data-session-remove]'); if (remove) { const slot = project.data.slots.find((item) => item.id === remove.dataset.sessionRemove); const count = project.data.assignments.filter((item) => item.slotId === slot?.id).length; if (!slot || !await showConfirm(`${slot.date} ${slot.startTime} 세션을 삭제할까요? 배정 인원 ${count}명은 원본·단계 명단에서 삭제되지 않습니다.`, { title: '세션 삭제', action: '삭제' })) return; pushScheduleHistory(project); project.data.slots = project.data.slots.filter((item) => item.id !== slot.id); project.data.assignments = project.data.assignments.filter((item) => item.slotId !== slot.id); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 삭제됨'); renderSchedulePage(); return; }
+      const card = event.target.closest('[data-session-slot]'); if (card && selectedSessionPersonId) { const personId = selectedSessionPersonId; selectedSessionPersonId = null; await assignPersonToSession(personId, card.dataset.sessionSlot); }
+    });
     scheduleTable.addEventListener('click', (event) => {
       if (event.target.closest('[data-schedule-add-column-inline]')) { void addScheduleColumn(); return; }
       const remove = event.target.closest('[data-schedule-remove-column]'); if (remove) void removeScheduleColumn(remove.dataset.scheduleRemoveColumn);
@@ -2264,6 +2380,12 @@
     $('#openRosterManager').addEventListener('click', () => void openRosterManager());
     $('#openMailRosterManager').addEventListener('click', () => void openRosterManager());
     $('#openLibraryRosterManager').addEventListener('click', () => void openRosterManager());
+    $('#createRosterView').addEventListener('click', () => void createRosterViewFromCurrent(false));
+    $('#saveRosterViewAs').addEventListener('click', () => void createRosterViewFromCurrent(true));
+    $('#renameRosterView').addEventListener('click', async () => { const project = activeProject(); const view = activeRosterView(project); if (!project || !view) return; const name = await requestName('단계 명단 이름 변경', view.name); if (!name) return; view.name = name; view.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 이름 변경됨'); renderPeoplePage(); });
+    $('#deleteRosterView').addEventListener('click', async () => { const project = activeProject(); const view = activeRosterView(project); if (!project || !view || !await showConfirm(`“${view.name}” 단계 명단을 삭제할까요? 원본 명단과 일정 배정은 삭제되지 않습니다.`, { title: '단계 명단 삭제', action: '삭제' })) return; project.data.rosterViews = project.data.rosterViews.filter((item) => item.id !== view.id); project.data.activeRosterViewId = null; if (project.data.scheduleRules.rosterViewId === view.id) project.data.scheduleRules.rosterViewId = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 삭제됨'); renderPeoplePage(); });
+    $('#rosterViewSelect').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.activeRosterViewId = event.target.value || null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 전환됨'); renderPeoplePage(); });
+    $('#rosterViewPeople').addEventListener('click', async (event) => { const button = event.target.closest('[data-roster-view-toggle]'); const project = activeProject(); const view = activeRosterView(project); if (!button || !project || !view) return; const ids = new Set(view.excludedPersonIds || []); if (ids.has(button.dataset.rosterViewToggle)) ids.delete(button.dataset.rosterViewToggle); else ids.add(button.dataset.rosterViewToggle); view.excludedPersonIds = [...ids]; view.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 인원 변경됨'); renderPeoplePage(); });
     $('#rosterStartTask').addEventListener('click', openRosterTaskChooser);
     $('#arrangementNewTask').addEventListener('click', openRosterTaskChooser);
     $('#existingArrangementList').addEventListener('click', async (event) => { const button = event.target.closest('[data-open-arrangement]'); const project = activeProject(); if (!button || !project) return; project.data.activeWorkItemId = button.dataset.openArrangement; arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); closeDialog('rosterTaskChooserDialog'); navigate('arrange'); await persist(); });
