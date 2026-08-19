@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('gmailFlowDesktop', {
   getProfileUserInfo: () => ipcRenderer.invoke('identity:get-profile'),
   openWindow: () => ipcRenderer.invoke('window:show'),
   openWorkspace: () => ipcRenderer.invoke('workspace:open-main'),
+  loadWorkspaceRoster: (projectId) => ipcRenderer.invoke('workspace:roster:get', projectId),
+  saveWorkspaceRoster: (projectId, roster) => ipcRenderer.invoke('workspace:roster:save', projectId, roster),
+  closeWindow: () => ipcRenderer.invoke('window:close-self'),
   openGoogleUrl: async (url) => {
     const response = await ipcRenderer.invoke('external:open-google', url);
     if (!response?.ok) throw new Error(response?.error || 'Gmail을 열지 못했습니다.');

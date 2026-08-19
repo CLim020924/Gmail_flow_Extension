@@ -48,7 +48,10 @@ const CLOUD_SYNC_META_KEY = 'cloudSyncMeta';
 const CLOUD_SYNC_KEYS = ['savedRosters', 'templates', 'structureTemplates', WORKSPACE_DRAFT_KEY];
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
-const isWindowMode = new URLSearchParams(globalThis.location?.search || '').get('mode') === 'window';
+const launchParams = new URLSearchParams(globalThis.location?.search || '');
+const isWindowMode = launchParams.get('mode') === 'window';
+const rosterManagerMode = launchParams.get('rosterManager') === '1';
+const workspaceProjectId = launchParams.get('projectId') || '';
 let workspaceSaveTimer = null;
 let restoringWorkspace = false;
 let cellSelection = null;
@@ -58,6 +61,7 @@ let composeInsertionTarget = 'body';
 let cloudSyncApplying = false;
 let cloudSyncDirty = false;
 if (isWindowMode) document.body.classList.add('window-mode');
+if (rosterManagerMode) document.body.classList.add('roster-manager-mode');
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -336,13 +340,13 @@ function captureWorkspace() {
 }
 
 function scheduleWorkspaceSave() {
-  if (restoringWorkspace) return;
+  if (restoringWorkspace || rosterManagerMode) return;
   clearTimeout(workspaceSaveTimer);
   workspaceSaveTimer = setTimeout(flushWorkspaceSave, 120);
 }
 
 function flushWorkspaceSave() {
-  if (restoringWorkspace) return Promise.resolve();
+  if (restoringWorkspace || rosterManagerMode) return Promise.resolve();
   clearTimeout(workspaceSaveTimer);
   workspaceSaveTimer = null;
   return storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
@@ -370,6 +374,17 @@ async function restoreWorkspace() {
   $('#emptyDraftToggle').textContent = state.emptyDraftEnabled ? '－' : '＋';
   $('#emptyDraftToggle').setAttribute('aria-expanded', String(state.emptyDraftEnabled));
   restoringWorkspace = false;
+}
+
+async function restoreWorkspaceRoster() {
+  if (!rosterManagerMode || !globalThis.gmailFlowDesktop?.loadWorkspaceRoster) return;
+  const roster = await globalThis.gmailFlowDesktop.loadWorkspaceRoster(workspaceProjectId);
+  state.columns = Array.isArray(roster.columns) ? roster.columns : [];
+  state.rows = Array.isArray(roster.rows) ? roster.rows : [];
+  state.activeRosterName = roster.projectName ? `${roster.projectName} 명단` : '프로젝트 명단';
+  state.page = 'roster';
+  $('#useRoster').textContent = '프로젝트에 적용하고 닫기';
+  $('#rosterContext').textContent = `${roster.projectName || '현재 프로젝트'}와 연결된 공용 명단`;
 }
 
 function renderCloudSyncStatus(message = '') {
@@ -1879,7 +1894,19 @@ function bindEvents() {
     closeMenus(); event.target.value = '';
   });
   $('#resetRoster').addEventListener('click', async () => { closeMenus(); if (!await showConfirm('현재 명단 편집 내용을 초기화할까요?', '명단 초기화', '초기화')) return; state.columns = []; state.rows = []; cellSelection = null; state.activeRosterName = ''; state.activeStructureTemplateId = ''; $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음'; renderRoster(); updateActiveRosterText(); updateComposeState(); queueMicrotask(() => $('#addColumn')?.focus()); });
-  $('#useRoster').addEventListener('click', () => { state.activeRosterName ||= '현재 명단'; updateActiveRosterText(); updateComposeState(); showPage('compose'); });
+  $('#useRoster').addEventListener('click', async () => {
+    state.activeRosterName ||= '현재 명단'; updateActiveRosterText(); updateComposeState();
+    if (!rosterManagerMode) { showPage('compose'); return; }
+    try {
+      $('#useRoster').disabled = true; $('#useRoster').textContent = '프로젝트에 적용 중…';
+      await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName });
+      await globalThis.gmailFlowDesktop.openWorkspace();
+      await globalThis.gmailFlowDesktop.closeWindow();
+    } catch (error) {
+      $('#useRoster').disabled = false; $('#useRoster').textContent = '프로젝트에 적용하고 닫기';
+      await showAlert(error.message, '명단을 저장하지 못했습니다');
+    }
+  });
   $('#rosterHead').addEventListener('click', async (event) => {
     if (event.target.id === 'addColumn') {
       const name = await requestTextInput({ title: '컬럼 추가', label: '컬럼 이름', defaultValue: '이름', maxLength: 100 });
@@ -2174,6 +2201,7 @@ async function init() {
   state.dataStorageMode = await storage.get(DATA_STORAGE_MODE_KEY, 'local') === 'drive' ? 'drive' : 'local';
   state.cloudSyncMeta = await storage.get(CLOUD_SYNC_META_KEY, null);
   await restoreWorkspace();
+  await restoreWorkspaceRoster();
   restoringWorkspace = true;
   bindEvents();
   renderRoster();
@@ -2189,7 +2217,7 @@ async function init() {
   renderAttachments();
   renderCloudSyncStatus();
   updateComposeState();
-  showPage(state.page);
+  showPage(rosterManagerMode ? 'roster' : state.page);
   restoringWorkspace = false;
   try {
     const connection = await updateConnectionStatus();

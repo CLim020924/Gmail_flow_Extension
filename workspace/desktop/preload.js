@@ -3,9 +3,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('workspaceDesktop', {
   loadState: () => ipcRenderer.invoke('workspace:load'),
   saveState: (state) => ipcRenderer.invoke('workspace:save', state),
+  loadWorkspaceRoster: (projectId) => ipcRenderer.invoke('workspace:roster:get', projectId),
+  saveWorkspaceRoster: (projectId, roster) => ipcRenderer.invoke('workspace:roster:save', projectId, roster),
   getAppInfo: () => ipcRenderer.invoke('workspace:app-info'),
   gmailFlowSummary: () => ipcRenderer.invoke('gmail-flow:summary'),
-  openProgram: (programId) => ipcRenderer.invoke('program:open', programId),
+  openProgram: (programId, options) => ipcRenderer.invoke('program:open', programId, options),
   openWorkspace: () => ipcRenderer.invoke('workspace:open-main'),
   createProgramShortcuts: (programId, options) => ipcRenderer.invoke('program:shortcuts', programId, options),
   removeProgramShortcuts: (programId) => ipcRenderer.invoke('program:remove-shortcuts', programId),

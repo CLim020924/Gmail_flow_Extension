@@ -580,7 +580,6 @@
         actions.append(rename, duplicate, remove); row.append(copy, actions); container.append(row);
       });
     };
-    renderItems($('#libraryRosterList'), state.library.rosters, 'roster', '저장한 명단이 없습니다. 명단 화면에서 현재 명단을 이름을 붙여 저장할 수 있습니다.');
     renderItems($('#libraryMailTemplateList'), state.library.mailTemplates, 'mailTemplate', '저장한 메일 양식이 없습니다. 메일 작성 화면에서 현재 내용을 저장할 수 있습니다.');
     const workflowList = $('#libraryWorkflowTemplateList'); workflowList.replaceChildren();
     state.library.workflowTemplates.slice().sort((a, b) => a.category.localeCompare(b.category, 'ko') || a.name.localeCompare(b.name, 'ko') || b.version - a.version).forEach((template) => {
@@ -729,6 +728,12 @@
     $('#rosterWarningMetric').textContent = String(warnings.length);
     $('#rosterImportWarnings').hidden = warnings.length === 0;
     $('#rosterImportWarnings').textContent = warnings.slice(0, 20).join('\n');
+    $('#rosterManagerSummary').textContent = project.data.people.length
+      ? `${project.data.people.length}명이 연결되어 있습니다. 공용 명단 관리 창에서 수정하면 일정과 메일에도 함께 반영됩니다.`
+      : '아직 입력된 사람이 없습니다. 공용 명단 관리 창을 열어 첫 명단을 입력하세요.';
+    const summary = $('#rosterColumnSummary');
+    summary.replaceChildren(...project.data.columns.map((column) => element('span', 'tag', `${column.name} · ${column.type || '텍스트'}`)));
+    return;
 
     const rosterSelect = $('#sharedRosterSelect'); rosterSelect.replaceChildren(element('option', '', '저장한 명단 선택'));
     state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${roster.people?.length || 0}명`); option.value = roster.id; rosterSelect.append(option); });
@@ -1142,8 +1147,6 @@
     renderAvailability(project);
     renderScheduleBoard(project);
     $('#scheduleProjectRosterStatus').textContent = `현재 프로젝트 명단 ${project.data.people.filter((person) => person.active !== false).length}명은 배정 후보로 자동 연결되어 있습니다.`;
-    const rosterSelect = $('#scheduleRosterSelect'); rosterSelect.replaceChildren(element('option', '', '전역 저장 명단 선택'));
-    state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${roster.people?.length || 0}명`); option.value = roster.id; rosterSelect.append(option); });
   }
 
   function scheduleHeaderKey(value, project) {
@@ -1382,6 +1385,7 @@
 
   async function openRelatedProgram(targetId) {
     if (!state.installedExtensions.includes(targetId)) { showToast('해당 프로그램을 먼저 설치해주세요.', 'error'); if (!standaloneProgram) navigate('modules'); else await globalThis.workspaceDesktop.openWorkspace(); return; }
+    if (targetId === 'people') { await openRosterManager(); return; }
     if (!standaloneProgram) { navigate(targetId); return; }
     const source = activeProject(); const target = state.quickWorkspaces[targetId];
     if (source && target && source.id !== target.id) {
@@ -1451,8 +1455,6 @@
     }
     const templateSelect = $('#sharedMailTemplateSelect'); templateSelect.replaceChildren(element('option', '', '저장한 메일 양식 선택'));
     state.library.mailTemplates.forEach((template) => { const option = element('option', '', template.name); option.value = template.id; templateSelect.append(option); });
-    const rosterSelect = $('#gmailSharedRosterSelect'); rosterSelect.replaceChildren(element('option', '', '저장한 명단 선택'));
-    state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${roster.people?.length || 0}명`); option.value = roster.id; rosterSelect.append(option); });
     renderTemplateVariables(project);
     const pkg = Ops.buildMailPackage(project);
     const empty = pkg.entries.filter((entry) => !entry.assignments.length).length;
@@ -1626,6 +1628,11 @@
     if (Core.MODULE_CATALOG.some((item) => item.id === moduleId && item.page)) {
       navigate(moduleId);
     }
+  }
+
+  function openRosterManager() {
+    const project = activeProject();
+    return globalThis.workspaceDesktop.openProgram('people', { projectId: project?.id || '' });
   }
 
   async function createProjectFromForm(event) {
@@ -1836,6 +1843,7 @@
     $$('.template-variable-palette').forEach((palette) => palette.addEventListener('click', (event) => { const token = event.target.closest('[data-template-token]'); if (token) insertTemplateToken(token.dataset.templateToken, token.dataset.templateTargetGroup); }));
 
     const rosterTable = $('#rosterEditorTable');
+    if (rosterTable) {
     rosterTable.addEventListener('pointerdown', (event) => {
       if (event.button !== 0) return; const cell = event.target.closest('[data-sheet-row][data-sheet-col]'); if (!cell) return;
       const point = { row: Number(cell.dataset.sheetRow), col: Number(cell.dataset.sheetCol) };
@@ -1881,6 +1889,7 @@
       const project = activeProject(); if (!project) return;
       if (event.target.closest('[data-empty-sheet-add-column], [data-roster-add-column]')) addRosterColumn(project);
     });
+    }
 
     const arrangementBoard = $('#arrangementBoard');
     arrangementBoard.addEventListener('mousedown', (event) => {
@@ -1979,7 +1988,7 @@
       else setScheduleCellValue(project, scheduleSelection.focus.row, scheduleSelection.focus.col, event.target.value); const input = $(`[data-schedule-row="${scheduleSelection.focus.row}"][data-schedule-col="${scheduleSelection.focus.col}"] input`, scheduleTable); if (input) input.value = event.target.value; queueSchedulePersist(project);
     });
     $('#scheduleCellValue').addEventListener('change', () => { delete $('#scheduleCellValue').dataset.scheduleEditing; });
-    $('#scheduleMergeRoster').addEventListener('click', () => void mergeScheduleRoster($('#scheduleRosterSelect').value));
+    $('#openScheduleRosterManager').addEventListener('click', () => void openRosterManager());
     scheduleTable.addEventListener('click', (event) => {
       if (event.target.closest('[data-schedule-add-column-inline]')) { void addScheduleColumn(); return; }
       const remove = event.target.closest('[data-schedule-remove-column]'); if (remove) void removeScheduleColumn(remove.dataset.scheduleRemoveColumn);
@@ -2099,13 +2108,13 @@
     });
     $('#projectSettingsButton').addEventListener('click', openProjectSettings);
     $('#addConnectionButton').addEventListener('click', () => openDialog('connectionDialog'));
-    $('#saveSharedRoster').addEventListener('click', async () => {
+    $('#saveSharedRoster')?.addEventListener('click', async () => {
       const project = activeProject(); if (!project?.data.people.length) { showToast('저장할 명단이 없습니다.', 'error'); return; }
       const name = await requestName('저장할 명단 이름', `${project.name} 명단`); if (!name) return;
       state.library.rosters.push({ id: `roster-${Date.now().toString(36)}`, name, columns: JSON.parse(JSON.stringify(project.data.columns)), people: JSON.parse(JSON.stringify(project.data.people)), savedAt: new Date().toISOString() });
       await persist(); renderPeoplePage(); showToast('나중에 다시 사용할 수 있도록 명단을 저장했습니다.', 'success');
     });
-    $('#loadSharedRoster').addEventListener('click', async () => {
+    $('#loadSharedRoster')?.addEventListener('click', async () => {
       const project = activeProject(); const roster = state.library.rosters.find((item) => item.id === $('#sharedRosterSelect').value); if (!project || !roster) { showToast('불러올 명단을 먼저 선택해주세요.', 'error'); return; }
       project.data.columns = JSON.parse(JSON.stringify(roster.columns)); project.data.people = JSON.parse(JSON.stringify(roster.people));
       state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast('저장한 명단을 현재 작업으로 불러왔습니다.', 'success');
@@ -2119,12 +2128,12 @@
       const template = state.library.mailTemplates.find((item) => item.id === $('#sharedMailTemplateSelect').value); if (!template) { showToast('불러올 메일 양식을 먼저 선택해주세요.', 'error'); return; }
       $('#mailSubjectTemplate').value = template.subject; $('#mailBodyEditor').innerHTML = sanitizeRichHtml(template.bodyHtml); showToast('저장한 메일 양식을 불러왔습니다.', 'success');
     });
-    $('#loadGmailSharedRoster').addEventListener('click', async () => {
+    $('#loadGmailSharedRoster')?.addEventListener('click', async () => {
       const project = activeProject(); const roster = state.library.rosters.find((item) => item.id === $('#gmailSharedRosterSelect').value); if (!project || !roster) { showToast('메일을 보낼 사람의 명단을 선택해주세요.', 'error'); return; }
       project.data.columns = JSON.parse(JSON.stringify(roster.columns)); project.data.people = JSON.parse(JSON.stringify(roster.people));
       state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast(`${roster.people.length}명을 메일 작업에 불러왔습니다.`, 'success');
     });
-    $('#applyGmailRosterPaste').addEventListener('click', async () => {
+    $('#applyGmailRosterPaste')?.addEventListener('click', async () => {
       const text = $('#gmailRosterPaste').value.trim(); if (!text) { showToast('붙여넣은 명단 데이터가 없습니다.', 'error'); return; }
       const matrix = Ops.parseDelimited(text); if (!matrix.length) { showToast('명단 구조를 인식하지 못했습니다.', 'error'); return; }
       await applyRosterMatrix(matrix); $('#gmailRosterPaste').value = ''; navigate('gmailFlow');
@@ -2230,12 +2239,12 @@
       await persist(); renderAll();
     });
 
-    $('#applyRosterPaste').addEventListener('click', () => {
+    $('#applyRosterPaste')?.addEventListener('click', () => {
       const matrix = Ops.parseDelimited($('#rosterPasteInput').value);
       if (!matrix.length) { showToast('붙여넣은 데이터가 없습니다.', 'error'); return; }
       void applyRosterMatrix(matrix);
     });
-    $('#rosterFileInput').addEventListener('change', async (event) => {
+    $('#rosterFileInput')?.addEventListener('change', async (event) => {
       const file = event.target.files?.[0]; if (!file) return;
       const bytes = new Uint8Array(await file.arrayBuffer());
       let text;
@@ -2244,14 +2253,17 @@
       await applyRosterMatrix(Ops.parseDelimited(text));
       event.target.value = '';
     });
-    $('#chooseExcelRoster').addEventListener('click', async () => {
+    $('#chooseExcelRoster')?.addEventListener('click', async () => {
       if (!globalThis.workspaceDesktop?.chooseSpreadsheet) { showToast('Excel 직접 가져오기는 데스크톱 앱에서 사용할 수 있습니다.', 'error'); return; }
       try {
         const result = await globalThis.workspaceDesktop.chooseSpreadsheet();
         if (!result.canceled) await applyRosterMatrix(result.matrix);
       } catch (error) { showToast(`Excel을 읽지 못했습니다: ${error.message}`, 'error'); }
     });
-    $('#saveRosterData').addEventListener('click', () => void saveRoster());
+    $('#saveRosterData')?.addEventListener('click', () => void saveRoster());
+    $('#openRosterManager').addEventListener('click', () => void openRosterManager());
+    $('#openMailRosterManager').addEventListener('click', () => void openRosterManager());
+    $('#openLibraryRosterManager').addEventListener('click', () => void openRosterManager());
     $('#rosterStartTask').addEventListener('click', openRosterTaskChooser);
     $('#arrangementNewTask').addEventListener('click', openRosterTaskChooser);
     $('#existingArrangementList').addEventListener('click', async (event) => { const button = event.target.closest('[data-open-arrangement]'); const project = activeProject(); if (!button || !project) return; project.data.activeWorkItemId = button.dataset.openArrangement; arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); closeDialog('rosterTaskChooserDialog'); navigate('arrange'); await persist(); });

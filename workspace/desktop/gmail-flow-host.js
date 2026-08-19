@@ -35,6 +35,32 @@ class GmailFlowHost {
     this.startupListeners.forEach((listener) => Promise.resolve(listener()).catch(console.error));
   }
 
+  async importLegacyRosters(rosters = []) {
+    const migrationKey = 'workspaceRosterMigrationV1';
+    if (await this.storage.get(migrationKey, false)) return { imported: 0 };
+    const saved = await this.storage.get('savedRosters', []);
+    const existingIds = new Set(saved.map((item) => item.id));
+    const imported = (Array.isArray(rosters) ? rosters : []).filter((roster) => roster?.id && !existingIds.has(`workspace-${roster.id}`)).map((roster) => {
+      const columns = (roster.columns || []).map((column, index) => ({
+        id: column.id || `legacy-column-${index}`,
+        name: String(column.name || `컬럼${index + 1}`),
+        role: column.type === 'email' ? 'email' : 'variable',
+        workspaceType: column.type || 'text'
+      }));
+      return {
+        id: `workspace-${roster.id}`,
+        name: roster.name || '이전 Workspace 명단',
+        columns,
+        rows: (roster.people || []).map((person) => ({ ...(person.values || {}), __workspacePersonId: person.id || '' })),
+        linkedTemplateId: '', linkedStructureTemplateId: '',
+        createdAt: roster.savedAt || new Date().toISOString(), updatedAt: roster.savedAt || new Date().toISOString()
+      };
+    });
+    if (imported.length) await this.storage.set('savedRosters', [...imported, ...saved]);
+    await this.storage.set(migrationKey, true);
+    return { imported: imported.length };
+  }
+
   createChromeCompatibility() {
     global.chrome = {
       storage: { local: { get: (keys) => this.storage.get(keys), set: (values) => this.storage.set(values) } },

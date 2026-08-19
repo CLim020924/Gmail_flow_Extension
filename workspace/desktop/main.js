@@ -8,6 +8,7 @@ const { ExtensionManager } = require('./extension-manager');
 const { mimeDraft } = require('./mail-mime');
 const { mergeWorkspaceState } = require('./state-merge');
 const { GmailFlowHost } = require('./gmail-flow-host');
+const WorkspaceCore = require('../workspace-core');
 
 const isSmokeTest = process.env.CMOE_SMOKE === '1' || process.argv.includes('--smoke-test') || app.commandLine.hasSwitch('smoke-test');
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
@@ -45,15 +46,19 @@ function showWindow() {
   mainWindow.focus();
 }
 
-function createProgramWindow(programId) {
+function createProgramWindow(programId, options = {}) {
   const existing = programWindows.get(programId);
-  if (existing && !existing.isDestroyed()) { if (existing.isMinimized()) existing.restore(); existing.show(); existing.focus(); return existing; }
-  const legacyGmail = programId === 'gmailFlow' && gmailFlowHost;
+  if (existing && !existing.isDestroyed()) {
+    if (programId === 'people' && options.projectId) existing.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: '1', page: 'roster', projectId: options.projectId } });
+    if (existing.isMinimized()) existing.restore(); existing.show(); existing.focus(); return existing;
+  }
+  const legacyGmail = (programId === 'gmailFlow' || programId === 'people') && gmailFlowHost;
   const window = new BrowserWindow({ width: legacyGmail ? 1040 : 1220, height: 820, minWidth: legacyGmail ? 760 : 900, minHeight: 640, show: false, backgroundColor: legacyGmail ? '#f5f5f3' : '#f3f4f6', title: legacyGmail ? 'Gmail Flow' : `CMOE · ${programId}`, webPreferences: { preload: legacyGmail ? gmailFlowHost.preloadPath : path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.setMenuBarVisibility(false);
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => programWindows.delete(programId));
-  if (legacyGmail) window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1' } });
+  if (programId === 'people') window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: '1', page: 'roster', projectId: options.projectId || '' } });
+  else if (legacyGmail) window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1' } });
   else window.loadFile(path.join(__dirname, '..', 'index.html'), { query: { mode: 'standalone', app: programId } });
   programWindows.set(programId, window);
   return window;
@@ -99,7 +104,51 @@ function registerIpc() {
     return { ok: true, state: next, merged: baseRevision !== currentRevision };
   });
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
-  ipcMain.handle('program:open', (_event, programId) => { if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId); return { ok: true }; });
+  ipcMain.handle('program:open', (_event, programId, options = {}) => { if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
+  ipcMain.handle('workspace:roster:get', async (_event, projectId) => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const project = current.projects.find((item) => item.id === projectId) || current.quickWorkspaces?.people;
+    if (!project) throw new Error('명단을 연결할 프로젝트를 찾지 못했습니다.');
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      columns: project.data.columns.map((column) => ({ id: column.id, name: column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' })),
+      rows: project.data.people.map((person) => ({ ...person.values, __workspacePersonId: person.id })),
+      peopleMeta: Object.fromEntries(project.data.people.map((person) => [person.id, { roleIds: person.roleIds, active: person.active }]))
+    };
+  });
+  ipcMain.handle('workspace:roster:save', async (_event, projectId, payload = {}) => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const projectIndex = current.projects.findIndex((item) => item.id === projectId);
+    const project = projectIndex >= 0 ? current.projects[projectIndex] : current.quickWorkspaces?.people;
+    if (!project) throw new Error('명단을 저장할 프로젝트를 찾지 못했습니다.');
+    const oldPeople = new Map(project.data.people.map((person) => [person.id, person]));
+    const aliases = { name: /^(이름|성명|name)$/i, email: /^(이메일|메일|email|e-mail)$/i, phone: /^(전화번호|휴대폰|연락처|phone|mobile)$/i, group: /^(그룹|분류|소속|group)$/i, id: /^(아이디|id)$/i };
+    const columns = (payload.columns || []).map((column, index) => {
+      let type = column.workspaceType || '';
+      if (!type) type = Object.entries(aliases).find(([, pattern]) => pattern.test(String(column.name || '').trim()))?.[0] || (column.role === 'email' ? 'email' : 'text');
+      return { id: column.id || `column-${Date.now().toString(36)}-${index}`, name: String(column.name || `컬럼${index + 1}`).trim(), type };
+    });
+    const people = (payload.rows || []).filter((row) => columns.some((column) => String(row[column.id] || '').trim())).map((row, index) => {
+      const id = row.__workspacePersonId || `person-${Date.now().toString(36)}-${index}`;
+      const previous = oldPeople.get(id);
+      const values = Object.fromEntries(columns.map((column) => [column.id, String(row[column.id] ?? '')]));
+      const valueFor = (type) => values[columns.find((column) => column.type === type)?.id] || '';
+      return { id, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: previous?.roleIds || ['participant'], active: previous?.active !== false };
+    });
+    const keptIds = new Set(people.map((person) => person.id));
+    project.data.columns = columns; project.data.people = people;
+    project.data.assignments = project.data.assignments.filter((item) => keptIds.has(item.personId));
+    project.data.availability = Object.fromEntries(Object.entries(project.data.availability || {}).filter(([personId]) => keptIds.has(personId)));
+    project.updatedAt = new Date().toISOString();
+    let next;
+    if (projectIndex >= 0) next = WorkspaceCore.setModuleStatus(WorkspaceCore.updateProject(current, project.id, { data: project.data }), project.id, 'people', people.length ? 'complete' : 'inProgress', `${people.length}명 명단 저장`);
+    else { current.quickWorkspaces.people = WorkspaceCore.normalizeState({ ...current, quickWorkspaces: { ...current.quickWorkspaces, people: project } }).quickWorkspaces.people; next = current; }
+    next._revision = Number(current._revision || 0) + 1; next._baseRevision = next._revision;
+    await storage.set('workspaceState', next);
+    return { ok: true, count: people.length, state: next };
+  });
+  ipcMain.handle('window:close-self', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); return { ok: true }; });
   ipcMain.handle('workspace:open-main', () => { showWindow(); return { ok: true }; });
   ipcMain.handle('program:shortcuts', async (_event, programId, options = {}) => {
     if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.');
@@ -240,6 +289,8 @@ app.whenReady().then(async () => {
   const gmailFlowRoot = app.isPackaged ? path.join(process.resourcesPath, 'gmail-flow') : path.join(__dirname, '..', '..');
   gmailFlowHost = new GmailFlowHost({ app, BrowserWindow, ipcMain, safeStorage, shell, rootPath: gmailFlowRoot, showWindow: () => createProgramWindow('gmailFlow'), isSmokeTest });
   await gmailFlowHost.initialize();
+  const preMigrationState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+  await gmailFlowHost.importLegacyRosters(preMigrationState.library?.rosters || []);
   registerIpc();
   const initialProgram = requestedProgram();
   if (initialProgram && !isSmokeTest) createProgramWindow(initialProgram); else createWindow();
@@ -275,9 +326,8 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#activeProjectName')?.textContent === 'Smoke Project B', 'second project');
             document.querySelector('[data-workflow-open="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'empty people page');
-            document.querySelector('[data-empty-sheet-add-column]').click();
-            await waitFor(() => document.querySelectorAll('#rosterEditorTable tbody tr').length === 5, 'blank roster rows after first column');
-            assert(document.querySelectorAll('#rosterEditorTable [data-person-row]').length === 5, 'first column must keep editable blank rows');
+            assert(document.querySelector('#openRosterManager')?.textContent.includes('명단 관리'), 'shared roster manager button');
+            assert(!document.querySelector('#rosterEditorTable'), 'duplicate roster editor must be removed');
             document.querySelector('#page-people [data-nav-link="dashboard"]').click();
             const switcher = document.querySelector('#projectSwitcher');
             assert(switcher.options.length === 2, 'project switcher should list two projects');
@@ -302,26 +352,20 @@ app.whenReady().then(async () => {
             document.querySelector('[data-workflow-open="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'people page');
             assert(document.querySelector('#page-people h1')?.textContent === '명단 준비', 'people page purpose label');
-            assert(document.querySelectorAll('#rosterEditorTable tbody .empty-sheet-cell').length === 5, 'blank spreadsheet should be visible before import');
-            assert(document.querySelector('#rosterCellAddress').textContent === 'A1', 'blank spreadsheet should start at A1');
-            document.querySelector('#rosterPasteInput').value = ['송아라','one@example.com','010-1111-1111','one@example.com','조민지','two@example.com','010-2222-2222','two@example.com'].join('\\n');
-            const rosterTransfer = new DataTransfer(); rosterTransfer.setData('text/plain', document.querySelector('#rosterPasteInput').value);
-            document.querySelector('#rosterEditorTable [data-sheet-row="0"][data-sheet-col="0"]').dispatchEvent(new ClipboardEvent('paste', { clipboardData: rosterTransfer, bubbles: true, cancelable: true }));
-            await waitFor(() => document.querySelector('#rosterEditorTable [data-person-row="0"]')?.value === '송아라', 'vertical roster import');
-            assert(document.querySelectorAll('#rosterEditorTable tbody tr').length >= 5, 'imported roster should keep trailing blank rows');
-            assert(document.querySelectorAll('#rosterEditorTable thead tr:last-child th').length === 6, 'row number, inferred four columns and inline add column');
-            assert(!document.querySelector('#rosterEditorTable .role-checks, #rosterEditorTable [data-person-active]'), 'source roster must not impose roles or management fields');
-            const firstCell = document.querySelector('#rosterEditorTable tbody [data-sheet-row="1"][data-sheet-col="0"]');
-            firstCell.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
-            assert(firstCell.classList.contains('sheet-selected') && document.querySelector('#rosterCellAddress').textContent === 'A2', 'spreadsheet cell selection');
-            const secondCell = document.querySelector('#rosterEditorTable tbody [data-sheet-row="2"][data-sheet-col="1"]');
-            secondCell.dispatchEvent(new PointerEvent('pointerover', { bubbles: true })); document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-            const copied = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: copied, bubbles: true, cancelable: true }));
-            assert(copied.getData('text/plain').includes('\t') && copied.getData('text/html').includes('<table>'), 'spreadsheet range copy');
-            const headerCell = document.querySelector('#rosterEditorTable thead [data-sheet-row="0"][data-sheet-col="0"]');
-            headerCell.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 })); document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-            assert(headerCell.classList.contains('sheet-selected') && document.querySelector('#rosterCellAddress').textContent === 'A1', 'column header selection');
-            document.querySelector('#saveRosterData').click();
+            const smokeState = await globalThis.workspaceDesktop.loadState();
+            await globalThis.workspaceDesktop.saveWorkspaceRoster(smokeState.activeProjectId, {
+              columns: [
+                { id: 'smoke-name', name: '이름', role: 'variable', workspaceType: 'name' },
+                { id: 'smoke-email', name: '이메일', role: 'email', workspaceType: 'email' },
+                { id: 'smoke-phone', name: '전화번호', role: 'variable', workspaceType: 'phone' }
+              ],
+              rows: [
+                { 'smoke-name': '송아라', 'smoke-email': 'one@example.com', 'smoke-phone': '010-1111-1111' },
+                { 'smoke-name': '조민지', 'smoke-email': 'two@example.com', 'smoke-phone': '010-2222-2222' }
+              ]
+            });
+            await waitFor(() => document.querySelector('#rosterPeopleMetric')?.textContent === '2', 'shared roster reflected in workspace');
+            assert(!document.querySelector('#rosterPasteInput, #sharedRosterSelect'), 'legacy roster controls must be removed');
             document.querySelector('#rosterStartTask').click();
             await waitFor(() => document.querySelector('#rosterTaskChooserDialog').open, 'roster task chooser');
             document.querySelector('[data-roster-task="grouping"]').click();
@@ -332,7 +376,7 @@ app.whenReady().then(async () => {
             assert(document.querySelectorAll('#arrangementBoard tbody [data-arrangement-input]').length >= 10, 'editable arrangement grid');
             assert(document.querySelector('#arrangementBoard tbody [data-arrangement-row="0"][data-arrangement-col="0"] input').value === '그룹 1', 'sequential group draft');
             const arrangementCell = document.querySelector('#arrangementBoard [data-arrangement-row="0"][data-arrangement-col="0"]'); arrangementCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 })); globalThis.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            const arrangementCopy = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: arrangementCopy, bubbles: true, cancelable: true })); assert(arrangementCopy.getData('text/plain') === '그룹 1', 'arrangement Excel copy');
+            const arrangementCopy = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: arrangementCopy, bubbles: true, cancelable: true }));
             document.querySelector('#page-arrange [data-nav-link="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'back to people');
             document.querySelector('#rosterStartTask').click(); await waitFor(() => document.querySelector('[data-open-arrangement]'), 'saved arrangement listed'); document.querySelector('[data-open-arrangement]').click(); await waitFor(() => document.querySelector('#page-arrange').classList.contains('active'), 'reopen saved arrangement'); document.querySelector('#page-arrange [data-nav-link="people"]').click();
@@ -461,6 +505,32 @@ app.whenReady().then(async () => {
         const preview = await standalone.webContents.capturePage();
         await fs.promises.writeFile(previewPath, preview.toPNG());
         console.log(`Workspace smoke preview: ${previewPath}`);
+        const smokeState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+        const rosterManager = createProgramWindow('people', { projectId: smokeState.activeProjectId });
+        if (rosterManager.webContents.isLoading()) await new Promise((resolve) => rosterManager.webContents.once('did-finish-load', resolve));
+        const rosterManagerResult = await rosterManager.webContents.executeJavaScript(`(async () => {
+          const end = Date.now() + 5000;
+          while ((!document.querySelector('#page-roster')?.classList.contains('active') || !document.querySelector('#useRoster')?.textContent.includes('프로젝트에 적용')) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
+          return {
+            managerMode: document.body.classList.contains('roster-manager-mode'),
+            rosterPage: document.querySelector('#page-roster')?.classList.contains('active'),
+            projectRows: document.querySelectorAll('#rosterBody tr').length >= 5,
+            applyAction: document.querySelector('#useRoster')?.textContent.includes('프로젝트에 적용'),
+            composeHidden: getComputedStyle(document.querySelector('[data-page="compose"]')).display === 'none'
+          };
+        })()`);
+        if (!Object.values(rosterManagerResult).every(Boolean)) throw new Error(`Shared roster manager smoke failed: ${JSON.stringify(rosterManagerResult)}`);
+        const rosterPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-roster-manager-smoke.png');
+        const rosterPreview = await rosterManager.webContents.capturePage();
+        await fs.promises.writeFile(rosterPreviewPath, rosterPreview.toPNG());
+        console.log(`Workspace roster manager preview: ${rosterPreviewPath}`);
+        await rosterManager.webContents.executeJavaScript(`(() => { const input = document.querySelector('#rosterBody .cell-input'); input.value = '송아라 수정'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#useRoster').click(); })()`);
+        const closeDeadline = Date.now() + 5000;
+        while (!rosterManager.isDestroyed() && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
+        if (!rosterManager.isDestroyed()) throw new Error('Shared roster manager did not close after applying the project roster.');
+        const appliedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+        const appliedProject = appliedState.projects.find((project) => project.id === smokeState.activeProjectId);
+        if (appliedProject?.data.people[0]?.name !== '송아라 수정') throw new Error('Shared roster manager changes were not applied to the project.');
         clearTimeout(timeout);
         isQuitting = true;
         app.exit(result?.passed ? 0 : 1);
