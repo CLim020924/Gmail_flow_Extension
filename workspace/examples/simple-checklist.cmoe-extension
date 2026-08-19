@@ -1,0 +1,25 @@
+{
+  "format": "cmoe-extension-manifest",
+  "apiVersion": 1,
+  "id": "sample.checklist",
+  "version": "1.0.0",
+  "name": "운영 체크리스트",
+  "shortName": "체크",
+  "description": "프로젝트별 운영 메모와 확인 상태를 저장하는 예제 확장입니다.",
+  "category": "utility",
+  "accent": "slate",
+  "icon": "✓",
+  "permissions": ["projects:read", "projects:write"],
+  "contributes": { "workflow": true, "page": "declarative", "order": 700 },
+  "declarative": {
+    "title": "운영 체크리스트",
+    "description": "입력 내용은 현재 프로젝트 또는 빠른 작업에 저장됩니다.",
+    "fields": [
+      { "id": "owner", "label": "담당자", "type": "text", "required": true },
+      { "id": "dueDate", "label": "확인 예정일", "type": "date" },
+      { "id": "status", "label": "상태", "type": "select", "options": ["준비 중", "확인 필요", "완료"] },
+      { "id": "notes", "label": "운영 메모", "type": "textarea" },
+      { "id": "confirmed", "label": "최종 확인", "type": "checkbox" }
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "name": "cmoe-workspace",
+  "version": "0.9.0",
+  "description": "명단, 일정, 계정과 업무 모듈을 프로젝트 단위로 관리하는 Windows Workspace",
+  "main": "desktop/main.js",
+  "author": "CLim020924",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm --prefix vendor install --omit=dev",
+    "desktop": "electron .",
+    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js",
+    "smoke": "set CMOE_SMOKE=1&& electron . --smoke-test",
+    "build:windows": "electron-builder --win portable --x64",
+    "build:installer": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "kr.co.cmoe.workspace",
+    "productName": "CMOE Workspace",
+    "asar": true,
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "files": [
+      "index.html",
+      "styles.css",
+      "workspace-core.js",
+      "operations-core.js",
+      "extension-core.js",
+      "app.js",
+      "extensions/**/*",
+      "examples/**/*",
+      "vendor/package.json",
+      "vendor/node_modules/**/*",
+      "desktop/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "..",
+        "to": "gmail-flow",
+        "filter": ["background.js", "core.js", "popup.html", "popup.js", "styles.css", "desktop-shim.js", "desktop/preload.js", "desktop/storage.js", "desktop/oauth.js", "desktop/oauth-credentials.local.js", "icons/**/*"]
+      }
+    ],
+    "win": {
+      "target": ["portable"]
+    },
+    "portable": {
+      "artifactName": "CMOE-Workspace-${version}-Windows.${ext}"
+    },
+    "nsis": {
+      "artifactName": "CMOE-Workspace-Setup-${version}-Windows.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CMOE Workspace",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

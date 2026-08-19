@@ -1,0 +1,1 @@
+{"format":"cmoe-extension-manifest","apiVersion":1,"id":"zoom","version":"0.2.0","name":"Zoom 회의 만들기","shortName":"Zoom","description":"확정된 일정마다 Zoom 회의를 만들고 참가 링크를 일정에 연결합니다.","category":"delivery","accent":"sky","icon":"Z","bundled":true,"permissions":["projects:read","projects:write","schedule:read","network:zoom"],"contributes":{"workflow":true,"page":"zoom","order":50}}

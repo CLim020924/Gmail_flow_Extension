@@ -12,8 +12,9 @@ const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const base64Url = (value) => Buffer.from(value).toString('base64url');
 
 class DesktopOAuth {
-  constructor({ clientId, authFile, openExternal, protect = (value) => value, unprotect = (value) => value }) {
+  constructor({ clientId, clientSecret, authFile, openExternal, protect = (value) => value, unprotect = (value) => value }) {
     this.clientId = clientId;
+    this.clientSecret = clientSecret;
     this.authFile = authFile;
     this.openExternal = openExternal;
     this.protect = protect;
@@ -44,7 +45,17 @@ class DesktopOAuth {
     await fs.promises.writeFile(this.authFile, JSON.stringify(envelope, null, 2), 'utf8');
   }
 
-  async getToken(interactive = false) {
+  grantedScopes() {
+    return Array.isArray(this.auth.scopes) && this.auth.scopes.length ? this.auth.scopes : (this.auth.refreshToken ? [GMAIL_SCOPE] : []);
+  }
+
+  async getToken(interactive = false, requestedScopes = [GMAIL_SCOPE], loginOptions = {}) {
+    const scopes = [...new Set((requestedScopes?.length ? requestedScopes : [GMAIL_SCOPE]).filter(Boolean))];
+    const missingScopes = scopes.filter((scope) => !this.grantedScopes().includes(scope));
+    if (missingScopes.length) {
+      if (!interactive) throw this.authError('Google Drive 동기화 권한 승인이 필요합니다.');
+      return this.login([...new Set([...this.grantedScopes(), ...scopes])], loginOptions);
+    }
     if (this.auth.accessToken && Number(this.auth.expiresAt || 0) > Date.now() + 60_000) {
       return this.auth.accessToken;
     }
@@ -58,7 +69,7 @@ class DesktopOAuth {
       }
     }
     if (!interactive) throw this.authError('Gmail 계정 연결이 필요합니다.');
-    return this.login();
+    return this.login(scopes, loginOptions);
   }
 
   authError(message) {
@@ -67,29 +78,31 @@ class DesktopOAuth {
     return error;
   }
 
-  async login() {
+  async login(scopes = [GMAIL_SCOPE], loginOptions = {}) {
     if (this.pendingLogin) return this.pendingLogin;
-    this.pendingLogin = this.runLogin().finally(() => { this.pendingLogin = null; });
+    this.pendingLogin = this.runLogin(scopes, loginOptions).finally(() => { this.pendingLogin = null; });
     return this.pendingLogin;
   }
 
-  async runLogin() {
+  async runLogin(scopes, { loginHint = '', selectAccount = false } = {}) {
     const verifier = base64Url(crypto.randomBytes(48));
     const challenge = base64Url(crypto.createHash('sha256').update(verifier).digest());
     const state = base64Url(crypto.randomBytes(24));
 
     const callback = await this.createCallbackServer(state);
+    const rememberedEmail = String(loginHint || (!selectAccount ? this.auth.email : '') || '').trim();
     const params = new URLSearchParams({
       client_id: this.clientId,
       redirect_uri: callback.redirectUri,
       response_type: 'code',
-      scope: GMAIL_SCOPE,
+      scope: [...new Set([GMAIL_SCOPE, ...scopes])].join(' '),
       code_challenge: challenge,
       code_challenge_method: 'S256',
       state,
       access_type: 'offline',
-      prompt: 'consent select_account'
+      prompt: selectAccount ? 'consent select_account' : 'consent'
     });
+    if (rememberedEmail) params.set('login_hint', rememberedEmail);
 
     await this.openExternal(`${AUTHORIZATION_URL}?${params.toString()}`);
 
@@ -100,6 +113,7 @@ class DesktopOAuth {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token || this.auth.refreshToken || '',
         expiresAt: Date.now() + Number(tokens.expires_in || 3600) * 1000,
+        scopes: [...new Set([GMAIL_SCOPE, ...scopes])],
         email: ''
       };
       this.auth.email = await this.fetchEmail(this.auth.accessToken);
@@ -157,6 +171,7 @@ class DesktopOAuth {
   async exchangeCode(code, redirectUri, verifier) {
     const body = new URLSearchParams({
       client_id: this.clientId,
+      client_secret: this.clientSecret,
       code,
       code_verifier: verifier,
       grant_type: 'authorization_code',
@@ -168,6 +183,7 @@ class DesktopOAuth {
   async refreshToken() {
     const body = new URLSearchParams({
       client_id: this.clientId,
+      client_secret: this.clientSecret,
       refresh_token: this.auth.refreshToken,
       grant_type: 'refresh_token'
     });

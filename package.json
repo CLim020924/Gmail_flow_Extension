@@ -1,6 +1,6 @@
 {
   "name": "gmail-flow-desktop",
-  "version": "0.3.4",
+  "version": "0.5.3",
   "description": "사용자 정의 명단과 변수를 사용하는 Gmail 메일 자동화 Windows 앱",
   "main": "desktop/main.js",
   "author": "CLim020924",
@@ -8,7 +8,9 @@
   "private": true,
   "scripts": {
     "desktop": "electron .",
-    "build:windows": "electron-builder --win portable --x64"
+    "test": "node tests/oauth-login-hint.test.js && node tests/background-attachment.test.js",
+    "build:windows": "electron-builder --win portable --x64",
+    "build:installer": "electron-builder --win nsis --x64"
   },
   "devDependencies": {
     "electron": "43.2.0",
@@ -17,7 +19,6 @@
   "build": {
     "appId": "com.gmailflow.desktop",
     "productName": "Gmail Flow",
-    "artifactName": "Gmail-Flow-${version}-Windows.${ext}",
     "asar": true,
     "directories": {
       "output": "desktop-dist"
@@ -35,6 +36,19 @@
     "win": {
       "target": ["portable"],
       "icon": "assets/icon-master.png"
+    },
+    "portable": {
+      "artifactName": "Gmail-Flow-${version}-Windows.${ext}"
+    },
+    "nsis": {
+      "artifactName": "Gmail-Flow-Setup-${version}-Windows.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Gmail Flow",
+      "deleteAppDataOnUninstall": false
     }
   }
 }

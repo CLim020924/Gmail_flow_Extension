@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://gmail.googleapis.com https://accounts.google.com https://oauth2.googleapis.com; base-uri 'none'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://gmail.googleapis.com https://www.googleapis.com https://accounts.google.com https://oauth2.googleapis.com; base-uri 'none'; object-src 'none'">
   <title>Gmail Flow</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -16,7 +16,7 @@
       <button class="nav-item" data-page="templates">저장된 템플릿</button>
       <button class="nav-item" data-page="history">발송 기록</button>
       <button class="nav-item" data-page="queue">작업 큐</button>
-      <div class="drawer-footer"><button id="openWindowButton" class="nav-item window-button" type="button"><span aria-hidden="true">↗</span> 창으로 열기</button></div>
+      <div class="drawer-footer"><button id="openWorkspaceButton" class="nav-item window-button" type="button" hidden><span aria-hidden="true">←</span> CMOE Workspace</button><button id="openWindowButton" class="nav-item window-button" type="button"><span aria-hidden="true">↗</span> 창으로 열기</button></div>
     </aside>
 
     <main class="main">
@@ -31,6 +31,11 @@
           <span id="accountButtonText">Google 계정</span>
         </button>
       </header>
+
+      <div id="operationStatus" class="operation-status" role="status" aria-live="polite" hidden>
+        <div><strong id="operationStatusTitle">작업 처리 중</strong><span id="operationStatusText"></span></div>
+        <progress id="operationProgress" max="1" value="0"></progress>
+      </div>
 
       <section id="page-compose" class="page active" data-page-panel="compose">
         <div class="top-tools">
@@ -77,12 +82,28 @@
         <label class="field">내용
           <textarea id="body" placeholder="현재 사용할 수 있는 변수가 없습니다"></textarea>
         </label>
+        <div class="compose-variable-panel">
+          <div><strong>명단 컬럼 변수</strong><small>클릭하면 마지막 입력 위치에 추가됩니다.</small></div>
+          <div id="composeVariablePalette" class="compose-variable-chips"></div>
+          <div id="composeVariableStatus" class="compose-variable-chips used"></div>
+        </div>
         <details class="optional-section">
           <summary>추신 추가</summary>
           <label class="field">추신 <small>선택</small>
             <textarea id="postscript" placeholder="본문 뒤에 빈 줄을 두고 추가됩니다"></textarea>
           </label>
         </details>
+        <div class="attachment-section">
+          <div class="attachment-heading">
+            <span>첨부파일</span>
+            <label class="attachment-picker" aria-label="첨부파일 선택">
+              <span aria-hidden="true">📎</span><span>선택</span>
+              <input id="attachmentInput" type="file" multiple>
+            </label>
+          </div>
+          <div id="attachmentList" class="attachment-list" aria-live="polite"></div>
+          <p id="attachmentHint" class="muted">여러 파일을 선택할 수 있습니다. 전체 18MB까지 첨부할 수 있습니다.</p>
+        </div>
         <p id="composeHint" class="muted">명단을 선택하거나 빈 초안 기능을 켜주세요.</p>
         <div class="footer-actions">
           <button id="composeAction" class="primary" type="button" disabled>임시 저장</button>
@@ -96,20 +117,24 @@
             <div><h2>명단 가져오기</h2><p class="muted">명단을 만들거나 저장된 데이터를 불러옵니다.</p></div>
           </div>
           <div class="toolbar">
-            <button id="saveRoster" class="primary" type="button" disabled>명단 저장</button>
             <details class="menu">
               <summary class="button">불러오기 ▾</summary>
-              <div class="menu-panel">
-                <button id="openSavedRosters" type="button">저장된 명단</button>
-                <label class="menu-file">Excel / CSV<input id="fileInput" type="file" accept=".csv,.tsv,.txt"></label>
-                <button id="pasteTable" type="button">표 데이터 붙여넣기</button>
-                <button id="loadStructure" type="button">구조 템플릿</button>
+              <div class="menu-panel roster-load-panel">
+                <div class="load-submenu">
+                  <button type="button" aria-haspopup="menu">명단 <span aria-hidden="true">›</span></button>
+                  <div id="rosterQuickMenu" class="load-submenu-panel" role="menu"></div>
+                </div>
+                <div class="load-submenu">
+                  <button type="button" aria-haspopup="menu">구조 <span aria-hidden="true">›</span></button>
+                  <div id="structureQuickMenu" class="load-submenu-panel" role="menu"></div>
+                </div>
+                <button id="pasteTable" type="button">표 데이터</button>
+                <label class="menu-file">Excel CSV / TSV<input id="fileInput" type="file" accept=".csv,.tsv,.txt"></label>
               </div>
             </details>
             <details class="menu">
               <summary class="ghost more-button">•••</summary>
               <div class="menu-panel right">
-                <button id="saveStructure" type="button">현재 구조 저장</button>
                 <button id="resetRoster" type="button">초기화</button>
               </div>
             </details>
@@ -175,7 +200,8 @@
           <div id="historyItems" class="list"></div>
         </div>
         <div id="historyRecipientsView" hidden>
-          <div class="section-heading"><div><h2 id="historyBatchName"></h2><p id="historyBatchMeta" class="muted"></p></div><button id="deleteHistoryBatch" class="button danger" type="button">기록 삭제</button></div>
+          <div class="section-heading"><div><h2 id="historyBatchName"></h2><p id="historyBatchMeta" class="muted"></p></div><div class="toolbar history-actions"><button id="refreshDraftStatus" class="button" type="button" hidden>Gmail 상태 확인</button><button id="editDraftBatch" class="button" type="button" hidden>임시메일 일괄 수정</button><button id="deleteHistoryBatch" class="button danger" type="button">기록 삭제</button></div></div>
+          <div id="historyDraftEditStatus" class="draft-edit-status" hidden><span></span><progress></progress></div>
           <div id="historyRecipients" class="list"></div>
         </div>
         <div id="historyMessageView" hidden>
@@ -185,6 +211,7 @@
             <div><strong id="historyMessageSender">나</strong><p id="historyMessageRecipient" class="muted"></p></div>
           </div>
           <div id="historyMessageBody" class="gmail-message-body preline"></div>
+          <div id="historyMessageAttachmentsBlock" class="detail-block" hidden><small>첨부파일</small><div id="historyMessageAttachments" class="history-attachments"></div></div>
           <a id="historyMessageGmailLink" class="button gmail-message-link" target="_blank" rel="noopener noreferrer" hidden></a>
           <div id="historyMessageErrorBlock" class="detail-block" hidden><small>오류</small><p id="historyMessageError"></p></div>
         </div>
@@ -197,6 +224,25 @@
     </main>
   </div>
 
+  <dialog id="inputDialog" class="input-dialog">
+    <form id="inputDialogForm">
+      <div class="section-heading"><h2 id="inputDialogTitle">값 입력</h2><button id="cancelInputDialogTop" class="ghost icon-button" type="button" aria-label="닫기">×</button></div>
+      <p id="inputDialogMessage" class="muted" hidden></p>
+      <label class="field"><span id="inputDialogLabel">이름</span>
+        <input id="inputDialogValue" type="text" autocomplete="off">
+        <select id="inputDialogSelect" hidden></select>
+      </label>
+      <p id="inputDialogError" class="input-dialog-error" role="alert" hidden></p>
+      <div class="input-dialog-actions"><button id="cancelInputDialog" class="button" type="button">취소</button><button id="confirmInputDialog" class="primary" type="submit">확인</button></div>
+    </form>
+  </dialog>
+  <dialog id="messageDialog" class="message-dialog">
+    <form id="messageDialogForm">
+      <div class="section-heading"><h2 id="messageDialogTitle">알림</h2><button id="closeMessageDialog" class="ghost icon-button" type="button" aria-label="닫기">×</button></div>
+      <p id="messageDialogText" class="message-dialog-text"></p>
+      <div class="input-dialog-actions"><button id="cancelMessageDialog" class="button" type="button">취소</button><button id="confirmMessageDialog" class="primary" type="submit">확인</button></div>
+    </form>
+  </dialog>
   <dialog id="previewDialog">
     <form method="dialog">
       <div class="section-heading"><h2>메일 미리보기</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
@@ -228,12 +274,45 @@
       <div><button id="previousSendReview" class="button" type="button">이전</button><button id="nextSendReview" class="button" type="button">다음</button><button id="confirmSendReview" class="primary" type="button" disabled>모두 확인하고 발송</button></div>
     </div>
   </dialog>
+  <dialog id="draftEditDialog" class="draft-edit-dialog">
+    <form id="draftEditForm">
+      <div class="section-heading"><div><h2>임시메일 일괄 수정</h2><p id="draftEditSummary" class="muted"></p></div><button id="closeDraftEdit" class="ghost icon-button" type="button" aria-label="닫기">×</button></div>
+      <p class="muted">명단 변수는 <code>{{변수명}}</code> 형식으로 다시 적용됩니다. Gmail에서 이미 보내거나 삭제한 초안은 자동으로 제외합니다.</p>
+      <label class="field">제목
+        <input id="draftEditSubject" type="text">
+      </label>
+      <label class="field">내용
+        <textarea id="draftEditBody"></textarea>
+      </label>
+      <label class="field">추신
+        <textarea id="draftEditPostscript" class="short-textarea"></textarea>
+      </label>
+      <div class="attachment-section">
+        <div class="attachment-heading"><span>첨부파일</span><label class="attachment-picker" aria-label="수정할 첨부파일 선택"><span aria-hidden="true">📎</span><span>선택</span><input id="draftEditAttachmentInput" type="file" multiple></label></div>
+        <div id="draftEditAttachmentList" class="attachment-list" aria-live="polite"></div>
+        <p id="draftEditAttachmentHint" class="muted"></p>
+      </div>
+      <div id="draftEditProgress" class="draft-edit-status" hidden><span></span><progress></progress></div>
+      <div class="input-dialog-actions"><button id="cancelDraftEdit" class="button" type="button">취소</button><button id="confirmDraftEdit" class="primary" type="submit">모든 초안 수정</button></div>
+    </form>
+  </dialog>
   <dialog id="settingsDialog">
     <form method="dialog">
       <div class="section-heading"><h2>Google 계정</h2><button class="ghost icon-button" value="cancel" aria-label="닫기">×</button></div>
       <div class="account-summary"><span id="accountSummaryAvatar" class="account-avatar large" aria-hidden="true">G</span><div><strong id="accountSummaryEmail">연결된 계정 없음</strong><p id="gmailConnectionStatus" class="muted">연결 상태를 확인하고 있습니다.</p></div></div>
       <p id="oauthSetupHelp" class="muted" hidden>Google Cloud에서 Gmail API를 활성화하고 이 확장 프로그램 ID로 만든 OAuth 클라이언트 ID를 manifest.json에 입력해야 합니다.</p>
       <div class="toolbar"><button id="connectGmail" class="primary" type="button">Google 계정 연결</button><button id="switchGmail" class="button" type="button" hidden>계정 변경</button><button id="disconnectGmail" class="button danger" type="button" hidden>로그아웃</button></div>
+      <div class="sync-settings">
+        <label class="field">데이터 저장 방식
+          <select id="dataStorageMode">
+            <option value="local">이 PC에만 저장</option>
+            <option value="drive">Google Drive 동기화 · 외부 PC 사용</option>
+          </select>
+        </label>
+        <p id="cloudSyncStatus" class="muted">명단과 템플릿은 이 PC에만 저장됩니다.</p>
+        <div id="cloudSyncActions" class="toolbar" hidden><button id="syncCloudNow" class="button" type="button">지금 동기화</button></div>
+        <p class="muted">Drive 동기화에는 명단·구조·메일 템플릿·작성 설정만 포함됩니다. 발송 작업과 로그인 정보는 동기화하지 않습니다.</p>
+      </div>
     </form>
   </dialog>
   <script src="desktop-shim.js"></script>

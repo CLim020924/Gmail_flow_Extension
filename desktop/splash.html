@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; img-src 'self'">
+  <title>Gmail Flow 시작 중</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; display: grid; min-height: 100vh; place-items: center; background: #fdfdfc; color: #292929; font-family: "Segoe UI", "Noto Sans KR", sans-serif; }
+    main { width: 100%; padding: 30px 36px; text-align: center; }
+    img { width: 70px; height: 70px; margin-bottom: 13px; }
+    h1 { margin: 0; font-size: 22px; }
+    p { margin: 8px 0 22px; color: #6b7280; font-size: 13px; }
+    .track { overflow: hidden; height: 5px; border-radius: 4px; background: #e5e7eb; }
+    .bar { width: 42%; height: 100%; border-radius: inherit; background: #555; animation: loading 1.25s ease-in-out infinite; }
+    @keyframes loading { 0% { transform: translateX(-110%); } 50% { transform: translateX(135%); } 100% { transform: translateX(350%); } }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="../icons/icon128.png" alt="">
+    <h1>Gmail Flow</h1>
+    <p>프로그램을 준비하고 있습니다…</p>
+    <div class="track" role="progressbar" aria-label="시작 중"><div class="bar"></div></div>
+  </main>
+</body>
+</html>

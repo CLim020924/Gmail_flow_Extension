@@ -4,3 +4,8 @@ Thumbs.db
 dist/
 desktop-dist/
 node_modules/
+desktop/oauth-credentials.local.js
+outputs/
+workspace/desktop-dist/
+workspace/node_modules/
+workspace/vendor/node_modules/

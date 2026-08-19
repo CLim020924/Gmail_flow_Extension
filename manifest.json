@@ -1,14 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Gmail Flow",
-  "version": "0.3.4",
+  "version": "0.5.3",
   "description": "사용자 정의 명단과 변수를 사용하는 Gmail 메일 자동화 확장 프로그램",
   "minimum_chrome_version": "105",
   "permissions": ["storage", "unlimitedStorage", "identity", "identity.email", "alarms"],
-  "host_permissions": ["https://gmail.googleapis.com/*"],
+  "host_permissions": ["https://gmail.googleapis.com/*", "https://www.googleapis.com/*"],
   "oauth2": {
     "client_id": "1055778436707-nuc2nk7k6oepgt8ff865clgpdmkd58a5.apps.googleusercontent.com",
-    "scopes": ["https://www.googleapis.com/auth/gmail.modify"]
+    "scopes": ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/drive.appdata"]
   },
   "background": {
     "service_worker": "background.js"
