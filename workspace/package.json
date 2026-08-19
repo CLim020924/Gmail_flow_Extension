@@ -1,6 +1,6 @@
 {
   "name": "cmoe-workspace",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "명단, 일정, 계정과 업무 모듈을 프로젝트 단위로 관리하는 Windows Workspace",
   "main": "desktop/main.js",
   "author": "CLim020924",
@@ -42,11 +42,25 @@
       {
         "from": "..",
         "to": "gmail-flow",
-        "filter": ["background.js", "core.js", "popup.html", "popup.js", "styles.css", "desktop-shim.js", "desktop/preload.js", "desktop/storage.js", "desktop/oauth.js", "desktop/oauth-credentials.local.js", "icons/**/*"]
+        "filter": [
+          "background.js",
+          "core.js",
+          "popup.html",
+          "popup.js",
+          "styles.css",
+          "desktop-shim.js",
+          "desktop/preload.js",
+          "desktop/storage.js",
+          "desktop/oauth.js",
+          "desktop/oauth-credentials.local.js",
+          "icons/**/*"
+        ]
       }
     ],
     "win": {
-      "target": ["portable"]
+      "target": [
+        "portable"
+      ]
     },
     "portable": {
       "artifactName": "CMOE-Workspace-${version}-Windows.${ext}"

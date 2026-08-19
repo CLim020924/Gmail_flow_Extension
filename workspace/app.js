@@ -44,6 +44,9 @@
   let schedulePersistTimer = null;
   let sheetChoiceResolver = null;
   let templateInsertionTarget = 'body';
+  let activeWorkflowStepId = null;
+  let workflowEditorDraft = [];
+  let workflowEditorTemplateDraft = null;
   let gmailFlowSummary = { connected: false, email: '', rosters: 0, templates: 0, structures: 0 };
 
   const storage = {
@@ -204,6 +207,7 @@
     if (page === 'forms') renderFormsPage();
     if (page === 'zoom') renderZoomPage();
     if (page === 'gmailFlow') renderGmailPage();
+    if (page === 'workflowTask') renderWorkflowTaskPage();
     if (visiblePage === 'declarative') renderDeclarativePage(page);
   }
 
@@ -284,6 +288,9 @@
       ? `${formatDate(project.startDate) || '시작일 미정'} – ${formatDate(project.endDate) || '종료일 미정'}`
       : '운영 기간 미설정';
     $('#activeProjectMeta').textContent = [project.client, dateRange].filter(Boolean).join(' · ');
+    $('#activeWorkflowTemplate').textContent = project.workflowTemplate?.name
+      ? `${project.workflowTemplate.name} · v${project.workflowTemplate.version}${project.workflowTemplate.modified ? ' · 프로젝트에서 수정됨' : ''}`
+      : '직접 구성한 업무';
     $('#peopleCount').textContent = String(project.counts.people);
     $('#sessionCount').textContent = String(project.counts.sessions);
     $('#unresolvedCount').textContent = String(project.counts.unresolved);
@@ -293,28 +300,126 @@
 
     const workflow = $('#workflowGrid');
     workflow.replaceChildren();
-    const installedIds = Core.WORKFLOW_ORDER.filter((id) => project.installedModules.includes(id));
-    installedIds.forEach((moduleId, index) => {
-      const module = Core.MODULE_CATALOG.find((item) => item.id === moduleId);
-      const moduleState = project.moduleState[moduleId];
-      const card = element('article', `workflow-card accent-${module.accent}`);
-      card.dataset.moduleId = module.id;
+    const workflowSteps = project.workflow || [];
+    workflowSteps.forEach((workflowStep, index) => {
+      const taskDefinition = Core.TASK_TYPE_CATALOG.find((item) => item.id === workflowStep.type);
+      const module = workflowStep.moduleId ? Core.MODULE_CATALOG.find((item) => item.id === workflowStep.moduleId) : null;
+      const status = workflowStep.status || 'notStarted';
+      const card = element('article', `workflow-card accent-${module?.accent || ['blue', 'green', 'amber', 'violet'][index % 4]}`);
+      card.dataset.workflowStepId = workflowStep.id;
       const top = element('div', 'workflow-card-top');
-      const step = element('span', 'workflow-step', module.icon || module.shortName.slice(0, 1));
-      const badge = element('span', `status-badge ${moduleState.status}`, STATUS_LABELS[moduleState.status]);
+      const step = element('span', 'workflow-step', taskDefinition?.icon || module?.icon || String(index + 1));
+      step.title = `${index + 1}단계`;
+      const badge = element('span', `status-badge ${status}`, STATUS_LABELS[status]);
       top.append(step, badge);
-      const title = element('h3', '', module.name);
-      const description = element('p', '', module.description);
+      const title = element('h3', '', workflowStep.name);
+      const description = element('p', '', workflowStep.description || taskDefinition?.description || module?.description || '');
       const footer = element('div', 'workflow-card-footer');
-      const updated = element('small', '', moduleState.summary || formatUpdatedAt(moduleState.updatedAt));
-      const button = element('button', 'module-open-button', moduleState.status === 'notStarted' ? WORKFLOW_ACTION_LABELS[module.id] || '시작하기' : '계속 작업하기');
+      const updated = element('small', '', workflowStep.notes || formatUpdatedAt(workflowStep.updatedAt));
+      const button = element('button', 'module-open-button', status === 'notStarted' ? (workflowStep.moduleId ? WORKFLOW_ACTION_LABELS[workflowStep.moduleId] || '시작하기' : '이 단계 시작하기') : '계속 작업하기');
       button.type = 'button';
-      button.dataset.workflowOpen = module.id;
+      button.dataset.workflowStepOpen = workflowStep.id;
+      if (workflowStep.moduleId) button.dataset.workflowOpen = workflowStep.moduleId;
       footer.append(updated, button);
       card.append(top, title, description, footer);
       workflow.append(card);
     });
-    if (!installedIds.length) workflow.append(element('div', 'notice', '사용할 추가 프로그램이 없습니다. 추가 프로그램 화면에서 필요한 기능을 설치하세요.'));
+    if (!workflowSteps.length) workflow.append(element('div', 'notice', '업무 단계가 없습니다. “업무 구성 편집”에서 필요한 단계를 추가하세요.'));
+  }
+
+  function renderNewProjectTemplates(selectedId = $('#newProjectTemplateId')?.value || 'template-blank') {
+    const picker = $('#newProjectTemplatePicker');
+    if (!picker) return;
+    const latestByFamily = new Map();
+    state.library.workflowTemplates.forEach((template) => { const current = latestByFamily.get(template.familyId); if (!current || template.version > current.version) latestByFamily.set(template.familyId, template); });
+    const explicitlySelected = state.library.workflowTemplates.find((template) => template.id === selectedId); if (explicitlySelected) latestByFamily.set(explicitlySelected.familyId, explicitlySelected);
+    const templates = [...latestByFamily.values()].sort((a, b) => Number(b.builtin) - Number(a.builtin) || a.category.localeCompare(b.category, 'ko') || a.name.localeCompare(b.name, 'ko'));
+    if (!templates.some((item) => item.id === selectedId)) selectedId = templates[0]?.id || 'template-blank';
+    $('#newProjectTemplateId').value = selectedId;
+    picker.replaceChildren(...templates.map((template) => {
+      const label = element('label', `template-choice ${template.id === selectedId ? 'selected' : ''}`);
+      const radio = element('input'); radio.type = 'radio'; radio.name = 'templateChoice'; radio.value = template.id; radio.checked = template.id === selectedId;
+      const copy = element('span'); copy.append(element('strong', '', `${template.name}${template.version > 1 ? ` v${template.version}` : ''}`), element('small', '', template.description));
+      label.append(radio, copy); return label;
+    }));
+    const selected = templates.find((item) => item.id === selectedId);
+    $('#newProjectStepPreview').replaceChildren(...(selected?.steps || []).map((step) => element('span', '', step.name)));
+  }
+
+  function openWorkflowEditor() {
+    const project = activeProject();
+    if (!project) return;
+    workflowEditorDraft = JSON.parse(JSON.stringify(project.workflow || []));
+    workflowEditorTemplateDraft = { ...project.workflowTemplate, modified: true };
+    const typeSelect = $('#workflowStepType');
+    typeSelect.replaceChildren(...Core.TASK_TYPE_CATALOG.map((type) => { const option = element('option', '', type.name); option.value = type.id; return option; }));
+    const templateSelect = $('#workflowTemplateApplySelect'); templateSelect.replaceChildren(element('option', '', '현재 구성 유지'));
+    state.library.workflowTemplates.forEach((template) => { const option = element('option', '', `${template.name} · v${template.version}`); option.value = template.id; option.selected = project.workflowTemplate?.id === template.id && !project.workflowTemplate?.modified; templateSelect.append(option); });
+    $('#workflowTemplateChangeSummary').textContent = '현재 프로젝트의 구성을 직접 편집하고 있습니다.';
+    renderWorkflowEditor();
+    openDialog('workflowEditorDialog');
+  }
+
+  function renderWorkflowEditor() {
+    const list = $('#workflowEditorList'); list.replaceChildren();
+    if (!workflowEditorDraft.length) { list.append(element('div', 'list-empty', '업무 단계가 없습니다. 아래에서 첫 단계를 추가하세요.')); return; }
+    workflowEditorDraft.forEach((step, index) => {
+      const row = element('div', 'workflow-editor-row'); row.dataset.workflowEditorStep = step.id;
+      row.append(element('span', 'workflow-editor-order', String(index + 1)));
+      const name = element('input'); name.value = step.name; name.dataset.workflowStepName = step.id; name.setAttribute('aria-label', `${index + 1}단계 이름`);
+      const description = element('input'); description.value = step.description || ''; description.dataset.workflowStepDescription = step.id; description.placeholder = '사용자가 이해할 수 있는 짧은 설명'; description.setAttribute('aria-label', `${index + 1}단계 설명`);
+      const actions = element('div', 'workflow-editor-actions');
+      const up = element('button', 'secondary-button', '↑'); up.type = 'button'; up.dataset.workflowStepMove = step.id; up.dataset.direction = '-1'; up.disabled = index === 0; up.title = '위로 이동';
+      const down = element('button', 'secondary-button', '↓'); down.type = 'button'; down.dataset.workflowStepMove = step.id; down.dataset.direction = '1'; down.disabled = index === workflowEditorDraft.length - 1; down.title = '아래로 이동';
+      const remove = element('button', 'secondary-button danger-text', '삭제'); remove.type = 'button'; remove.dataset.workflowStepRemove = step.id;
+      actions.append(up, down, remove); row.append(name, description, actions); list.append(row);
+    });
+  }
+
+  function openWorkflowStep(stepId) {
+    const project = activeProject(); const step = project?.workflow.find((item) => item.id === stepId);
+    if (!project || !step) return;
+    activeWorkflowStepId = step.id;
+    if (step.status === 'notStarted') {
+      state = Core.setWorkflowStepStatus(state, project.id, step.id, 'inProgress');
+      void persist();
+    }
+    if (step.moduleId) openWorkflowModule(step.moduleId);
+    else navigate('workflowTask');
+  }
+
+  function renderWorkflowTaskPage() {
+    const project = activeProject(); const step = project?.workflow.find((item) => item.id === activeWorkflowStepId);
+    if (!project || !step) { navigate('dashboard'); return; }
+    const definition = Core.TASK_TYPE_CATALOG.find((item) => item.id === step.type);
+    $('#workflowTaskType').textContent = definition?.name || '업무 단계';
+    $('#workflowTaskName').textContent = step.name;
+    $('#workflowTaskDescription').textContent = step.description || definition?.description || '';
+    $('#workflowTaskInstructions').value = step.instructions || '';
+    $('#workflowTaskNotes').value = step.notes || '';
+    $('#workflowTaskStatus').value = step.status;
+    $('#workflowTaskComplete').textContent = step.status === 'complete' ? '완료됨' : '완료로 표시';
+    $('#workflowTaskComplete').disabled = step.status === 'complete';
+    const checklist = $('#workflowChecklist'); checklist.replaceChildren();
+    if (!step.checklist.length) checklist.append(element('div', 'list-empty', '체크 항목이 없습니다. 이 업무에서 반복 확인할 항목을 추가하세요.'));
+    step.checklist.forEach((item) => {
+      const row = element('label', `workflow-check-item ${item.done ? 'done' : ''}`);
+      const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = item.done; checkbox.dataset.workflowCheck = item.id;
+      const text = element('span', '', item.text);
+      const remove = element('button', 'text-button danger-text', '삭제'); remove.type = 'button'; remove.dataset.workflowCheckRemove = item.id;
+      row.append(checkbox, text, remove); checklist.append(row);
+    });
+  }
+
+  async function saveWorkflowTask(statusOverride) {
+    const project = activeProject(); const step = project?.workflow.find((item) => item.id === activeWorkflowStepId);
+    if (!project || !step) return;
+    step.instructions = $('#workflowTaskInstructions').value.trim();
+    step.notes = $('#workflowTaskNotes').value.trim();
+    const status = statusOverride || $('#workflowTaskStatus').value;
+    state = Core.updateProject(state, project.id, { workflow: project.workflow });
+    state = Core.setWorkflowStepStatus(state, project.id, step.id, status, step.notes);
+    await persist('업무 단계 저장됨'); renderAll(); renderWorkflowTaskPage(); showToast('이 단계의 기준과 결과를 저장했습니다.', 'success');
   }
 
   function renderProjectsPage() {
@@ -477,6 +582,16 @@
     };
     renderItems($('#libraryRosterList'), state.library.rosters, 'roster', '저장한 명단이 없습니다. 명단 화면에서 현재 명단을 이름을 붙여 저장할 수 있습니다.');
     renderItems($('#libraryMailTemplateList'), state.library.mailTemplates, 'mailTemplate', '저장한 메일 양식이 없습니다. 메일 작성 화면에서 현재 내용을 저장할 수 있습니다.');
+    const workflowList = $('#libraryWorkflowTemplateList'); workflowList.replaceChildren();
+    state.library.workflowTemplates.slice().sort((a, b) => a.category.localeCompare(b.category, 'ko') || a.name.localeCompare(b.name, 'ko') || b.version - a.version).forEach((template) => {
+      const card = element('article', 'template-library-card');
+      const meta = element('div', 'template-library-meta'); meta.append(element('span', '', template.category), element('span', '', `v${template.version}${template.builtin ? ' · 기본' : ''}`));
+      const title = element('h3', '', template.name); const description = element('p', '', template.description);
+      const actions = element('div', 'button-row');
+      const use = element('button', 'secondary-button compact', '이 템플릿으로 시작'); use.type = 'button'; use.dataset.templateUse = template.id; actions.append(use);
+      if (!template.builtin) { const remove = element('button', 'text-button danger-text', '삭제'); remove.type = 'button'; remove.dataset.workflowTemplateRemove = template.id; actions.append(remove); }
+      card.append(meta, title, description, actions); workflowList.append(card);
+    });
   }
 
   function renderQuickTasks() {
@@ -1438,12 +1553,14 @@
     if (currentPage === 'forms') renderFormsPage();
     if (currentPage === 'zoom') renderZoomPage();
     if (currentPage === 'gmailFlow') renderGmailPage();
+    if (currentPage === 'workflowTask') renderWorkflowTaskPage();
     if (Core.MODULE_CATALOG.find((item) => item.id === currentPage)?.page === 'declarative') renderDeclarativePage(currentPage);
   }
 
   function resetNewProjectForm() {
     $('#newProjectForm').reset();
-    $$('.preset-card').forEach((card) => card.classList.toggle('selected', $('input', card).checked));
+    $('#newProjectTemplateId').value = 'template-blank';
+    renderNewProjectTemplates('template-blank');
   }
 
   function openProjectSettings() {
@@ -1491,8 +1608,15 @@
   }
 
   function openWorkflowModule(moduleId) {
-    const project = activeProject();
+    let project = activeProject();
     if (!project) return;
+    if (!project.workflow.some((step) => step.moduleId === moduleId)) {
+      const definition = Core.TASK_TYPE_CATALOG.find((item) => item.moduleId === moduleId);
+      if (definition) {
+        state = Core.updateProjectWorkflow(state, project.id, [...project.workflow, { type: definition.id, moduleId, name: definition.name, description: definition.description }]);
+        project = activeProject();
+      }
+    }
     if (project.moduleState[moduleId].status === 'notStarted') {
       state = Core.setModuleStatus(state, project.id, moduleId, 'inProgress', '초기 설정을 시작했습니다.');
       void persist();
@@ -1513,7 +1637,7 @@
         client: form.get('client'),
         startDate: form.get('startDate'),
         endDate: form.get('endDate'),
-        preset: form.get('preset')
+        templateId: form.get('templateId')
       });
       state = result.state;
       await persist('프로젝트 생성됨');
@@ -1883,9 +2007,67 @@
       });
     });
     $$('.nav-button').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.nav)));
-    $$('[data-open-new-project]').forEach((button) => button.addEventListener('click', () => openDialog('newProjectDialog')));
-    $('#newProjectButton').addEventListener('click', () => openDialog('newProjectDialog'));
+    const openNewProjectDialog = (templateId = 'template-blank') => { resetNewProjectForm(); renderNewProjectTemplates(templateId); openDialog('newProjectDialog'); };
+    $$('[data-open-new-project]').forEach((button) => button.addEventListener('click', () => openNewProjectDialog()));
+    $('#newProjectButton').addEventListener('click', () => openNewProjectDialog());
+    $('#newProjectTemplatePicker').addEventListener('change', (event) => { if (event.target.name === 'templateChoice') renderNewProjectTemplates(event.target.value); });
     $('#newProjectForm').addEventListener('submit', createProjectFromForm);
+    $('#editWorkflowButton').addEventListener('click', openWorkflowEditor);
+    $('#editWorkflowInlineButton').addEventListener('click', openWorkflowEditor);
+    $('#workflowEditorList').addEventListener('input', (event) => {
+      const step = workflowEditorDraft.find((item) => item.id === (event.target.dataset.workflowStepName || event.target.dataset.workflowStepDescription)); if (!step) return;
+      if (event.target.dataset.workflowStepName) step.name = event.target.value;
+      if (event.target.dataset.workflowStepDescription) step.description = event.target.value;
+      if (workflowEditorTemplateDraft) workflowEditorTemplateDraft.modified = true;
+    });
+    $('#workflowEditorList').addEventListener('click', (event) => {
+      const remove = event.target.closest('[data-workflow-step-remove]');
+      if (remove) { workflowEditorDraft = workflowEditorDraft.filter((item) => item.id !== remove.dataset.workflowStepRemove); if (workflowEditorTemplateDraft) workflowEditorTemplateDraft.modified = true; renderWorkflowEditor(); return; }
+      const move = event.target.closest('[data-workflow-step-move]');
+      if (move) { const index = workflowEditorDraft.findIndex((item) => item.id === move.dataset.workflowStepMove); const target = index + Number(move.dataset.direction); if (index >= 0 && target >= 0 && target < workflowEditorDraft.length) { [workflowEditorDraft[index], workflowEditorDraft[target]] = [workflowEditorDraft[target], workflowEditorDraft[index]]; if (workflowEditorTemplateDraft) workflowEditorTemplateDraft.modified = true; renderWorkflowEditor(); } }
+    });
+    $('#addWorkflowStep').addEventListener('click', () => {
+      const definition = Core.TASK_TYPE_CATALOG.find((item) => item.id === $('#workflowStepType').value); if (!definition) return;
+      workflowEditorDraft.push({ id: `step-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, type: definition.id, moduleId: definition.moduleId || null, name: definition.name, description: definition.description, status: 'notStarted', instructions: '', notes: '', checklist: [], order: workflowEditorDraft.length, updatedAt: null });
+      if (workflowEditorTemplateDraft) workflowEditorTemplateDraft.modified = true;
+      renderWorkflowEditor();
+    });
+    $('#applyWorkflowTemplate').addEventListener('click', async () => {
+      const template = state.library.workflowTemplates.find((item) => item.id === $('#workflowTemplateApplySelect').value); if (!template) { showToast('불러올 업무 템플릿을 선택해주세요.', 'error'); return; }
+      const remaining = [...workflowEditorDraft]; let preserved = 0;
+      const next = template.steps.map((templateStep) => {
+        let matchIndex = remaining.findIndex((step) => step.type === templateStep.type && step.name === templateStep.name);
+        if (matchIndex < 0) matchIndex = remaining.findIndex((step) => step.type === templateStep.type);
+        const existing = matchIndex >= 0 ? remaining.splice(matchIndex, 1)[0] : null;
+        if (existing) preserved += 1;
+        return existing ? { ...existing, type: templateStep.type, moduleId: templateStep.moduleId, name: templateStep.name, description: templateStep.description } : JSON.parse(JSON.stringify(templateStep));
+      });
+      const summary = `현재 ${workflowEditorDraft.length}단계 → ${next.length}단계\n기록 유지 ${preserved}단계 · 새로 추가 ${next.length - preserved}단계 · 제외 ${remaining.length}단계`;
+      $('#workflowTemplateChangeSummary').textContent = summary.replace(/\n/g, ' · ');
+      if (remaining.length && !await showConfirm(`${summary}\n\n제외되는 단계의 메모와 체크 항목은 프로젝트에 적용할 때 빠집니다. 계속할까요?`, { title: '업무 템플릿 적용 미리보기', action: '구성 불러오기', danger: false })) return;
+      workflowEditorDraft = next; workflowEditorTemplateDraft = { id: template.id, familyId: template.familyId, version: template.version, name: template.name, modified: false }; renderWorkflowEditor();
+    });
+    $('#workflowEditorForm').addEventListener('submit', async (event) => {
+      event.preventDefault(); const project = activeProject(); if (!project) return;
+      workflowEditorDraft.forEach((step) => { step.name = String(step.name || '').trim(); step.description = String(step.description || '').trim(); });
+      if (!workflowEditorDraft.length || workflowEditorDraft.some((step) => !step.name)) { showToast('모든 업무 단계에 이름을 입력해주세요.', 'error'); return; }
+      try { state = Core.updateProjectWorkflow(state, project.id, workflowEditorDraft); state = Core.updateProject(state, project.id, { workflowTemplate: workflowEditorTemplateDraft || { ...project.workflowTemplate, modified: true } }); await persist('업무 구성 저장됨'); closeDialog('workflowEditorDialog'); renderAll(); showToast('이 프로젝트의 업무 단계와 순서를 저장했습니다.', 'success'); }
+      catch (error) { showToast(error.message, 'error'); }
+    });
+    $('#saveWorkflowAsTemplate').addEventListener('click', async () => {
+      const project = activeProject(); if (!project) return;
+      if (workflowEditorDraft.length) state = Core.updateProjectWorkflow(state, project.id, workflowEditorDraft);
+      const name = await requestName('저장할 업무 템플릿 이름', project.workflowTemplate?.name || `${project.name} 업무 구성`); if (!name) return;
+      const result = Core.saveWorkflowTemplate(state, project.id, { name }); state = result.state; await persist('업무 템플릿 저장됨'); renderAll(); showToast(`“${result.template.name} v${result.template.version}”으로 저장했습니다.`, 'success');
+    });
+    $('#workflowChecklistAdd').addEventListener('click', async () => {
+      const project = activeProject(); const step = project?.workflow.find((item) => item.id === activeWorkflowStepId); const text = $('#workflowChecklistInput').value.trim(); if (!step || !text) return;
+      step.checklist.push({ id: `check-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, text, done: false }); $('#workflowChecklistInput').value = '';
+      state = Core.updateProject(state, project.id, { workflow: project.workflow }); await persist(); renderWorkflowTaskPage();
+    });
+    $('#workflowChecklistInput').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); $('#workflowChecklistAdd').click(); } });
+    $('#saveWorkflowTask').addEventListener('click', () => void saveWorkflowTask());
+    $('#workflowTaskComplete').addEventListener('click', () => void saveWorkflowTask('complete'));
     $('#projectSettingsForm').addEventListener('submit', saveProjectSettings);
     $('#connectionForm').addEventListener('submit', addConnectionFromForm);
     $('#mailEditForm').addEventListener('submit', async (event) => {
@@ -2378,8 +2560,20 @@
       }
       const navLink = event.target.closest('[data-nav-link]');
       if (navLink) { navigate(navLink.dataset.navLink); return; }
+      const workflowCheck = event.target.closest('[data-workflow-check]');
+      if (workflowCheck) {
+        const project = activeProject(); const step = project?.workflow.find((item) => item.id === activeWorkflowStepId); const item = step?.checklist.find((candidate) => candidate.id === workflowCheck.dataset.workflowCheck); if (!project || !step || !item) return;
+        item.done = workflowCheck.checked; step.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { workflow: project.workflow }); await persist(); renderWorkflowTaskPage(); return;
+      }
+      const workflowCheckRemove = event.target.closest('[data-workflow-check-remove]');
+      if (workflowCheckRemove) {
+        event.preventDefault(); const project = activeProject(); const step = project?.workflow.find((item) => item.id === activeWorkflowStepId); if (!project || !step) return;
+        step.checklist = step.checklist.filter((item) => item.id !== workflowCheckRemove.dataset.workflowCheckRemove); state = Core.updateProject(state, project.id, { workflow: project.workflow }); await persist(); renderWorkflowTaskPage(); return;
+      }
       const sidebarProject = event.target.closest('[data-project-id]');
       if (sidebarProject) { await switchProject(sidebarProject.dataset.projectId); return; }
+      const workflowStepOpen = event.target.closest('[data-workflow-step-open]');
+      if (workflowStepOpen) { openWorkflowStep(workflowStepOpen.dataset.workflowStepOpen); return; }
       const workflowOpen = event.target.closest('[data-workflow-open]');
       if (workflowOpen) { openWorkflowModule(workflowOpen.dataset.workflowOpen); return; }
       const mailEdit = event.target.closest('[data-mail-edit]');
@@ -2405,6 +2599,14 @@
       }
       const programShortcutRemove = event.target.closest('[data-program-shortcut-remove]');
       if (programShortcutRemove) { await globalThis.workspaceDesktop.removeProgramShortcuts(programShortcutRemove.dataset.programShortcutRemove); showToast('바탕화면과 시작 메뉴 바로가기를 제거했습니다.'); return; }
+      const templateUse = event.target.closest('[data-template-use]');
+      if (templateUse) { openNewProjectDialog(templateUse.dataset.templateUse); return; }
+      const workflowTemplateRemove = event.target.closest('[data-workflow-template-remove]');
+      if (workflowTemplateRemove) {
+        const template = state.library.workflowTemplates.find((item) => item.id === workflowTemplateRemove.dataset.workflowTemplateRemove); if (!template) return;
+        if (!await showConfirm(`“${template.name} v${template.version}” 템플릿을 삭제할까요? 이미 만든 프로젝트의 업무 구성은 그대로 유지됩니다.`, { title: '업무 템플릿 삭제', action: '삭제' })) return;
+        try { state = Core.removeWorkflowTemplate(state, template.id); await persist(); renderLibraryPage(); showToast('업무 템플릿을 삭제했습니다.'); } catch (error) { showToast(error.message, 'error'); } return;
+      }
       const libraryAction = event.target.closest('[data-library-rename], [data-library-duplicate], [data-library-remove]');
       if (libraryAction) {
         const kind = libraryAction.dataset.libraryKind; const list = kind === 'roster' ? state.library.rosters : state.library.mailTemplates;

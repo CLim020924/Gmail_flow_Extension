@@ -4,7 +4,7 @@
   if (root) root.WorkspaceCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, () => {
   const FORMAT = 'cmoe-workspace';
-  const VERSION = 1;
+  const VERSION = 2;
 
   const MODULE_CATALOG = [
     {
@@ -71,6 +71,71 @@
     { id: 'zoom', name: 'Zoom', provider: 'Zoom' }
   ];
 
+  const TASK_TYPE_CATALOG = [
+    { id: 'people', name: '명단·데이터', description: '명단이나 업무 대상 자료를 입력하고 정리합니다.', moduleId: 'people', icon: '표' },
+    { id: 'checklist', name: '진행상황·체크리스트', description: '제출·확인·완료 항목을 업무에 맞게 관리합니다.', icon: '✓' },
+    { id: 'validation', name: '누락·오류 확인', description: '확인 기준과 발견한 오류를 기록하고 처리합니다.', icon: '!' },
+    { id: 'documentReview', name: '문서 검토', description: '문서의 날짜·시간·필수 항목과 검토 결과를 관리합니다.', icon: '문' },
+    { id: 'aiReview', name: 'AI 활용·검토', description: '사용할 프롬프트와 AI 결과, 사람의 최종 확인을 기록합니다.', icon: 'AI' },
+    { id: 'forms', name: 'Google 설문', description: '정보나 가능한 시간을 Google 설문으로 수집합니다.', moduleId: 'forms', icon: '설' },
+    { id: 'schedule', name: '일정·그룹 편성', description: '가능 시간과 조건을 바탕으로 일정을 편성합니다.', moduleId: 'schedule', icon: '일' },
+    { id: 'zoom', name: 'Zoom 회의', description: '확정된 일정에 Zoom 회의를 연결합니다.', moduleId: 'zoom', icon: 'Z' },
+    { id: 'gmailFlow', name: '안내 메일', description: '대상자별 안내 메일을 작성하고 Gmail에 저장합니다.', moduleId: 'gmailFlow', icon: 'G' },
+    { id: 'layout', name: '결과표·Excel', description: '프로젝트 결과를 표로 확인하고 Excel로 저장합니다.', moduleId: 'layout', icon: 'X' },
+    { id: 'report', name: '결과 정리·보고서', description: '기존 방식, 테스트 결과, 개선점과 적용 가능성을 정리합니다.', icon: '결' }
+  ];
+
+  const BUILTIN_WORKFLOW_TEMPLATES = [
+    {
+      id: 'template-blank', familyId: 'blank', version: 1, builtin: true,
+      name: '빈 프로젝트', description: '명단부터 시작해 필요한 작업만 직접 추가합니다.', category: '기본',
+      steps: [{ type: 'people', name: '명단·자료 준비' }]
+    },
+    {
+      id: 'template-kac', familyId: 'kac', version: 1, builtin: true,
+      name: 'KAC 응시자 관리', description: '응시자 명단, 제출 확인, 문서 검토와 안내 업무를 순서대로 관리합니다.', category: 'CMOE 업무',
+      steps: [
+        { type: 'people', name: '응시자 명단 준비' },
+        { type: 'checklist', name: '제출서류·진행상황 확인' },
+        { type: 'documentReview', name: '코칭일지 검토' },
+        { type: 'aiReview', name: 'AI 검토 결과 확인' },
+        { type: 'gmailFlow', name: '응시자 안내 메일' },
+        { type: 'layout', name: '최종 응시자 현황표' }
+      ]
+    },
+    {
+      id: 'template-education', familyId: 'education', version: 1, builtin: true,
+      name: '교육 프로그램 운영', description: '교육생 명단부터 일정·출결·수료·안내 결과까지 관리합니다.', category: 'CMOE 업무',
+      steps: [
+        { type: 'people', name: '교육생 명단 준비' },
+        { type: 'forms', name: '신청·가능 시간 조사' },
+        { type: 'schedule', name: '교육 일정 편성' },
+        { type: 'checklist', name: '출결·수료 진행상황' },
+        { type: 'gmailFlow', name: '교육 전후 안내 메일' },
+        { type: 'layout', name: '교육 운영 결과표' }
+      ]
+    },
+    {
+      id: 'template-communication', familyId: 'communication', version: 1, builtin: true,
+      name: '안내문·메일 업무', description: '명단을 정리하고 대상자별 안내문과 Gmail 초안을 만듭니다.', category: '빠른 시작',
+      steps: [{ type: 'people', name: '받는 사람 명단' }, { type: 'gmailFlow', name: '안내 메일 작성' }]
+    },
+    {
+      id: 'template-document-review', familyId: 'document-review', version: 1, builtin: true,
+      name: '문서·AI 검토 실험', description: '검토 기준과 AI 프롬프트, 결과 및 사람의 확인 내용을 함께 기록합니다.', category: 'AI 업무',
+      steps: [
+        { type: 'documentReview', name: '문서 검토 기준 정하기' },
+        { type: 'aiReview', name: 'AI로 직접 테스트하기' },
+        { type: 'report', name: '테스트 결과 정리' }
+      ]
+    },
+    {
+      id: 'template-data-cleanup', familyId: 'data-cleanup', version: 1, builtin: true,
+      name: 'Excel·명단 정리', description: '데이터를 붙여넣고 누락·중복을 확인한 뒤 결과표로 저장합니다.', category: '데이터 업무',
+      steps: [{ type: 'people', name: '데이터 가져오기' }, { type: 'validation', name: '누락·중복 확인' }, { type: 'layout', name: '정리 결과 저장' }]
+    }
+  ];
+
   function configureExtensionCatalog(manifests = []) {
     if (!Array.isArray(manifests) || !manifests.length) return MODULE_CATALOG;
     const next = manifests.filter((item) => item?.contributes?.workflow && item.contributes.page).map((item) => ({
@@ -109,6 +174,76 @@
     return new Date().toISOString();
   }
 
+  function taskType(type) {
+    return TASK_TYPE_CATALOG.find((item) => item.id === type) || TASK_TYPE_CATALOG.find((item) => item.id === 'checklist');
+  }
+
+  function normalizeWorkflowStep(step = {}, index = 0) {
+    const definition = taskType(step.type || step.moduleId);
+    const checklist = Array.isArray(step.checklist) ? step.checklist.map((item) => ({
+      id: item.id || makeId('check'),
+      text: String(item.text || '').trim(),
+      done: Boolean(item.done)
+    })).filter((item) => item.text) : [];
+    return {
+      id: step.id || makeId('step'),
+      type: definition.id,
+      moduleId: definition.moduleId || null,
+      name: String(step.name || definition.name).trim() || definition.name,
+      description: String(step.description || definition.description || '').trim(),
+      status: ['notStarted', 'inProgress', 'needsReview', 'complete', 'stale'].includes(step.status) ? step.status : 'notStarted',
+      instructions: String(step.instructions || '').trim(),
+      notes: String(step.notes || '').trim(),
+      checklist,
+      order: Number.isFinite(Number(step.order)) ? Number(step.order) : index,
+      updatedAt: step.updatedAt || null
+    };
+  }
+
+  function normalizeWorkflowTemplate(template = {}, index = 0) {
+    const steps = Array.isArray(template.steps) && template.steps.length ? template.steps : [{ type: 'people' }];
+    const configuration = template.configuration && typeof template.configuration === 'object' ? template.configuration : {};
+    return {
+      id: template.id || makeId('template'),
+      familyId: template.familyId || template.id || makeId('template-family'),
+      version: Math.max(1, Number(template.version) || 1),
+      builtin: Boolean(template.builtin),
+      name: String(template.name || '이름 없는 업무 템플릿').trim(),
+      description: String(template.description || '').trim(),
+      category: String(template.category || '사용자 템플릿').trim(),
+      steps: steps.map(normalizeWorkflowStep).map((step, stepIndex) => ({ ...step, order: stepIndex, status: 'notStarted', updatedAt: null })),
+      configuration: {
+        columns: Array.isArray(configuration.columns) ? clone(configuration.columns) : [],
+        roles: Array.isArray(configuration.roles) ? clone(configuration.roles) : [],
+        scheduleRules: configuration.scheduleRules && typeof configuration.scheduleRules === 'object' ? clone(configuration.scheduleRules) : {},
+        communication: configuration.communication && typeof configuration.communication === 'object' ? {
+          subjectTemplate: configuration.communication.subjectTemplate || '',
+          bodyTemplate: configuration.communication.bodyTemplate || '',
+          bodyHtmlTemplate: configuration.communication.bodyHtmlTemplate || ''
+        } : {},
+        layout: configuration.layout && typeof configuration.layout === 'object' ? clone(configuration.layout) : {}
+      },
+      projectSettings: template.projectSettings && typeof template.projectSettings === 'object' ? clone(template.projectSettings) : {},
+      createdAt: template.createdAt || nowIso(),
+      updatedAt: template.updatedAt || nowIso(),
+      order: Number.isFinite(Number(template.order)) ? Number(template.order) : index
+    };
+  }
+
+  function builtinWorkflowTemplates() {
+    return BUILTIN_WORKFLOW_TEMPLATES.map(normalizeWorkflowTemplate);
+  }
+
+  function normalizeWorkflowTemplates(input = []) {
+    const builtins = builtinWorkflowTemplates();
+    const custom = (Array.isArray(input) ? input : []).filter((item) => !item?.builtin && !builtins.some((builtin) => builtin.id === item?.id)).map(normalizeWorkflowTemplate);
+    return [...builtins, ...custom];
+  }
+
+  function workflowForModules(moduleIds = WORKFLOW_ORDER) {
+    return moduleIds.map((moduleId, index) => normalizeWorkflowStep({ type: moduleId, moduleId, order: index }, index));
+  }
+
   function createEmptyState() {
     return {
       format: FORMAT,
@@ -121,7 +256,7 @@
       installedExtensions: MODULE_CATALOG.map((module) => module.id),
       quickWorkspaces: {},
       quickTasks: {},
-      library: { rosters: [], mailTemplates: [], layoutTemplates: [] },
+      library: { rosters: [], mailTemplates: [], layoutTemplates: [], workflowTemplates: builtinWorkflowTemplates() },
       deletedConnectionIds: [],
       deletedLibraryIds: [],
       preferences: {
@@ -174,6 +309,22 @@
       updatedAt: project.updatedAt || nowIso(),
       installedModules: [...installed],
       moduleState,
+      workflowTemplate: {
+        id: project.workflowTemplate?.id || null,
+        familyId: project.workflowTemplate?.familyId || null,
+        version: Math.max(0, Number(project.workflowTemplate?.version) || 0),
+        name: String(project.workflowTemplate?.name || '').trim(),
+        modified: Boolean(project.workflowTemplate?.modified)
+      },
+      workflow: (Array.isArray(project.workflow) && project.workflow.length
+        ? project.workflow
+        : workflowForModules([...installed])
+      ).map(normalizeWorkflowStep).sort((a, b) => a.order - b.order).map((step, index) => ({
+        ...step,
+        order: index,
+        status: step.moduleId ? moduleState[step.moduleId]?.status || step.status : step.status,
+        updatedAt: step.moduleId ? moduleState[step.moduleId]?.updatedAt || step.updatedAt : step.updatedAt
+      })),
       settings: {
         timezone: project.settings?.timezone || 'Asia/Seoul',
         sessionDurationMinutes: Number(project.settings?.sessionDurationMinutes) || 60,
@@ -268,7 +419,7 @@
     const knownIds = new Set(MODULE_CATALOG.map((module) => module.id));
     const installedExtensions = [...new Set((Array.isArray(input.installedExtensions) ? input.installedExtensions : MODULE_CATALOG.map((module) => module.id)).filter((id) => knownIds.has(id)))];
     MODULE_CATALOG.filter((module) => module.core).forEach((module) => { if (!installedExtensions.includes(module.id)) installedExtensions.push(module.id); });
-    const projects = Array.isArray(input.projects) ? input.projects.map(normalizeProject).map((project) => ({ ...project, installedModules: [...installedExtensions] })) : [];
+    const projects = Array.isArray(input.projects) ? input.projects.map(normalizeProject) : [];
     const quickWorkspaces = {};
     for (const moduleId of knownIds) {
       const existing = input.quickWorkspaces?.[moduleId];
@@ -300,7 +451,8 @@
       library: {
         rosters: Array.isArray(input.library?.rosters) ? input.library.rosters : [],
         mailTemplates: Array.isArray(input.library?.mailTemplates) ? input.library.mailTemplates : [],
-        layoutTemplates: Array.isArray(input.library?.layoutTemplates) ? input.library.layoutTemplates : []
+        layoutTemplates: Array.isArray(input.library?.layoutTemplates) ? input.library.layoutTemplates : [],
+        workflowTemplates: normalizeWorkflowTemplates(input.library?.workflowTemplates)
       },
       deletedConnectionIds: Array.isArray(input.deletedConnectionIds) ? input.deletedConnectionIds : [],
       deletedLibraryIds: Array.isArray(input.deletedLibraryIds) ? input.deletedLibraryIds : [],
@@ -317,7 +469,9 @@
     const extensions = new Set(state.installedExtensions);
     if (installed) extensions.add(moduleId); else extensions.delete(moduleId);
     state.installedExtensions = [...extensions];
-    state.projects.forEach((project) => { project.installedModules = [...extensions]; });
+    state.projects.forEach((project) => {
+      project.installedModules = project.installedModules.filter((id) => extensions.has(id));
+    });
     if (installed && !state.quickWorkspaces[moduleId]) state.quickWorkspaces[moduleId] = { ...normalizeProject({ id: `quick-${moduleId}`, name: `${module.name} 빠른 작업`, installedModules: [...extensions] }), scope: 'quick' };
     if (state.quickWorkspaces[moduleId]) state.quickWorkspaces[moduleId].extensionInstalled = installed;
     state.updatedAt = nowIso();
@@ -336,6 +490,13 @@
     const name = String(values.name || '').trim();
     if (!name) throw new Error('프로젝트 이름을 입력해주세요.');
     const timestamp = nowIso();
+    const selectedTemplate = state.library.workflowTemplates.find((template) => template.id === values.templateId)
+      || state.library.workflowTemplates.find((template) => template.familyId === values.preset)
+      || state.library.workflowTemplates.find((template) => template.id === 'template-blank');
+    const workflow = Array.isArray(values.workflow) && values.workflow.length
+      ? values.workflow
+      : (!values.templateId && values.preset ? workflowForModules(workflowModulesForPreset(values.preset)) : selectedTemplate.steps);
+    const moduleIds = [...new Set(workflow.map((step) => taskType(step.type || step.moduleId).moduleId).filter(Boolean))];
     const project = normalizeProject({
       id: values.id || makeId('project'),
       name,
@@ -345,10 +506,18 @@
       endDate: values.endDate,
       installedModules: Array.isArray(values.installedModules)
         ? values.installedModules
-        : workflowModulesForPreset(values.preset || 'full'),
+        : moduleIds,
+      workflow,
+      workflowTemplate: values.workflowTemplate || (!values.templateId && values.preset ? null : {
+        id: selectedTemplate.id,
+        familyId: selectedTemplate.familyId,
+        version: selectedTemplate.version,
+        name: selectedTemplate.name
+      }),
       createdAt: timestamp,
       updatedAt: timestamp,
-      settings: values.settings || {}
+      settings: { ...clone(selectedTemplate.projectSettings), ...(values.settings || {}) },
+      data: values.data || clone(selectedTemplate.configuration)
     });
     state.projects.unshift(project);
     state.activeProjectId = project.id;
@@ -428,6 +597,13 @@
     result.project.moduleState = Object.fromEntries(
       MODULE_CATALOG.map((module) => [module.id, { status: 'notStarted', updatedAt: null, summary: '' }])
     );
+    result.project.workflow = result.project.workflow.map((step) => ({
+      ...step,
+      status: 'notStarted',
+      updatedAt: null,
+      notes: '',
+      checklist: step.checklist.map((item) => ({ ...item, done: false }))
+    }));
     result.project.counts = { people: 0, sessions: 0, unresolved: 0 };
     result.project.data = {
       ...result.project.data,
@@ -465,7 +641,84 @@
     const project = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces).find((item) => item.id === projectId);
     if (!project) throw new Error('프로젝트를 찾을 수 없습니다.');
     project.moduleState[moduleId] = { status, summary, updatedAt: nowIso() };
+    project.workflow = project.workflow.map((step) => step.moduleId === moduleId ? { ...step, status, updatedAt: nowIso() } : step);
     project.updatedAt = nowIso();
+    state.updatedAt = nowIso();
+    return state;
+  }
+
+  function updateProjectWorkflow(stateInput, projectId, steps = []) {
+    if (!Array.isArray(steps) || !steps.length) throw new Error('프로젝트에는 작업이 하나 이상 필요합니다.');
+    const state = normalizeState(stateInput);
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) throw new Error('프로젝트를 찾을 수 없습니다.');
+    const workflow = steps.map(normalizeWorkflowStep).map((step, index) => ({ ...step, order: index }));
+    const installedModules = [...new Set([
+      ...project.installedModules,
+      ...workflow.map((step) => step.moduleId).filter(Boolean)
+    ])];
+    return updateProject(state, projectId, { workflow, installedModules });
+  }
+
+  function setWorkflowStepStatus(stateInput, projectId, stepId, status, notes) {
+    if (!['notStarted', 'inProgress', 'needsReview', 'complete', 'stale'].includes(status)) throw new Error('알 수 없는 작업 상태입니다.');
+    const state = normalizeState(stateInput);
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) throw new Error('프로젝트를 찾을 수 없습니다.');
+    const step = project.workflow.find((item) => item.id === stepId);
+    if (!step) throw new Error('작업 단계를 찾을 수 없습니다.');
+    step.status = status;
+    step.updatedAt = nowIso();
+    if (notes !== undefined) step.notes = String(notes || '');
+    if (step.moduleId && project.moduleState[step.moduleId]) project.moduleState[step.moduleId] = { status, summary: step.notes || '', updatedAt: step.updatedAt };
+    project.updatedAt = nowIso();
+    state.updatedAt = nowIso();
+    return state;
+  }
+
+  function saveWorkflowTemplate(stateInput, projectId, values = {}) {
+    const state = normalizeState(stateInput);
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) throw new Error('프로젝트를 찾을 수 없습니다.');
+    const name = String(values.name || '').trim();
+    if (!name) throw new Error('업무 템플릿 이름을 입력해주세요.');
+    const sameFamily = state.library.workflowTemplates.filter((item) => !item.builtin && item.name.toLowerCase() === name.toLowerCase());
+    const familyId = sameFamily[0]?.familyId || makeId('template-family');
+    const version = sameFamily.reduce((max, item) => Math.max(max, item.version), 0) + 1;
+    const template = normalizeWorkflowTemplate({
+      id: makeId('template'), familyId, version, name,
+      description: values.description || `${project.name}에서 저장한 업무 구성`,
+      category: values.category || '사용자 템플릿',
+      steps: project.workflow,
+      configuration: {
+        columns: project.data.columns,
+        roles: project.data.roles,
+        scheduleRules: project.data.scheduleRules,
+        communication: project.data.communication,
+        layout: project.data.layout
+      },
+      projectSettings: {
+        timezone: project.settings.timezone,
+        sessionDurationMinutes: project.settings.sessionDurationMinutes,
+        participantMin: project.settings.participantMin,
+        participantMax: project.settings.participantMax,
+        coachRequired: project.settings.coachRequired,
+        changeApprovalRequired: project.settings.changeApprovalRequired
+      },
+      createdAt: nowIso(), updatedAt: nowIso()
+    });
+    state.library.workflowTemplates.push(template);
+    state.updatedAt = nowIso();
+    return { state, template };
+  }
+
+  function removeWorkflowTemplate(stateInput, templateId) {
+    const state = normalizeState(stateInput);
+    const template = state.library.workflowTemplates.find((item) => item.id === templateId);
+    if (!template) throw new Error('업무 템플릿을 찾을 수 없습니다.');
+    if (template.builtin) throw new Error('기본 업무 템플릿은 삭제할 수 없습니다.');
+    state.library.workflowTemplates = state.library.workflowTemplates.filter((item) => item.id !== templateId);
+    if (!state.deletedLibraryIds.includes(templateId)) state.deletedLibraryIds.push(templateId);
     state.updatedAt = nowIso();
     return state;
   }
@@ -508,9 +761,9 @@
 
   function getProjectProgress(project) {
     if (!project) return { complete: 0, total: 0, percent: 0 };
-    const installed = WORKFLOW_ORDER.filter((id) => project.installedModules.includes(id));
-    const complete = installed.filter((id) => project.moduleState?.[id]?.status === 'complete').length;
-    return { complete, total: installed.length, percent: installed.length ? Math.round((complete / installed.length) * 100) : 0 };
+    const workflow = Array.isArray(project.workflow) ? project.workflow : [];
+    const complete = workflow.filter((step) => step.status === 'complete').length;
+    return { complete, total: workflow.length, percent: workflow.length ? Math.round((complete / workflow.length) * 100) : 0 };
   }
 
   return {
@@ -519,6 +772,8 @@
     MODULE_CATALOG,
     WORKFLOW_ORDER,
     CONNECTION_TYPES,
+    TASK_TYPE_CATALOG,
+    BUILTIN_WORKFLOW_TEMPLATES,
     configureExtensionCatalog,
     createEmptyState,
     normalizeState,
@@ -531,6 +786,10 @@
     setModuleInstalled,
     setExtensionInstalled,
     setModuleStatus,
+    updateProjectWorkflow,
+    setWorkflowStepStatus,
+    saveWorkflowTemplate,
+    removeWorkflowTemplate,
     addConnection,
     removeConnection,
     getActiveProject,

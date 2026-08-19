@@ -56,6 +56,31 @@ function run() {
   state = Core.setExtensionInstalled(state, 'gmailFlow', true);
   assert.equal(state.quickWorkspaces.gmailFlow.scope, 'quick');
 
+  assert.ok(state.library.workflowTemplates.some((template) => template.id === 'template-kac'));
+  result = Core.createProject(state, { id: 'project-kac', name: 'KAC 4차', templateId: 'template-kac' });
+  state = result.state;
+  assert.equal(result.project.workflowTemplate.familyId, 'kac');
+  assert.ok(result.project.workflow.some((step) => step.type === 'documentReview'));
+  const checklistStep = result.project.workflow.find((step) => step.type === 'checklist');
+  state = Core.setWorkflowStepStatus(state, result.project.id, checklistStep.id, 'needsReview', '누락 2건');
+  assert.equal(Core.getActiveProject(state).workflow.find((step) => step.id === checklistStep.id).notes, '누락 2건');
+  const revisedWorkflow = Core.getActiveProject(state).workflow.concat({ type: 'report', name: '최종 보고' });
+  state = Core.updateProjectWorkflow(state, result.project.id, revisedWorkflow);
+  assert.equal(Core.getActiveProject(state).workflow.at(-1).type, 'report');
+  let savedTemplate = Core.saveWorkflowTemplate(state, result.project.id, { name: '우리 회사 KAC' });
+  state = savedTemplate.state;
+  assert.equal(savedTemplate.template.version, 1);
+  savedTemplate = Core.saveWorkflowTemplate(state, result.project.id, { name: '우리 회사 KAC' });
+  state = savedTemplate.state;
+  assert.equal(savedTemplate.template.version, 2);
+  assert.equal(Object.prototype.hasOwnProperty.call(savedTemplate.template.configuration, 'people'), false);
+  const templatedProject = Core.createProject(state, { id: 'project-from-template', name: '템플릿 프로젝트', templateId: savedTemplate.template.id });
+  assert.equal(templatedProject.project.workflow.length, savedTemplate.template.steps.length);
+  assert.equal(templatedProject.project.data.people.length, 0);
+  state = templatedProject.state;
+  state = Core.removeWorkflowTemplate(state, savedTemplate.template.id);
+  assert.equal(state.library.workflowTemplates.some((template) => template.id === savedTemplate.template.id), false);
+
 console.log('workspace-core tests passed');
 }
 

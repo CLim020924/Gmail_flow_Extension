@@ -21,7 +21,7 @@ function mergeWorkspaceState(current = {}, incoming = {}) {
   const quickTasks = { ...(current.quickTasks || {}) };
   Object.entries(incoming.quickTasks || {}).forEach(([key, list]) => { quickTasks[key] = mergeById(quickTasks[key], list); });
   const library = {};
-  ['rosters', 'mailTemplates', 'layoutTemplates'].forEach((key) => { library[key] = mergeById(current.library?.[key], incoming.library?.[key]).filter((item) => !deletedLibraryIds.includes(item.id)); });
+  ['rosters', 'mailTemplates', 'layoutTemplates', 'workflowTemplates'].forEach((key) => { library[key] = mergeById(current.library?.[key], incoming.library?.[key]).filter((item) => !deletedLibraryIds.includes(item.id)); });
   return {
     ...current,
     ...incoming,
