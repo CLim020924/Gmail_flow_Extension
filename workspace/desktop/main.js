@@ -566,7 +566,14 @@ app.whenReady().then(async () => {
         await fs.promises.writeFile(previewPath, preview.toPNG());
         console.log(`Workspace smoke preview: ${previewPath}`);
         const smokeState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
-        const rosterManager = createRosterPickerWindow(smokeState.activeProjectId, mainWindow);
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('#openMailRosterManager').click()`);
+        const pickerDeadline = Date.now() + 5000;
+        let rosterManager;
+        while ((!rosterManager || rosterManager.isDestroyed()) && Date.now() < pickerDeadline) {
+          rosterManager = rosterPickerWindows.get(String(smokeState.activeProjectId || 'quick'));
+          if (!rosterManager || rosterManager.isDestroyed()) await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        if (!rosterManager || rosterManager.isDestroyed()) throw new Error('Clicking the roster import button did not open the shared roster picker.');
         if (!rosterManager.isModal() || rosterManager.getParentWindow() !== mainWindow) throw new Error('Shared roster picker must open as a modal child window.');
         if (rosterManager.webContents.isLoading()) await new Promise((resolve) => rosterManager.webContents.once('did-finish-load', resolve));
         const rosterManagerResult = await rosterManager.webContents.executeJavaScript(`(async () => {
