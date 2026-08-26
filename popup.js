@@ -383,7 +383,7 @@ async function restoreWorkspaceRoster() {
   const roster = await globalThis.gmailFlowDesktop.loadWorkspaceRoster(workspaceProjectId);
   state.columns = Array.isArray(roster.columns) ? roster.columns : [];
   state.rows = Array.isArray(roster.rows) ? roster.rows : [];
-  state.activeRosterName = roster.projectName ? `${roster.projectName} 명단` : '프로젝트 명단';
+  state.activeRosterName = roster.rosterName || (roster.projectName ? `${roster.projectName} 명단` : '프로젝트 명단');
   state.page = 'roster';
   $('#useRoster').textContent = '프로젝트에 적용하고 닫기';
   $('#rosterContext').textContent = `${roster.projectName || '현재 프로젝트'}와 연결된 공용 명단`;
@@ -727,6 +727,8 @@ function renderRoster() {
       input.dataset.columnIndex = String(columnIndex);
       input.setAttribute('aria-label', `${rowIndex + 1}행 ${columnLetter(columnIndex)}열 ${column.name}`);
       input.value = state.rows[rowIndex]?.[column.id] || '';
+      input.readOnly = excluded;
+      if (excluded) input.title = '임시 제외된 잠금 행입니다. 왼쪽의 ↺ 버튼으로 복원하면 편집할 수 있습니다.';
       td.append(input);
       tr.append(td);
     });
@@ -815,11 +817,29 @@ function selectedHtml(matrix = selectedMatrix()) {
   return `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join('')}</tr>`).join('')}</table>`;
 }
 
+function isRosterRowLocked(rowIndex) {
+  return state.rows[rowIndex]?.__workspaceActive === false;
+}
+
+function lockedRosterRowCount() {
+  return state.rows.filter((row) => row.__workspaceActive === false).length;
+}
+
+function blockLockedRosterReplacement() {
+  const count = lockedRosterRowCount();
+  if (!count) return false;
+  updateRosterStatus(`임시 제외된 ${count}개 행은 잠겨 있습니다. 먼저 ↺로 복원한 뒤 전체 명단을 교체하세요.`);
+  void showAlert(`임시 제외된 ${count}개 행은 삭제하거나 덮어쓸 수 없습니다.\n행 왼쪽의 ↺ 버튼으로 복원한 뒤 다시 시도해주세요.`, '잠긴 명단 행');
+  return true;
+}
+
 function clearSelectedData() {
   const bounds = selectionBounds();
   if (!bounds) return false;
   pushRosterHistory();
+  let protectedRows = 0;
   for (let row = Math.max(0, bounds.minRow); row <= bounds.maxRow; row += 1) {
+    if (isRosterRowLocked(row)) { protectedRows += 1; continue; }
     state.columns.slice(bounds.minColumn, bounds.maxColumn + 1).forEach((column) => {
       if (state.rows[row]) state.rows[row][column.id] = '';
     });
@@ -827,7 +847,7 @@ function clearSelectedData() {
   while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
   renderRoster();
   updateComposeState();
-  updateRosterStatus('선택한 데이터 셀을 비웠습니다. 컬럼 이름은 유지됩니다.');
+  updateRosterStatus(protectedRows ? `선택 영역을 비웠습니다. 잠긴 ${protectedRows}개 행은 그대로 유지했습니다.` : '선택한 데이터 셀을 비웠습니다. 컬럼 이름은 유지됩니다.');
   return true;
 }
 
@@ -856,11 +876,16 @@ function redoRoster() { if (!rosterFuture.length) return; rosterHistory.push(ros
 function editRosterSelection(action, columnName = '새 컬럼') {
   const bounds = selectionBounds(); if (!bounds && action !== 'insert-row') return false; pushRosterHistory();
   if (action === 'fill-down') {
-    for (let col = bounds.minColumn; col <= bounds.maxColumn; col += 1) { const value = state.rows[Math.max(0, bounds.minRow)]?.[state.columns[col].id] || ''; for (let row = Math.max(0, bounds.minRow + 1); row <= bounds.maxRow; row += 1) { while (state.rows.length <= row) state.rows.push({}); state.rows[row][state.columns[col].id] = value; } }
+    for (let col = bounds.minColumn; col <= bounds.maxColumn; col += 1) { const value = state.rows[Math.max(0, bounds.minRow)]?.[state.columns[col].id] || ''; for (let row = Math.max(0, bounds.minRow + 1); row <= bounds.maxRow; row += 1) { while (state.rows.length <= row) state.rows.push({}); if (!isRosterRowLocked(row)) state.rows[row][state.columns[col].id] = value; } }
   } else if (action === 'insert-row') state.rows.splice(Math.max(0, bounds?.minRow || 0), 0, {});
-  else if (action === 'delete-rows') state.rows.splice(Math.max(0, bounds.minRow), bounds.maxRow - Math.max(0, bounds.minRow) + 1);
+  else if (action === 'delete-rows') {
+    for (let row = bounds.maxRow; row >= Math.max(0, bounds.minRow); row -= 1) if (!isRosterRowLocked(row)) state.rows.splice(row, 1);
+  }
   else if (action === 'insert-column') { const index = bounds.minColumn; const column = { id: makeId(), name: columnName, role: 'variable' }; state.columns.splice(index, 0, column); state.rows.forEach((row) => { row[column.id] = ''; }); }
-  else if (action === 'delete-columns') { const removed = state.columns.splice(bounds.minColumn, bounds.maxColumn - bounds.minColumn + 1); state.rows.forEach((row) => removed.forEach((column) => delete row[column.id])); }
+  else if (action === 'delete-columns') {
+    if (lockedRosterRowCount()) { rosterHistory.pop(); blockLockedRosterReplacement(); return false; }
+    const removed = state.columns.splice(bounds.minColumn, bounds.maxColumn - bounds.minColumn + 1); state.rows.forEach((row) => removed.forEach((column) => delete row[column.id]));
+  }
   cellSelection = null; renderRoster(); updateComposeState(); updateRosterStatus('명단 시트 작업을 적용했습니다.'); return true;
 }
 
@@ -967,6 +992,7 @@ async function readDelimitedFile(file) {
 
 function applyTable(matrix, trackHistory = true) {
   if (!matrix.length) return;
+  if (blockLockedRosterReplacement()) return false;
   if (trackHistory) pushRosterHistory();
   const width = Math.max(...matrix.map((row) => row.length));
   const first = matrix[0].map((value) => String(value || '').trim());
@@ -1009,6 +1035,7 @@ function applyMatrixAt(matrix, startRow, startColumn, trackHistory = true) {
   matrix.forEach((values, rowOffset) => {
     const rowIndex = startRow + rowOffset;
     while (state.rows.length <= rowIndex) state.rows.push({});
+    if (isRosterRowLocked(rowIndex)) return;
     values.forEach((value, columnOffset) => {
       const column = state.columns[startColumn + columnOffset];
       state.rows[rowIndex][column.id] = value;
@@ -1145,6 +1172,7 @@ function showRosterDetail(id) {
 
 function loadRosterIntoEditor(roster) {
   if (!roster) return;
+  if (blockLockedRosterReplacement()) return;
   state.columns = structuredClone(roster.columns);
   state.rows = structuredClone(roster.rows);
   state.activeRosterName = roster.name;
@@ -1259,6 +1287,7 @@ function showStructureTemplateDetail(id) {
 
 function applyStructureToEditor(template) {
   if (!template) return;
+  if (blockLockedRosterReplacement()) return;
   state.columns = structuredClone(template.columns);
   state.rows = [];
   state.activeRosterName = '';
@@ -1813,7 +1842,7 @@ function bindEvents() {
     if (singleValue && (bounds.maxRow > bounds.minRow || bounds.maxColumn > bounds.minColumn)) {
       pushRosterHistory();
       for (let row = Math.max(0, bounds.minRow); row <= bounds.maxRow; row += 1) for (let col = bounds.minColumn; col <= bounds.maxColumn; col += 1) {
-        while (state.rows.length <= row) state.rows.push({}); state.rows[row][state.columns[col].id] = matrix[0][0];
+        while (state.rows.length <= row) state.rows.push({}); if (!isRosterRowLocked(row)) state.rows[row][state.columns[col].id] = matrix[0][0];
       }
       renderRoster(); updateComposeState(); updateRosterStatus('선택한 모든 셀에 값을 붙여넣었습니다.');
     } else if (!state.columns.length && bounds.minRow <= 0) applyTable(matrix);
@@ -2007,7 +2036,7 @@ function bindEvents() {
     }
     closeMenus(); event.target.value = '';
   });
-  $('#resetRoster').addEventListener('click', async () => { closeMenus(); if (!await showConfirm('현재 명단 편집 내용을 초기화할까요?', '명단 초기화', '초기화')) return; pushRosterHistory(); state.columns = []; state.rows = []; cellSelection = null; state.activeRosterName = ''; state.activeStructureTemplateId = ''; $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음'; renderRoster(); updateActiveRosterText(); updateComposeState(); queueMicrotask(() => $('#addColumn')?.focus()); });
+  $('#resetRoster').addEventListener('click', async () => { closeMenus(); if (blockLockedRosterReplacement()) return; if (!await showConfirm('현재 명단 편집 내용을 초기화할까요?', '명단 초기화', '초기화')) return; pushRosterHistory(); state.columns = []; state.rows = []; cellSelection = null; state.activeRosterName = ''; state.activeStructureTemplateId = ''; $('#rosterContext').textContent = '새 명단 · 연결된 명단 템플릿 없음'; renderRoster(); updateActiveRosterText(); updateComposeState(); queueMicrotask(() => $('#addColumn')?.focus()); });
   $('#rosterUndo').addEventListener('click', undoRoster);
   $('#rosterRedo').addEventListener('click', redoRoster);
   $('#rosterClearSelection').addEventListener('click', () => { closeMenus(); clearSelectedData(); });

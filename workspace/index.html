@@ -9,8 +9,12 @@
 </head>
 <body>
   <header id="standaloneBar" class="standalone-bar" hidden>
-    <div><strong id="standaloneTitle">CMOE 프로그램</strong><span id="standaloneConnectionStatus">저장 자료 확인 중</span><select id="quickTaskSelect" aria-label="저장된 작업"><option value="">현재 작업</option></select><select id="standaloneProjectSelect" aria-label="프로젝트 자료"><option value="">프로젝트에서 자료 가져오기</option></select><button id="newQuickTask" type="button">새 작업 시작</button><button id="saveQuickTask" type="button">현재 작업 저장</button></div>
-    <nav><button type="button" data-quick-program="people">명단</button><button type="button" data-quick-program="schedule">일정</button><button type="button" data-quick-program="layout">Excel</button><button type="button" data-quick-program="zoom">Zoom</button><button type="button" data-quick-program="gmailFlow">Gmail Flow</button><button class="primary-button" type="button" data-open-workspace>Workspace</button></nav>
+    <div class="standalone-identity"><strong id="standaloneTitle">CMOE 프로그램</strong><span id="standaloneConnectionStatus">현재 작업은 자동 저장됩니다.</span></div>
+    <nav>
+      <details class="standalone-menu"><summary>작업 ▾</summary><div class="standalone-menu-panel"><label>저장된 작업<select id="quickTaskSelect" aria-label="저장된 작업"><option value="">현재 작업</option></select></label><label>프로젝트 자료<select id="standaloneProjectSelect" aria-label="프로젝트 자료"><option value="">프로젝트에서 자료 가져오기</option></select></label><button id="newQuickTask" type="button">새 작업 시작</button><button id="saveQuickTask" type="button">현재 작업 저장</button></div></details>
+      <details class="standalone-menu"><summary>관련 프로그램 ▾</summary><div class="standalone-menu-panel"><button type="button" data-quick-program="people">명단 준비</button><button type="button" data-quick-program="schedule">일정 편성</button><button type="button" data-quick-program="layout">일정표 저장</button><button type="button" data-quick-program="zoom">Zoom 회의</button><button type="button" data-quick-program="gmailFlow">메일 작성</button></div></details>
+      <button class="workspace-return" type="button" data-open-workspace>전체 Workspace</button>
+    </nav>
   </header>
   <div class="app-shell">
     <aside class="sidebar">
@@ -111,16 +115,15 @@
       <section id="page-people" class="page module-workbench" data-page="people">
         <div class="page-heading">
           <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">1단계 · 명단</span><h1>명단 준비</h1><p>명단 입력·붙여넣기·Excel/CSV 가져오기·저장 명단 관리는 하나의 공용 창에서 처리합니다.</p></div>
-          <div class="heading-actions page-primary-actions"><button id="openRosterManager" class="primary-button" type="button">명단 관리 창 열기</button><button id="rosterStartTask" class="secondary-button" type="button">이 명단으로 작업하기</button></div>
         </div>
-        <section class="workbench-panel"><div class="section-heading"><div><h2>현재 프로젝트 원본 명단</h2><p id="rosterManagerSummary">명단 정보를 확인하는 중입니다.</p></div></div><div class="metric-list"><span><small>사람</small><strong id="rosterPeopleMetric">0</strong></span><span><small>열</small><strong id="rosterColumnMetric">0</strong></span><span><small>확인할 항목</small><strong id="rosterWarningMetric">0</strong></span></div><div id="rosterImportWarnings" class="warning-list" hidden></div><div id="rosterColumnSummary" class="tag-list"></div><p class="field-help">원본은 그대로 유지됩니다. 시험 단계·반·교육 과정별 인원은 아래에서 별도의 단계 명단으로 만드세요.</p></section>
+        <section class="workbench-panel"><div class="section-heading"><div><h2>현재 프로젝트 원본 명단</h2><p id="rosterManagerSummary">명단 정보를 확인하는 중입니다.</p></div><div class="button-row"><button id="openRosterManager" class="primary-button" type="button">명단 가져오기</button><button id="rosterStartTask" class="secondary-button" type="button">이 명단으로 작업하기</button></div></div><div class="metric-list"><span><small>사람</small><strong id="rosterPeopleMetric">0</strong></span><span><small>열</small><strong id="rosterColumnMetric">0</strong></span><span><small>확인할 항목</small><strong id="rosterWarningMetric">0</strong></span></div><div id="rosterImportWarnings" class="warning-list" hidden></div><div id="rosterColumnSummary" class="tag-list"></div><p class="field-help">원본은 그대로 유지됩니다. 시험 단계·반·교육 과정별 인원은 아래에서 별도의 단계 명단으로 만드세요.</p></section>
         <section class="workbench-panel roster-view-panel"><div class="section-heading"><div><h2>단계·반별 명단</h2><p>원본을 기준으로 필기 응시자, 합격자, 실기 접수자, A반·B반처럼 필요한 명단을 추가합니다.</p></div><div class="button-row"><button id="createRosterView" class="secondary-button" type="button">원본에서 새 명단</button><button id="saveRosterViewAs" class="primary-button" type="button">현재 인원으로 새 명단</button><details class="action-menu inline-action-menu"><summary class="secondary-button">현재 명단 관리 ▾</summary><div class="action-menu-panel"><button id="renameRosterView" type="button">이름 변경</button><button id="deleteRosterView" class="danger-text" type="button">단계 명단 삭제</button></div></details></div></div><div class="roster-view-toolbar"><label>작업할 명단<select id="rosterViewSelect"><option value="">원본 명단</option></select></label><span id="rosterViewSummary"></span></div><div id="rosterViewPeople" class="roster-view-people"></div></section>
       </section>
 
       <section id="page-arrange" class="page module-workbench" data-page="arrange">
         <div class="page-heading">
           <div><button class="back-link" type="button" data-nav-link="people">← 명단으로 돌아가기</button><span class="eyebrow">명단 작업</span><h1 id="arrangementTitle">그룹 작업</h1><p>원본 명단과 분리된 작업표입니다. 셀을 직접 수정하고 Excel과 복사·붙여넣을 수 있습니다.</p></div>
-          <div class="heading-actions"><button id="arrangementNewTask" class="secondary-button" type="button">다른 작업 만들기</button><button id="arrangementImportExcel" class="secondary-button" type="button">Excel 불러오기</button><button id="arrangementDownloadCsv" class="primary-button" type="button">Excel로 저장</button></div>
+          <details class="action-menu"><summary class="secondary-button">작업 ▾</summary><div class="action-menu-panel"><button id="arrangementNewTask" type="button">다른 작업 만들기</button><button id="arrangementImportExcel" type="button">Excel 파일 불러오기</button><button id="arrangementDownloadCsv" type="button">Excel에서 열 수 있게 저장</button></div></details>
         </div>
         <div class="arrangement-toolbar">
           <label>현재 작업<select id="arrangementSelect" aria-label="현재 명단 작업"></select></label>
@@ -179,9 +182,7 @@
           <div class="section-heading"><div><h2>6. 편성된 일정표</h2><p>이 표가 곧 편집기입니다. 셀을 바로 고치거나 Excel 범위를 복사·붙여넣을 수 있으며 변경 내용은 즉시 일정에 반영됩니다.</p></div><span id="scheduleBoardSummary" class="status-summary"></span></div>
           <div id="scheduleConflicts" class="warning-list" hidden></div>
           <div class="schedule-sheet-toolbar" role="toolbar" aria-label="일정표 편집 도구">
-            <button id="scheduleImportExcel" class="secondary-button compact" type="button">Excel 불러오기</button>
-            <button id="scheduleExportExcel" class="secondary-button compact" type="button">Excel로 저장</button>
-            <button id="openScheduleRosterManager" class="secondary-button compact" type="button">명단 관리</button><span id="scheduleProjectRosterStatus" class="field-help"></span>
+            <details class="action-menu inline-action-menu"><summary class="secondary-button compact">표 작업 ▾</summary><div class="action-menu-panel"><button id="scheduleImportExcel" type="button">Excel 파일 불러오기</button><button id="scheduleExportExcel" type="button">Excel로 저장</button><button id="openScheduleRosterManager" type="button">명단 가져오기</button></div></details><span id="scheduleProjectRosterStatus" class="field-help"></span>
             <span class="toolbar-separator"></span>
             <button id="scheduleUndo" class="icon-text-button" type="button" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button>
             <button id="scheduleRedo" class="icon-text-button" type="button" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>
@@ -249,10 +250,11 @@
       <section id="page-gmailFlow" class="page module-workbench" data-page="gmailFlow">
         <div class="page-heading">
           <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">6단계 · 메일</span><h1>안내 메일 준비</h1><p>현재 프로젝트의 명단·일정·Zoom 링크를 받는 사람별 메일로 만들고 Gmail 임시보관함에 저장합니다.</p></div>
-          <div class="heading-actions page-primary-actions gmail-heading-actions"><button id="gmailFlowAccountButton" class="gmail-account-chip" type="button"><span id="gmailFlowAccountAvatar">G</span><span><strong id="gmailFlowAccountText">보내는 Google 계정 확인 중</strong><small id="gmailFlowAccountStatus">클릭하여 Gmail Flow 계정 확인</small></span></button><button id="openOriginalGmailFlow" class="primary-button" type="button">Gmail Flow에서 메일 작성</button><details class="action-menu"><summary class="secondary-button">관련 작업 ▾</summary><div class="action-menu-panel"><button type="button" data-related-program="people">받는 사람 명단 확인</button><button type="button" data-related-program="schedule">일정표 확인</button><button type="button" data-nav-link="connections">Workspace Gmail 계정 관리</button></div></details></div>
         </div>
         <div class="settings-layout">
           <section class="workbench-panel">
+            <div class="applied-resource"><div><span class="resource-label">적용된 명단</span><strong id="mailRosterSummary">받는 사람 명단이 없습니다.</strong><div id="mailRosterPeople" class="resource-preview"></div></div><button id="openMailRosterManager" class="secondary-button" type="button">명단 가져오기</button></div>
+            <div class="applied-resource account-resource"><button id="gmailFlowAccountButton" class="gmail-account-chip" type="button"><span id="gmailFlowAccountAvatar">G</span><span><strong id="gmailFlowAccountText">보내는 Google 계정 확인 중</strong><small id="gmailFlowAccountStatus">클릭하여 계정 확인</small></span></button><button id="openOriginalGmailFlow" class="secondary-button" type="button">Gmail Flow 열기</button></div>
             <label class="form-field">메일 제목<input id="mailSubjectTemplate" type="text"></label>
             <label class="form-field">메일 본문</label>
             <div class="rich-toolbar" data-editor-toolbar="mailBodyEditor" role="toolbar" aria-label="메일 서식">
@@ -264,10 +266,10 @@
             <textarea id="mailBodyTemplate" hidden></textarea>
             <p class="field-help">Excel 셀을 붙여넣으면 표, 셀 배경색, 글꼴, 테두리를 가능한 범위에서 유지합니다.</p>
             <div class="template-variable-panel"><div class="template-variable-heading"><strong>받는 사람마다 바뀌는 항목</strong><small>이름이나 일정 항목을 클릭하면 메일에 삽입됩니다.</small></div><div id="templateVariablePalette" class="template-variable-palette"></div><div id="templateTokenStatus" class="template-token-status"></div></div>
-            <div class="composer-resource-bar"><button id="openMailRosterManager" class="secondary-button" type="button">받는 사람 명단 관리</button><details class="action-menu inline-action-menu"><summary class="secondary-button">저장한 메일 양식 ▾</summary><div class="action-menu-panel wide"><label>메일 양식<select id="sharedMailTemplateSelect" aria-label="저장한 메일 양식"><option value="">메일 양식 선택</option></select></label><button id="loadSharedMailTemplate" type="button">선택한 메일 양식 불러오기</button><button id="saveSharedMailTemplate" type="button">현재 내용을 새 메일 양식으로 저장</button></div></details></div>
+            <div class="composer-resource-bar"><details class="action-menu inline-action-menu"><summary class="secondary-button">메일 양식 ▾</summary><div class="action-menu-panel wide"><label>저장된 양식<select id="sharedMailTemplateSelect" aria-label="저장한 메일 양식"><option value="">메일 양식 선택</option></select></label><button id="loadSharedMailTemplate" type="button">선택한 메일 양식 불러오기</button><button id="saveSharedMailTemplate" type="button">현재 내용을 새 메일 양식으로 저장</button></div></details><details class="action-menu inline-action-menu"><summary class="secondary-button">관련 작업 ▾</summary><div class="action-menu-panel"><button type="button" data-related-program="schedule">일정표 확인</button><button type="button" data-nav-link="connections">계정 연결 관리</button></div></details></div>
             <div class="button-row mail-primary-actions"><button id="prepareMailPackage" class="secondary-button" type="button">받는 사람별 메일 확인</button><button id="createGmailDrafts" class="primary-button" type="button">Gmail 임시보관함에 만들기</button><details class="action-menu inline-action-menu"><summary class="secondary-button">고급 기능 ▾</summary><div class="action-menu-panel"><button id="downloadMailPackage" type="button">Gmail Flow용 CSV 저장</button></div></details></div>
           </section>
-          <section class="workbench-panel"><h2>발송 전 확인</h2><div class="metric-list"><span><small>받는 사람</small><strong id="mailRecipientMetric">0</strong></span><span><small>일정이 없는 사람</small><strong id="mailEmptyMetric">0</strong></span><span><small>Zoom 링크 없음</small><strong id="mailZoomMetric">0</strong></span></div><p id="mailPackageStatus" class="field-help"></p></section>
+          <section class="workbench-panel"><h2>발송 전 확인</h2><p id="mailReadinessText" class="readiness-text">명단과 메일 내용을 준비해주세요.</p><p id="mailPackageStatus" class="field-help"></p></section>
         </div>
         <section class="workbench-panel table-panel"><h2>받는 사람별 메일 확인</h2><div class="table-scroll"><table id="mailPreviewTable" class="data-table"><thead></thead><tbody></tbody></table></div></section>
       </section>

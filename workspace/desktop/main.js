@@ -112,6 +112,7 @@ function registerIpc() {
     return {
       projectId: project.id,
       projectName: project.name,
+      rosterName: project.data.rosterName || '',
       columns: project.data.columns.map((column) => ({ id: column.id, name: column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' })),
       rows: project.data.people.map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false })),
       peopleMeta: Object.fromEntries(project.data.people.map((person) => [person.id, { roleIds: person.roleIds, active: person.active }]))
@@ -138,6 +139,7 @@ function registerIpc() {
       return { id, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: previous?.roleIds || ['participant'], active };
     });
     const keptIds = new Set(people.map((person) => person.id));
+    project.data.rosterName = String(payload.name || project.data.rosterName || `${project.name} 명단`).trim();
     project.data.columns = columns; project.data.people = people;
     project.data.assignments = project.data.assignments.filter((item) => keptIds.has(item.personId));
     project.data.availability = Object.fromEntries(Object.entries(project.data.availability || {}).filter(([personId]) => keptIds.has(personId)));
@@ -327,7 +329,7 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#activeProjectName')?.textContent === 'Smoke Project B', 'second project');
             document.querySelector('[data-workflow-open="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'empty people page');
-            assert(document.querySelector('#openRosterManager')?.textContent.includes('명단 관리'), 'shared roster manager button');
+            assert(document.querySelector('#openRosterManager')?.textContent.includes('명단 가져오기'), 'shared roster manager button');
             assert(!document.querySelector('#rosterEditorTable'), 'duplicate roster editor must be removed');
             document.querySelector('#page-people [data-nav-link="dashboard"]').click();
             const switcher = document.querySelector('#projectSwitcher');
@@ -434,6 +436,7 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#page-gmailFlow').classList.contains('active'), 'gmail page');
             assert(document.querySelector('#page-gmailFlow h1')?.textContent === '안내 메일 준비' && document.querySelector('#createGmailDrafts')?.textContent.includes('임시보관함'), 'gmail page purpose labels');
             assert(document.querySelector('#gmailFlowAccountButton') && document.querySelector('#openOriginalGmailFlow'), 'Gmail account and original app controls should be visible');
+            assert(document.querySelector('#openMailRosterManager')?.textContent.includes('명단 가져오기') && document.querySelectorAll('#mailRosterPeople .resource-chip').length === 2 && document.querySelector('#mailRosterSummary')?.textContent.trim(), 'gmail page should show the applied shared roster');
             const mailEditor = document.querySelector('#mailBodyEditor');
             document.querySelector('#mailSubjectTemplate').value += ' {전화번호} {없는컬럼}';
             document.querySelector('#mailSubjectTemplate').dispatchEvent(new Event('input', { bubbles: true }));
@@ -500,6 +503,12 @@ app.whenReady().then(async () => {
         const arrangementPreview = await mainWindow.webContents.capturePage();
         await fs.promises.writeFile(arrangementPreviewPath, arrangementPreview.toPNG());
         console.log(`Workspace arrangement preview: ${arrangementPreviewPath}`);
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-nav="dashboard"]').click(); document.querySelector('[data-workflow-open="gmailFlow"]').click(); document.querySelector('#toastRegion').replaceChildren(); document.querySelector('#page-gmailFlow').scrollIntoView({block:'start'});`);
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        const gmailPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-gmail-smoke.png');
+        const gmailPreview = await mainWindow.webContents.capturePage();
+        await fs.promises.writeFile(gmailPreviewPath, gmailPreview.toPNG());
+        console.log(`Workspace Gmail preview: ${gmailPreviewPath}`);
         const standalone = createProgramWindow('gmailFlow');
         if (standalone.webContents.isLoading()) await new Promise((resolve) => standalone.webContents.once('did-finish-load', resolve));
         const standaloneResult = await standalone.webContents.executeJavaScript(`
@@ -572,6 +581,11 @@ app.whenReady().then(async () => {
           const syncEnd = Date.now() + 5000;
           while (!document.querySelector('#rosterMessage')?.textContent.includes('프로젝트에 반영') && Date.now() < syncEnd) await new Promise((resolve) => setTimeout(resolve, 25));
           const excluded = document.querySelector('#rosterBody tr')?.classList.contains('roster-row-excluded');
+          const lockedInput = document.querySelector('#rosterBody input[data-row-index="0"]'); const lockedValue = lockedInput.value; const lockedReadOnly = lockedInput.readOnly;
+          const overwriteTransfer = new DataTransfer(); overwriteTransfer.setData('text/plain', '잠금 변경\tlocked@example.com'); lockedInput.dispatchEvent(new ClipboardEvent('paste', { clipboardData: overwriteTransfer, bubbles: true, cancelable: true }));
+          const pasteProtected = document.querySelector('#rosterBody input[data-row-index="0"]').value === lockedValue;
+          const rowSelector = document.querySelector('#rosterBody [data-select-row="0"]'); rowSelector.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 })); globalThis.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); document.querySelector('#rosterDeleteRows').click();
+          const deleteProtected = document.querySelector('#rosterBody tr')?.classList.contains('roster-row-excluded') && document.querySelector('#rosterBody input[data-row-index="0"]')?.value === lockedValue;
           const filteredButton = document.querySelector('#saveFilteredRoster'); filteredButton.click();
           const dialogEnd = Date.now() + 3000;
           while (!document.querySelector('#inputDialog')?.open && Date.now() < dialogEnd) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -582,7 +596,7 @@ app.whenReady().then(async () => {
             filteredSaved = [...document.querySelectorAll('#rosterQuickMenu [data-quick-roster-id]')].some((button) => button.textContent.includes('연기 테스트 선별 명단'));
             if (!filteredSaved) await new Promise((resolve) => setTimeout(resolve, 25));
           }
-          return { toggleFound: true, excluded, filteredSaved };
+          return { toggleFound: true, excluded, lockedReadOnly, pasteProtected, deleteProtected, filteredSaved };
         })()`);
         if (!Object.values(rosterExclusionTools).every(Boolean)) throw new Error(`Roster exclusion tools smoke failed: ${JSON.stringify(rosterExclusionTools)}`);
         const excludedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));

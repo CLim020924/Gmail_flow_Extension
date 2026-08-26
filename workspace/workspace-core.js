@@ -345,6 +345,7 @@
         unresolved: Array.isArray(data.conflicts) ? data.conflicts.length : Number(project.counts?.unresolved) || 0
       },
       data: {
+        rosterName: String(data.rosterName || '').trim(),
         columns: Array.isArray(data.columns) ? data.columns : [],
         people: Array.isArray(data.people) ? data.people.map((person, index) => ({
           id: person.id || makeId('person'),

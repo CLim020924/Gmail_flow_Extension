@@ -600,8 +600,10 @@
     (state.quickTasks?.[standaloneProgram] || []).slice().sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt))).forEach((task) => { const option = element('option', '', `${task.name} · ${formatUpdatedAt(task.savedAt)}`); option.value = task.id; select.append(option); });
     const projectSelect = $('#standaloneProjectSelect'); projectSelect.replaceChildren(element('option', '', '프로젝트 자료 가져오기'));
     state.projects.filter((item) => item.status !== 'archived').forEach((item) => { const option = element('option', '', item.name); option.value = item.id; projectSelect.append(option); });
-    const accounts = state.connections.filter((item) => item.status === 'connected').length;
-    $('#standaloneConnectionStatus').textContent = `사용 가능 계정 ${accounts}개 · 저장 명단 ${state.library.rosters.length}개 · 메일 양식 ${state.library.mailTemplates.length}개`;
+    const connected = state.connections.find((item) => item.status === 'connected');
+    $('#standaloneConnectionStatus').textContent = standaloneProgram === 'gmailFlow'
+      ? (gmailFlowSummary.email || connected?.account || 'Google 계정 연결이 필요합니다.')
+      : '현재 작업은 자동 저장됩니다.';
   }
 
   function syncPersonDerivedFields(project) {
@@ -822,7 +824,7 @@
     const view = activeRosterView(project); const sourceIds = view?.personIds || project.data.people.map((person) => person.id); const excluded = new Set(view?.excludedPersonIds || []);
     $('#saveRosterViewAs').disabled = !project.data.people.length;
     $('#renameRosterView').disabled = !view; $('#deleteRosterView').disabled = !view;
-    $('#rosterViewSummary').textContent = view ? `${sourceIds.length - excluded.size}명 포함 · ${excluded.size}명 제외 · 원본은 변경되지 않음` : `원본 ${project.data.people.length}명 · 제외하려면 먼저 단계 명단을 만드세요`;
+    $('#rosterViewSummary').textContent = view ? `이 명단에는 ${sourceIds.length - excluded.size}명이 포함되어 있고 ${excluded.size}명은 제외되어 있습니다. 원본 명단은 바뀌지 않습니다.` : `현재 원본 명단을 사용하고 있습니다. 인원을 나누려면 새 단계 명단을 만드세요.`;
     const rows = sourceIds.map((id) => project.data.people.find((person) => person.id === id)).filter(Boolean).map((person) => {
       const row = element('div', `roster-view-person${excluded.has(person.id) ? ' excluded' : ''}`);
       const toggle = element('button', 'roster-view-toggle', excluded.has(person.id) ? '↺' : '—'); toggle.type = 'button'; toggle.dataset.rosterViewToggle = person.id; toggle.disabled = !view; toggle.title = excluded.has(person.id) ? '다시 포함' : '이 단계 명단에서 제외';
@@ -924,7 +926,7 @@
     if (!project || !item) { navigate('people'); return; }
     project.data.activeWorkItemId = item.id;
     $('#arrangementTitle').textContent = item.name;
-    $('#arrangementSummary').textContent = `${item.rows.length}행 · ${item.columns.length}열 · 원본 명단과 별도로 저장`;
+    $('#arrangementSummary').textContent = `이 작업표는 원본 명단과 별도로 저장됩니다.`;
     const select = $('#arrangementSelect'); select.replaceChildren(...project.data.workItems.map((work) => { const option = element('option', '', work.name); option.value = work.id; option.selected = work.id === item.id; return option; }));
     const table = $('#arrangementBoard'); const letterRow = element('tr', 'sheet-letter-row'); letterRow.append(element('th', 'sheet-corner', ''));
     item.columns.forEach((_column, index) => letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(index)))); letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(item.columns.length)));
@@ -1172,7 +1174,7 @@
       list.replaceChildren(...roleCandidates(project, role).map((person) => { const option = element('option'); option.value = person.name; return option; }));
     });
     const conflicts = project.data.conflicts || []; $('#scheduleConflicts').hidden = conflicts.length === 0; $('#scheduleConflicts').textContent = conflicts.slice(0, 30).map((conflict) => `• ${conflict.message}`).join('\n');
-    $('#scheduleBoardSummary').textContent = `시간대 ${project.data.slots.length}개 · 사람 배치 ${project.data.assignments.length}건 · 확인할 문제 ${conflicts.length}건`;
+    $('#scheduleBoardSummary').textContent = conflicts.length ? `현재 일정표에서 확인할 문제가 ${conflicts.length}건 있습니다.` : '현재 일정표에서 확인할 문제가 없습니다.';
     if (scheduleSelection && columns.length) updateScheduleSelection({ row: Math.min(scheduleSelection.anchor.row, visibleRows - 1), col: Math.min(scheduleSelection.anchor.col, columns.length - 1) }, { row: Math.min(scheduleSelection.focus.row, visibleRows - 1), col: Math.min(scheduleSelection.focus.col, columns.length - 1) }, scheduleSelection.mode);
     else { scheduleSelection = null; $('#scheduleSelectionStatus').textContent = '선택 없음'; $('#scheduleCellAddress').textContent = '—'; $('#scheduleCellValue').value = ''; $('#scheduleCellValue').disabled = true; }
     $('#scheduleUndo').disabled = !scheduleHistory.length; $('#scheduleRedo').disabled = !scheduleFuture.length;
@@ -1215,7 +1217,7 @@
     });
     const emptyDrop = element('button', 'session-empty-drop', '＋ 빈 시간에 놓기'); emptyDrop.type = 'button'; emptyDrop.dataset.sessionEmptyDrop = 'true'; emptyDrop.title = '인원을 놓으면 날짜와 시간을 입력합니다.';
     board.replaceChildren(...columns, emptyDrop);
-    $('#sessionBoardStatus').textContent = `표시 인원 ${people.length}명 · 세션 ${slots.length}개 · 배정 ${project.data.assignments.filter((item) => slots.some((slot) => slot.id === item.slotId)).length}건`;
+    $('#sessionBoardStatus').textContent = people.length ? `선택한 명단의 ${people[0].name || '첫 번째 사람'}${people.length > 1 ? ` 외 ${people.length - 1}명` : ''}을 배정할 수 있습니다.` : '선택한 명단에 배정할 사람이 없습니다.';
   }
 
   async function assignPersonToSession(personId, slotId, assignmentId = '') {
@@ -1244,7 +1246,8 @@
     $('#ruleUnmarkedAvailable').checked = project.data.scheduleRules.unmarkedMeansAvailable;
     renderAvailability(project);
     renderScheduleBoard(project);
-    $('#scheduleProjectRosterStatus').textContent = `현재 프로젝트 명단 ${project.data.people.filter((person) => person.active !== false).length}명은 배정 후보로 자동 연결되어 있습니다.`;
+    const schedulePeople = project.data.people.filter((person) => person.active !== false);
+    $('#scheduleProjectRosterStatus').textContent = schedulePeople.length ? `${schedulePeople[0].name || '첫 번째 사람'}${schedulePeople.length > 1 ? ` 외 ${schedulePeople.length - 1}명` : ''}이 배정 후보로 연결되어 있습니다.` : '명단 가져오기를 눌러 배정할 사람을 준비해주세요.';
   }
 
   function scheduleHeaderKey(value, project) {
@@ -1544,8 +1547,9 @@
     $('#gmailFlowAccountAvatar').textContent = connectedEmail ? connectedEmail.slice(0, 1).toUpperCase() : 'G';
     $('#gmailFlowAccountText').textContent = connectedEmail || 'Google 계정 연결 필요';
     $('#gmailFlowAccountStatus').textContent = gmailFlowSummary.connected
-      ? `Gmail Flow 연결됨 · 저장 명단 ${gmailFlowSummary.rosters}개 · 템플릿 ${gmailFlowSummary.templates}개`
+      ? '메일을 보낼 계정으로 연결되어 있습니다.'
       : workspaceGmail ? 'Workspace Gmail 연결됨 · Gmail Flow에서 계정을 확인하세요' : 'Gmail Flow를 열어 Google 계정에 로그인하세요';
+    renderMailRosterResource(project);
     if (!mailEditorDirty) {
       $('#mailSubjectTemplate').value = project.data.communication.subjectTemplate;
       $('#mailBodyTemplate').value = project.data.communication.bodyTemplate;
@@ -1557,9 +1561,11 @@
     const pkg = Ops.buildMailPackage(project);
     const empty = pkg.entries.filter((entry) => !entry.assignments.length).length;
     const missingZoom = pkg.entries.filter((entry) => entry.assignments.some((assignment) => !assignment.zoomJoinUrl)).length;
-    $('#mailRecipientMetric').textContent = String(pkg.entries.length);
-    $('#mailEmptyMetric').textContent = String(empty);
-    $('#mailZoomMetric').textContent = String(missingZoom);
+    $('#mailReadinessText').textContent = !pkg.entries.length
+      ? '받는 사람 명단을 먼저 가져와주세요.'
+      : empty || missingZoom
+        ? `${pkg.entries[0]?.name || '받는 사람'}${pkg.entries.length > 1 ? ` 외 ${pkg.entries.length - 1}명` : ''}에게 보낼 예정입니다.${empty ? ` 일정이 없는 사람 ${empty}명을 확인해주세요.` : ''}${missingZoom ? ` Zoom 링크가 없는 사람 ${missingZoom}명을 확인해주세요.` : ''}`
+        : `${pkg.entries[0]?.name || '받는 사람'}${pkg.entries.length > 1 ? ` 외 ${pkg.entries.length - 1}명` : ''}의 명단과 일정 연결을 확인했습니다.`;
     $('#mailPackageStatus').textContent = project.data.communication.lastPreparedAt ? `마지막 준비: ${formatUpdatedAt(project.data.communication.lastPreparedAt)}` : '메일 데이터를 준비하기 전입니다.';
     const table = $('#mailPreviewTable'); const head = element('tr'); ['이름', '이메일', '제목', '일정 수', '본문 미리보기', '상태', '수정'].forEach((label) => head.append(element('th', '', label))); table.tHead.replaceChildren(head);
     const rows = pkg.entries.map((entry) => {
@@ -1569,6 +1575,22 @@
       const actionCell = element('td'); const edit = element('button', 'secondary-button compact', '이 사람 메일 수정'); edit.type = 'button'; edit.dataset.mailEdit = entry.personId; actionCell.append(edit); row.append(actionCell); return row;
     });
     table.tBodies[0].replaceChildren(...rows);
+  }
+
+  function renderMailRosterResource(project) {
+    const people = (project?.data.people || []).filter((person) => person.active !== false);
+    const summary = $('#mailRosterSummary'); const preview = $('#mailRosterPeople');
+    if (!summary || !preview) return;
+    if (!people.length) {
+      summary.textContent = '받는 사람 명단이 없습니다.';
+      preview.replaceChildren(element('span', 'resource-empty', '명단 가져오기를 눌러 준비해주세요.'));
+      return;
+    }
+    const named = people.filter((person) => person.name || person.email);
+    summary.textContent = project?.data.rosterName || (named.length ? `${named[0].name || named[0].email}${named.length > 1 ? ` 외 ${named.length - 1}명` : ''}` : '적용된 명단');
+    const chips = named.slice(0, 6).map((person) => element('span', 'resource-chip', person.name || person.email));
+    if (named.length > 6) chips.push(element('span', 'resource-chip more', `＋${named.length - 6}`));
+    preview.replaceChildren(...chips);
   }
 
   function formAnswerValues(response, questionId) {
@@ -2039,7 +2061,7 @@
       if (!event.target.matches('[data-schedule-input]')) return; const project = activeProject(); const cell = event.target.closest('[data-schedule-row][data-schedule-col]'); if (!project || !cell) return;
       if (event.target.dataset.scheduleBefore) { scheduleHistory.push(event.target.dataset.scheduleBefore); if (scheduleHistory.length > 80) scheduleHistory.shift(); scheduleFuture = []; delete event.target.dataset.scheduleBefore; }
       setScheduleCellValue(project, Number(cell.dataset.scheduleRow), Number(cell.dataset.scheduleCol), event.target.value); updateScheduleSelection(scheduleSelection?.anchor || { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) }, { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) });
-      const conflicts = project.data.conflicts || []; $('#scheduleConflicts').hidden = !conflicts.length; $('#scheduleConflicts').textContent = conflicts.slice(0, 30).map((item) => `• ${item.message}`).join('\n'); $('#scheduleBoardSummary').textContent = `시간대 ${project.data.slots.length}개 · 사람 배치 ${project.data.assignments.length}건 · 확인할 문제 ${conflicts.length}건`;
+      const conflicts = project.data.conflicts || []; $('#scheduleConflicts').hidden = !conflicts.length; $('#scheduleConflicts').textContent = conflicts.slice(0, 30).map((item) => `• ${item.message}`).join('\n'); $('#scheduleBoardSummary').textContent = conflicts.length ? `현재 일정표에서 확인할 문제가 ${conflicts.length}건 있습니다.` : '현재 일정표에서 확인할 문제가 없습니다.';
       queueSchedulePersist(project);
     });
     scheduleTable.addEventListener('paste', async (event) => {
@@ -2849,6 +2871,7 @@
           state = normalized;
           if (mailEditorDirty && currentPage === 'gmailFlow') {
             showToast('다른 창의 변경사항을 받았습니다. 작성 중인 메일은 그대로 보호됩니다.');
+            renderGmailPage();
             renderConnectionsPage();
           } else renderAll();
         }

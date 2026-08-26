@@ -189,9 +189,18 @@ input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 2px 
 .standalone-bar { height: 66px; padding: 0 18px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid #bdc7d1; background: #172331; color: white; }
 .standalone-bar[hidden] { display: none; }
 .standalone-bar > div { display: flex; align-items: baseline; gap: 12px; }
+.standalone-identity { min-width: 0; }
+.standalone-identity strong, .standalone-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .standalone-bar span { color: #9eb2c5; font-size: 12px; }
 .standalone-bar nav { display: flex; gap: 5px; align-items: center; }
-.standalone-bar nav button { min-height: 34px; padding: 0 11px; border: 1px solid #506276; border-radius: 0; background: #223247; color: white; cursor: pointer; }
+.standalone-bar nav > button, .standalone-menu > summary { display: flex; align-items: center; min-height: 34px; padding: 0 11px; border: 1px solid #506276; border-radius: 0; background: #223247; color: white; cursor: pointer; list-style: none; }
+.standalone-menu { position: relative; }
+.standalone-menu > summary::-webkit-details-marker { display: none; }
+.standalone-menu-panel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; display: grid !important; align-items: stretch !important; gap: 5px !important; min-width: 260px; padding: 8px; border: 1px solid #9eabb8; background: #fff; box-shadow: 0 10px 28px rgba(9,18,28,.28); color: var(--text); }
+.standalone-menu-panel label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.standalone-menu-panel select { width: 100%; min-height: 34px; }
+.standalone-menu-panel button { min-height: 34px; padding: 0 10px; border: 0; background: #fff; color: var(--text); text-align: left; }
+.standalone-menu-panel button:hover { background: #edf4fa; color: var(--primary); }
 body.standalone .app-shell { min-height: calc(100vh - 66px); }
 body.standalone .sidebar, body.standalone .topbar { display: none; }
 body.standalone .main-area { margin: 0; width: 100%; }
@@ -327,6 +336,17 @@ body.standalone .module-workbench .back-link { display: none; }
 .gmail-account-chip strong, .gmail-account-chip small { display: block; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gmail-account-chip strong { font-size: 11px; }
 .gmail-account-chip small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+.applied-resource { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; padding: 12px 13px; border: 1px solid #c6ced6; background: #f7f9fa; }
+.applied-resource > div { min-width: 0; }
+.resource-label { display: block; margin-bottom: 3px; color: var(--muted); font-size: 10px; font-weight: 750; }
+.applied-resource strong { display: block; font-size: 14px; }
+.resource-preview { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.resource-chip { padding: 3px 6px; border: 1px solid #cbd2d9; background: #fff; color: #4d5966; font-size: 10px; }
+.resource-chip.more { background: #edf1f4; }
+.resource-empty { color: var(--muted); font-size: 11px; }
+.account-resource { align-items: stretch; }
+.account-resource .gmail-account-chip { flex: 1; min-width: 0; }
+.readiness-text { margin: 14px 0 8px; padding: 12px; border-left: 3px solid #6f879b; background: #f4f6f8; color: #44515e; line-height: 1.65; }
 .spreadsheet-table .empty-sheet-cell { color: #7a8794; font-size: 11px; }
 .spreadsheet-table .empty-sheet-header { height: 46px; padding: 0; background: #edf0f3; }
 .add-empty-column { width: 100%; height: 100%; border: 0; border-radius: 0; background: transparent; color: #3e596f; font-size: 11px; font-weight: 700; text-align: left; padding: 0 10px; }
