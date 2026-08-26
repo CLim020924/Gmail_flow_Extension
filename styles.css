@@ -151,6 +151,7 @@ p { margin: 0; }
 .cell-input:focus { box-shadow: inset 0 0 0 1px #555; }
 .sheet .selected-cell { background: #e9f0fb; box-shadow: inset 0 0 0 1px #91a7c7; }
 .sheet .selection-anchor { box-shadow: inset 0 0 0 2px #3f5f8d; }
+.sheet td.selection-anchor:has(.cell-input:focus) { background: inherit; box-shadow: inset 0 0 0 1px #555; }
 .sheet td.selected-cell .cell-input { background: transparent; }
 .sheet-status { margin-top: 8px; color: #70757a; font-size: 12px; }
 .paste-box { margin: 10px 0; }

@@ -756,10 +756,11 @@ function updateCellSelection() {
   const maxRow = Math.max(cellSelection.startRow, cellSelection.endRow);
   const minColumn = Math.min(cellSelection.startColumn, cellSelection.endColumn);
   const maxColumn = Math.max(cellSelection.startColumn, cellSelection.endColumn);
+  const singleDataCell = cellSelection.mode === 'cells' && minRow === maxRow && minColumn === maxColumn && minRow >= 0;
   $$('#rosterTable [data-sheet-row][data-sheet-column]').forEach((cell) => {
     const row = Number(cell.dataset.sheetRow);
     const column = Number(cell.dataset.sheetColumn);
-    if (row >= minRow && row <= maxRow && column >= minColumn && column <= maxColumn) cell.classList.add('selected-cell');
+    if (!singleDataCell && row >= minRow && row <= maxRow && column >= minColumn && column <= maxColumn) cell.classList.add('selected-cell');
     if (row === cellSelection.startRow && column === cellSelection.startColumn) cell.classList.add('selection-anchor');
   });
   $$('#rosterHead [data-select-column]').forEach((cell) => {
@@ -781,6 +782,11 @@ function selectionBounds() {
     minColumn: Math.max(0, Math.min(cellSelection.startColumn, cellSelection.endColumn)),
     maxColumn: Math.min(state.columns.length - 1, Math.max(cellSelection.startColumn, cellSelection.endColumn))
   };
+}
+
+function isMultiCellSelection() {
+  const bounds = selectionBounds();
+  return Boolean(bounds && (cellSelection?.mode !== 'cells' || bounds.minRow !== bounds.maxRow || bounds.minColumn !== bounds.maxColumn));
 }
 
 function selectedMatrix() {
@@ -1755,12 +1761,13 @@ function bindEvents() {
     }
     const activeInSheet = $('#rosterTable').contains(document.activeElement);
     if (state.page !== 'roster' || !activeInSheet) return;
-    if ((event.key === 'Delete' || event.key === 'Backspace') && cellSelection) {
+    const editingCell = document.activeElement.matches('.cell-input');
+    if ((event.key === 'Delete' || event.key === 'Backspace') && cellSelection && (!editingCell || isMultiCellSelection())) {
       event.preventDefault();
       clearSelectedData();
-    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && (!editingCell || isMultiCellSelection())) {
       event.preventDefault(); event.shiftKey ? redoRoster() : undoRoster();
-    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y' && (!editingCell || isMultiCellSelection())) {
       event.preventDefault(); redoRoster();
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !document.activeElement.matches('.cell-input')) {
       event.preventDefault();
@@ -1786,6 +1793,8 @@ function bindEvents() {
   });
   document.addEventListener('cut', (event) => {
     if (state.page !== 'roster' || !cellSelection || !$('#rosterTable').contains(document.activeElement)) return;
+    const active = document.activeElement;
+    if (active.matches('.cell-input') && !isMultiCellSelection() && active.selectionStart !== active.selectionEnd) return;
     const matrix = selectedMatrix();
     if (!matrix.length) return;
     event.preventDefault();
@@ -1798,6 +1807,7 @@ function bindEvents() {
     const bounds = selectionBounds(); const text = event.clipboardData?.getData('text/plain') || '';
     if (!bounds || !text) return;
     const matrix = parseDelimited(text); if (!matrix.length) return;
+    if (document.activeElement.matches('.cell-input') && !isMultiCellSelection() && matrix.length === 1 && matrix[0].length === 1) return;
     event.preventDefault(); event.stopPropagation();
     const singleValue = matrix.length === 1 && matrix[0].length === 1;
     if (singleValue && (bounds.maxRow > bounds.minRow || bounds.maxColumn > bounds.minColumn)) {
@@ -2088,10 +2098,12 @@ function bindEvents() {
 
     const input = event.target.closest('.cell-input') || gridCell?.querySelector('.cell-input');
     const focusTarget = input || event.target.closest('[tabindex]') || gridCell;
-    if (focusTarget && document.activeElement !== focusTarget) {
+    if (input) {
+      // Let Chromium place the text caret at the exact clicked character.
+    } else if (focusTarget && document.activeElement !== focusTarget) {
       event.preventDefault();
       focusTarget.focus({ preventScroll: true });
-    } else if (!input) {
+    } else {
       event.preventDefault();
     }
   });
@@ -2108,6 +2120,7 @@ function bindEvents() {
       cellSelection.endRow = Number(gridCell.dataset.sheetRow);
       cellSelection.endColumn = Number(gridCell.dataset.sheetColumn);
     } else return;
+    event.preventDefault();
     updateCellSelection();
   });
   globalThis.addEventListener('mouseup', () => { if (cellSelection) cellSelection.dragging = false; });

@@ -540,6 +540,17 @@ app.whenReady().then(async () => {
           };
         })()`);
         if (!Object.values(rosterManagerResult).every(Boolean)) throw new Error(`Shared roster manager smoke failed: ${JSON.stringify(rosterManagerResult)}`);
+        const singleCellSetup = await rosterManager.webContents.executeJavaScript(`(() => {
+          const cell = document.querySelector('#rosterBody [data-sheet-row="0"][data-sheet-column="0"]'); const input = cell?.querySelector('input'); if (!cell || !input) return false;
+          cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 })); globalThis.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+          input.value = 'ABCDE'; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus(); input.setSelectionRange(5, 5);
+          return cell.classList.contains('selection-anchor') && !cell.classList.contains('selected-cell');
+        })()`);
+        if (!singleCellSetup) throw new Error('Single roster cell did not enter text editing mode.');
+        rosterManager.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' }); rosterManager.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const singleCellEdited = await rosterManager.webContents.executeJavaScript(`document.querySelector('#rosterBody input[data-row-index="0"]')?.value === 'ABCD'`);
+        if (!singleCellEdited) throw new Error('Backspace cleared a roster cell instead of deleting one character.');
         const rosterSheetTools = await rosterManager.webContents.executeJavaScript(`(() => {
           const first = document.querySelector('#rosterBody [data-sheet-row="0"][data-sheet-column="0"]');
           const second = document.querySelector('#rosterBody [data-sheet-row="1"][data-sheet-column="0"]');
