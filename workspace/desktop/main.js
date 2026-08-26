@@ -19,6 +19,7 @@ if (isSmokeTest) { app.disableHardwareAcceleration(); app.setPath('userData', pa
 let mainWindow;
 const programWindows = new Map();
 const rosterPickerWindows = new Map();
+let gmailRosterPickerWindow;
 let storage;
 let authManager;
 let extensionManager;
@@ -94,6 +95,36 @@ function createRosterPickerWindow(projectId, parentWindow = mainWindow) {
   return window;
 }
 
+function createGmailRosterPickerWindow(parentWindow) {
+  if (gmailRosterPickerWindow && !gmailRosterPickerWindow.isDestroyed()) {
+    if (gmailRosterPickerWindow.isMinimized()) gmailRosterPickerWindow.restore();
+    gmailRosterPickerWindow.show(); gmailRosterPickerWindow.focus();
+    return gmailRosterPickerWindow;
+  }
+  const hasParent = Boolean(parentWindow && !parentWindow.isDestroyed());
+  const window = new BrowserWindow({
+    parent: hasParent ? parentWindow : undefined,
+    modal: hasParent,
+    width: 1080,
+    height: 840,
+    minWidth: 780,
+    minHeight: 660,
+    show: false,
+    backgroundColor: '#f5f5f3',
+    title: 'Gmail Flow · 명단 준비',
+    webPreferences: { preload: gmailFlowHost.preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true }
+  });
+  window.setMenuBarVisibility(false);
+  window.once('ready-to-show', () => { window.show(); window.focus(); });
+  window.on('closed', () => {
+    gmailRosterPickerWindow = undefined;
+    if (hasParent && !parentWindow.isDestroyed()) parentWindow.webContents.reload();
+  });
+  window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: 'local', page: 'roster' } });
+  gmailRosterPickerWindow = window;
+  return window;
+}
+
 function broadcastState(next) {
   [mainWindow, ...programWindows.values(), ...rosterPickerWindows.values()].forEach((window) => { if (window && !window.isDestroyed()) window.webContents.send('workspace:state-changed', next); });
 }
@@ -136,6 +167,7 @@ function registerIpc() {
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
   ipcMain.handle('program:open', (_event, programId, options = {}) => { if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
   ipcMain.handle('workspace:roster:open-picker', (event, projectId) => { createRosterPickerWindow(projectId, BrowserWindow.fromWebContents(event.sender) || mainWindow); return { ok: true }; });
+  ipcMain.handle('gmail-flow:roster:open-picker', (event) => { createGmailRosterPickerWindow(BrowserWindow.fromWebContents(event.sender)); return { ok: true }; });
   ipcMain.handle('workspace:roster:get', async (_event, projectId) => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const project = current.projects.find((item) => item.id === projectId) || current.quickWorkspaces?.people;
@@ -565,6 +597,36 @@ app.whenReady().then(async () => {
         const preview = await standalone.webContents.capturePage();
         await fs.promises.writeFile(previewPath, preview.toPNG());
         console.log(`Workspace smoke preview: ${previewPath}`);
+        await standalone.webContents.executeJavaScript(`document.querySelector('.nav-item[data-page="roster"]').click()`);
+        const gmailPickerDeadline = Date.now() + 5000;
+        while ((!gmailRosterPickerWindow || gmailRosterPickerWindow.isDestroyed()) && Date.now() < gmailPickerDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
+        if (!gmailRosterPickerWindow || gmailRosterPickerWindow.isDestroyed()) throw new Error('Gmail Flow roster import opened inside the existing page instead of a modal picker.');
+        if (!gmailRosterPickerWindow.isModal() || gmailRosterPickerWindow.getParentWindow() !== standalone) throw new Error('Gmail Flow roster picker must be a modal child of Gmail Flow.');
+        if (gmailRosterPickerWindow.webContents.isLoading()) await new Promise((resolve) => gmailRosterPickerWindow.webContents.once('did-finish-load', resolve));
+        const gmailPickerResult = await gmailRosterPickerWindow.webContents.executeJavaScript(`(async () => {
+          const end = Date.now() + 5000;
+          while (!document.querySelector('#page-roster')?.classList.contains('active') && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
+          const before = document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length;
+          document.querySelector('#addRosterRow').click();
+          const after = document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length;
+          const rows = Array.from({ length: 23 }, (_, index) => ['테스트' + (index + 1), 'person' + (index + 1) + '@example.com', '010-0000-' + String(index + 1).padStart(4, '0')]);
+          const transfer = new DataTransfer(); transfer.setData('text/plain', rows.map((row) => row.join('\\t')).join('\\n'));
+          document.querySelector('#rosterBody .cell-input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true }));
+          return {
+            managerMode: document.body.classList.contains('roster-manager-mode'),
+            stayedOffInternalPage: new URLSearchParams(location.search).get('rosterManager') === 'local',
+            rowAdded: after === before + 1,
+            pasted23Rows: document.querySelector('#rosterBody input[data-row-index="22"][data-column-index="0"]')?.value === '테스트23',
+            extraBlankRows: document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length >= 25,
+            addRowStillAvailable: Boolean(document.querySelector('#addRosterRow')),
+            applyAction: document.querySelector('#useRoster')?.textContent.includes('메일에 적용')
+          };
+        })()`);
+        if (!Object.values(gmailPickerResult).every(Boolean)) throw new Error(`Gmail Flow roster picker smoke failed: ${JSON.stringify(gmailPickerResult)}`);
+        await gmailRosterPickerWindow.webContents.executeJavaScript(`document.querySelector('#useRoster').click()`);
+        const gmailPickerCloseDeadline = Date.now() + 5000;
+        while (gmailRosterPickerWindow && !gmailRosterPickerWindow.isDestroyed() && Date.now() < gmailPickerCloseDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
+        if (gmailRosterPickerWindow && !gmailRosterPickerWindow.isDestroyed()) throw new Error('Gmail Flow roster picker did not close after applying the roster.');
         const smokeState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#openMailRosterManager').click()`);
         const pickerDeadline = Date.now() + 5000;

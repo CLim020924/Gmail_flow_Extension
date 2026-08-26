@@ -50,13 +50,17 @@ const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const launchParams = new URLSearchParams(globalThis.location?.search || '');
 const isWindowMode = launchParams.get('mode') === 'window';
-const rosterManagerMode = launchParams.get('rosterManager') === '1';
+const rosterManagerKind = launchParams.get('rosterManager') || '';
+const workspaceRosterManagerMode = rosterManagerKind === '1';
+const localRosterManagerMode = rosterManagerKind === 'local';
+const rosterManagerMode = workspaceRosterManagerMode || localRosterManagerMode;
 const workspaceProjectId = launchParams.get('projectId') || '';
 let workspaceSaveTimer = null;
 let restoringWorkspace = false;
 let cellSelection = null;
 let rosterHistory = [];
 let rosterFuture = [];
+let rosterVisibleRowFloor = 5;
 let cloudSyncTimer = null;
 let cloudSyncBusy = false;
 let composeInsertionTarget = 'body';
@@ -383,7 +387,7 @@ async function restoreWorkspace() {
 }
 
 async function restoreWorkspaceRoster() {
-  if (!rosterManagerMode || !globalThis.gmailFlowDesktop?.loadWorkspaceRoster) return;
+  if (!workspaceRosterManagerMode || !globalThis.gmailFlowDesktop?.loadWorkspaceRoster) return;
   const roster = await globalThis.gmailFlowDesktop.loadWorkspaceRoster(workspaceProjectId);
   state.columns = Array.isArray(roster.columns) ? roster.columns : [];
   state.rows = Array.isArray(roster.rows) ? roster.rows : [];
@@ -690,7 +694,7 @@ function renderRoster() {
   headerRow.append(plusHeader);
   head.replaceChildren(letterRow, headerRow);
 
-  const visibleRows = Math.max(state.rows.length + 2, 5);
+  const visibleRows = Math.max(state.rows.length + 2, rosterVisibleRowFloor);
   const fragment = document.createDocumentFragment();
   for (let rowIndex = 0; rowIndex < visibleRows; rowIndex += 1) {
     const tr = document.createElement('tr');
@@ -750,6 +754,26 @@ function renderRoster() {
     tr.append(trailingCell);
     fragment.append(tr);
   }
+  const addRow = document.createElement('tr');
+  addRow.className = 'sheet-add-row';
+  const addRowState = document.createElement('td');
+  addRowState.className = 'row-state-cell';
+  const addRowControl = document.createElement('td');
+  addRowControl.className = 'row-number';
+  const addRowButton = document.createElement('button');
+  addRowButton.id = 'addRosterRow';
+  addRowButton.type = 'button';
+  addRowButton.className = 'add-row-button';
+  addRowButton.textContent = '＋';
+  addRowButton.title = '빈 행 하나 추가';
+  addRowButton.setAttribute('aria-label', '빈 행 하나 추가');
+  addRowControl.append(addRowButton);
+  const addRowLabel = document.createElement('td');
+  addRowLabel.className = 'add-row-label';
+  addRowLabel.colSpan = Math.max(1, state.columns.length + 1);
+  addRowLabel.textContent = '행 추가';
+  addRow.append(addRowState, addRowControl, addRowLabel);
+  fragment.append(addRow);
   body.replaceChildren(fragment);
   updateCellSelection();
   updateRosterStatus();
@@ -1108,7 +1132,7 @@ async function saveFilteredRoster() {
 }
 
 async function syncWorkspaceRoster(message = '') {
-  if (!rosterManagerMode || !globalThis.gmailFlowDesktop?.saveWorkspaceRoster) return;
+  if (!workspaceRosterManagerMode || !globalThis.gmailFlowDesktop?.saveWorkspaceRoster) return;
   await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName || '현재 명단' });
   if (message) updateRosterStatus(message);
 }
@@ -1883,7 +1907,14 @@ function bindEvents() {
     });
   }
   $('#backButton').addEventListener('click', goBack);
-  $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
+  $$('.nav-item').forEach((item) => item.addEventListener('click', async () => {
+    if (item.dataset.page === 'roster' && !rosterManagerMode && launchParams.get('workspace') === '1' && globalThis.gmailFlowDesktop?.openRosterPicker) {
+      await flushWorkspaceSave();
+      await globalThis.gmailFlowDesktop.openRosterPicker();
+      return;
+    }
+    showPage(item.dataset.page);
+  }));
   $('#sendMethod').addEventListener('change', updateComposeState);
   ['gmailLabel', 'scheduleDate', 'scheduleTime', 'subject', 'body', 'postscript'].forEach((id) => {
     $(`#${id}`).addEventListener('input', updateComposeState);
@@ -2054,12 +2085,17 @@ function bindEvents() {
     state.activeRosterName ||= '현재 명단'; updateActiveRosterText(); updateComposeState();
     if (!rosterManagerMode) { showPage('compose'); return; }
     try {
-      $('#useRoster').disabled = true; $('#useRoster').textContent = '프로젝트에 적용 중…';
+      $('#useRoster').disabled = true; $('#useRoster').textContent = localRosterManagerMode ? '메일에 적용 중…' : '프로젝트에 적용 중…';
+      if (localRosterManagerMode) {
+        state.page = 'compose';
+        await storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
+        await globalThis.gmailFlowDesktop.closeWindow();
+        return;
+      }
       await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName });
-      await globalThis.gmailFlowDesktop.openWorkspace();
       await globalThis.gmailFlowDesktop.closeWindow();
     } catch (error) {
-      $('#useRoster').disabled = false; $('#useRoster').textContent = '프로젝트에 적용하고 닫기';
+      $('#useRoster').disabled = false; $('#useRoster').textContent = localRosterManagerMode ? '메일에 적용하고 닫기' : '프로젝트에 적용하고 닫기';
       await showAlert(error.message, '명단을 저장하지 못했습니다');
     }
   });
@@ -2167,6 +2203,14 @@ function bindEvents() {
     updateRosterStatus(); updateComposeState();
   });
   $('#rosterBody').addEventListener('click', async (event) => {
+    const addRow = event.target.closest('#addRosterRow');
+    if (addRow) {
+      rosterVisibleRowFloor = Math.max(rosterVisibleRowFloor, Math.max(state.rows.length + 2, 5)) + 1;
+      renderRoster();
+      const rowIndex = rosterVisibleRowFloor - 1;
+      setTimeout(() => $(`#rosterBody input[data-row-index="${rowIndex}"]`)?.focus(), 0);
+      return;
+    }
     const toggle = event.target.closest('[data-toggle-roster-row]');
     if (!toggle) return;
     const rowIndex = Number(toggle.dataset.toggleRosterRow);
@@ -2384,6 +2428,11 @@ async function init() {
   state.cloudSyncMeta = await storage.get(CLOUD_SYNC_META_KEY, null);
   await restoreWorkspace();
   await restoreWorkspaceRoster();
+  if (localRosterManagerMode) {
+    state.page = 'roster';
+    $('#useRoster').textContent = '메일에 적용하고 닫기';
+    $('#rosterContext').textContent = '현재 Gmail Flow 메일 작업에 사용할 명단';
+  }
   restoringWorkspace = true;
   bindEvents();
   renderRoster();

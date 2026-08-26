@@ -147,6 +147,10 @@ p { margin: 0; }
 .column-header { border: 0; background: transparent; width: 100%; padding: 4px; font-weight: 600; }
 .column-header:hover { color: #000; text-decoration: underline; }
 .add-column { border: 0; background: transparent; color: #555; width: 100%; }
+.sheet-add-row td { height: 30px; background: #f7f7f5; }
+.sheet-add-row .add-row-label { min-width: 0; color: #777; font-size: 11px; }
+.add-row-button { width: 100%; min-height: 29px; padding: 0; border: 0; background: transparent; color: #555; font-size: 17px; font-weight: 700; cursor: pointer; }
+.add-row-button:hover, .add-row-button:focus-visible { background: #e4e7eb; color: #111; outline: 1px solid #777; outline-offset: -1px; }
 .cell-input { display: block; width: 100%; min-height: 33px; border: 0; background: transparent; padding: 6px 8px; outline: none; }
 .cell-input:focus { box-shadow: inset 0 0 0 1px #555; }
 .sheet .selected-cell { background: #e9f0fb; box-shadow: inset 0 0 0 1px #91a7c7; }
