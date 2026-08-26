@@ -19,7 +19,6 @@ if (isSmokeTest) { app.disableHardwareAcceleration(); app.setPath('userData', pa
 let mainWindow;
 const programWindows = new Map();
 const rosterPickerWindows = new Map();
-let gmailRosterPickerWindow;
 let storage;
 let authManager;
 let extensionManager;
@@ -95,36 +94,6 @@ function createRosterPickerWindow(projectId, parentWindow = mainWindow) {
   return window;
 }
 
-function createGmailRosterPickerWindow(parentWindow) {
-  if (gmailRosterPickerWindow && !gmailRosterPickerWindow.isDestroyed()) {
-    if (gmailRosterPickerWindow.isMinimized()) gmailRosterPickerWindow.restore();
-    gmailRosterPickerWindow.show(); gmailRosterPickerWindow.focus();
-    return gmailRosterPickerWindow;
-  }
-  const hasParent = Boolean(parentWindow && !parentWindow.isDestroyed());
-  const window = new BrowserWindow({
-    parent: hasParent ? parentWindow : undefined,
-    modal: hasParent,
-    width: 1080,
-    height: 840,
-    minWidth: 780,
-    minHeight: 660,
-    show: false,
-    backgroundColor: '#f5f5f3',
-    title: 'Gmail Flow · 명단 준비',
-    webPreferences: { preload: gmailFlowHost.preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true }
-  });
-  window.setMenuBarVisibility(false);
-  window.once('ready-to-show', () => { window.show(); window.focus(); });
-  window.on('closed', () => {
-    gmailRosterPickerWindow = undefined;
-    if (hasParent && !parentWindow.isDestroyed()) parentWindow.webContents.reload();
-  });
-  window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: 'local', page: 'roster' } });
-  gmailRosterPickerWindow = window;
-  return window;
-}
-
 function broadcastState(next) {
   [mainWindow, ...programWindows.values(), ...rosterPickerWindows.values()].forEach((window) => { if (window && !window.isDestroyed()) window.webContents.send('workspace:state-changed', next); });
 }
@@ -167,7 +136,55 @@ function registerIpc() {
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
   ipcMain.handle('program:open', (_event, programId, options = {}) => { if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
   ipcMain.handle('workspace:roster:open-picker', (event, projectId) => { createRosterPickerWindow(projectId, BrowserWindow.fromWebContents(event.sender) || mainWindow); return { ok: true }; });
-  ipcMain.handle('gmail-flow:roster:open-picker', (event) => { createGmailRosterPickerWindow(BrowserWindow.fromWebContents(event.sender)); return { ok: true }; });
+  ipcMain.handle('workspace:roster:sources', async (_event, projectId) => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const project = current.projects.find((item) => item.id === (projectId || current.activeProjectId)) || current.quickWorkspaces?.people;
+    const toPopupRoster = (roster, source) => ({
+      id: roster.id,
+      name: roster.name,
+      source,
+      columns: (roster.columns || []).map((column) => ({ id: column.id, name: column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' })),
+      rows: (roster.people || []).map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false }))
+    });
+    const projectRoster = project ? toPopupRoster({ id: project.id, name: project.data.rosterName || `${project.name} 명단`, columns: project.data.columns, people: project.data.people }, 'project') : null;
+    return { projectRoster, savedRosters: current.library.rosters.map((roster) => toPopupRoster(roster, 'saved')) };
+  });
+  ipcMain.handle('workspace:roster:library-save', async (_event, payload = {}) => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const aliases = { name: /^(이름|성명|name)$/i, email: /^(이메일|메일|email|e-mail)$/i, phone: /^(전화번호|휴대폰|연락처|phone|mobile)$/i, group: /^(그룹|분류|소속|group)$/i, id: /^(아이디|id)$/i };
+    const columns = (payload.columns || []).map((column, index) => {
+      const type = column.workspaceType || Object.entries(aliases).find(([, pattern]) => pattern.test(String(column.name || '').trim()))?.[0] || (column.role === 'email' ? 'email' : 'text');
+      return { id: column.id || `column-${Date.now().toString(36)}-${index}`, name: String(column.name || `컬럼${index + 1}`).trim(), type };
+    });
+    const people = (payload.rows || []).filter((row) => columns.some((column) => String(row[column.id] || '').trim())).map((row, index) => {
+      const values = Object.fromEntries(columns.map((column) => [column.id, String(row[column.id] ?? '')]));
+      const valueFor = (type) => values[columns.find((column) => column.type === type)?.id] || '';
+      return { id: row.__workspacePersonId || `person-${Date.now().toString(36)}-${index}`, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: ['participant'], active: row.__workspaceActive !== false };
+    });
+    const now = new Date().toISOString();
+    const id = String(payload.id || `roster-${Date.now().toString(36)}`);
+    const existingIndex = current.library.rosters.findIndex((item) => item.id === id);
+    const item = { id, name: String(payload.name || '저장 명단').trim(), columns, people, savedAt: existingIndex >= 0 ? current.library.rosters[existingIndex].savedAt : now, updatedAt: now };
+    if (existingIndex >= 0) current.library.rosters[existingIndex] = item; else current.library.rosters.unshift(item);
+    current.updatedAt = now;
+    current._revision = Number(current._revision || 0) + 1; current._baseRevision = current._revision;
+    await storage.set('workspaceState', current); broadcastState(current);
+    return {
+      ok: true,
+      roster: {
+        id: item.id, name: item.name, source: 'saved',
+        columns: item.columns.map((column) => ({ id: column.id, name: column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' })),
+        rows: item.people.map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false }))
+      }
+    };
+  });
+  ipcMain.handle('workspace:roster:library-delete', async (_event, rosterId) => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    current.library.rosters = current.library.rosters.filter((item) => item.id !== rosterId);
+    current.updatedAt = new Date().toISOString();
+    current._revision = Number(current._revision || 0) + 1; current._baseRevision = current._revision;
+    await storage.set('workspaceState', current); broadcastState(current); return { ok: true };
+  });
   ipcMain.handle('workspace:roster:get', async (_event, projectId) => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const project = current.projects.find((item) => item.id === projectId) || current.quickWorkspaces?.people;
@@ -210,8 +227,10 @@ function registerIpc() {
     let next;
     if (projectIndex >= 0) next = WorkspaceCore.setModuleStatus(WorkspaceCore.updateProject(current, project.id, { data: project.data }), project.id, 'people', people.length ? 'complete' : 'inProgress', `${people.length}명 명단 저장`);
     else { current.quickWorkspaces.people = WorkspaceCore.normalizeState({ ...current, quickWorkspaces: { ...current.quickWorkspaces, people: project } }).quickWorkspaces.people; next = current; }
+    next.updatedAt = new Date().toISOString();
     next._revision = Number(current._revision || 0) + 1; next._baseRevision = next._revision;
     await storage.set('workspaceState', next);
+    broadcastState(next);
     return { ok: true, count: people.length, state: next };
   });
   ipcMain.handle('window:close-self', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); return { ok: true }; });
@@ -430,6 +449,14 @@ app.whenReady().then(async () => {
                 { 'smoke-name': '조민지', 'smoke-email': 'two@example.com', 'smoke-phone': '010-2222-2222' }
               ]
             });
+            await globalThis.workspaceDesktop.saveSharedRoster({
+              name: '공용 저장 명단 테스트',
+              columns: [
+                { id: 'saved-name', name: '이름', role: 'variable', workspaceType: 'name' },
+                { id: 'saved-email', name: '이메일', role: 'email', workspaceType: 'email' }
+              ],
+              rows: [{ 'saved-name': '저장 명단 사용자', 'saved-email': 'saved@example.com' }]
+            });
             await waitFor(() => document.querySelector('#rosterPeopleMetric')?.textContent === '2', 'shared roster reflected in workspace');
             assert(!document.querySelector('#rosterPasteInput, #sharedRosterSelect'), 'legacy roster controls must be removed');
             document.querySelector('#createRosterView').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'create derived roster name'); document.querySelector('#nameInputValue').value = '필기 응시자'; document.querySelector('#nameInputForm').requestSubmit();
@@ -597,15 +624,20 @@ app.whenReady().then(async () => {
         const preview = await standalone.webContents.capturePage();
         await fs.promises.writeFile(previewPath, preview.toPNG());
         console.log(`Workspace smoke preview: ${previewPath}`);
-        await standalone.webContents.executeJavaScript(`document.querySelector('.nav-item[data-page="roster"]').click()`);
-        const gmailPickerDeadline = Date.now() + 5000;
-        while ((!gmailRosterPickerWindow || gmailRosterPickerWindow.isDestroyed()) && Date.now() < gmailPickerDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
-        if (!gmailRosterPickerWindow || gmailRosterPickerWindow.isDestroyed()) throw new Error('Gmail Flow roster import opened inside the existing page instead of a modal picker.');
-        if (!gmailRosterPickerWindow.isModal() || gmailRosterPickerWindow.getParentWindow() !== standalone) throw new Error('Gmail Flow roster picker must be a modal child of Gmail Flow.');
-        if (gmailRosterPickerWindow.webContents.isLoading()) await new Promise((resolve) => gmailRosterPickerWindow.webContents.once('did-finish-load', resolve));
-        const gmailPickerResult = await gmailRosterPickerWindow.webContents.executeJavaScript(`(async () => {
+        const gmailRosterResult = await standalone.webContents.executeJavaScript(`(async () => {
+          document.querySelector('.nav-item[data-page="roster"]').click();
           const end = Date.now() + 5000;
           while (!document.querySelector('#page-roster')?.classList.contains('active') && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
+          document.querySelector('#importSharedRoster').click();
+          const dialogEnd = Date.now() + 5000;
+          while (!document.querySelector('#inputDialog')?.open && Date.now() < dialogEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+          const sourceSelect = document.querySelector('#inputDialogSelect');
+          const projectOption = [...sourceSelect.options].find((option) => option.value.startsWith('project:'));
+          const savedOption = [...sourceSelect.options].find((option) => option.textContent.includes('공용 저장 명단 테스트'));
+          if (savedOption) { sourceSelect.value = savedOption.value; document.querySelector('#inputDialogForm').requestSubmit(); }
+          const importEnd = Date.now() + 5000;
+          while ((document.querySelector('#inputDialog')?.open || document.querySelector('#rosterBody input[data-row-index="0"][data-column-index="0"]')?.value !== '저장 명단 사용자') && Date.now() < importEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+          const savedRosterImported = document.querySelector('#rosterBody input[data-row-index="0"][data-column-index="0"]')?.value === '저장 명단 사용자';
           const before = document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length;
           document.querySelector('#addRosterRow').click();
           const after = document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length;
@@ -613,20 +645,24 @@ app.whenReady().then(async () => {
           const transfer = new DataTransfer(); transfer.setData('text/plain', rows.map((row) => row.join('\\t')).join('\\n'));
           document.querySelector('#rosterBody .cell-input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true }));
           return {
-            managerMode: document.body.classList.contains('roster-manager-mode'),
-            stayedOffInternalPage: new URLSearchParams(location.search).get('rosterManager') === 'local',
+            rosterNavLabel: document.querySelector('.nav-item[data-page="roster"]')?.textContent.trim() === '명단',
+            internalRosterPage: document.querySelector('#page-roster')?.classList.contains('active'),
+            importButton: document.querySelector('#importSharedRoster')?.textContent.includes('명단 가져오기'),
+            projectSourceOffered: Boolean(projectOption),
+            savedSourceOffered: Boolean(savedOption),
+            savedRosterImported,
             rowAdded: after === before + 1,
             pasted23Rows: document.querySelector('#rosterBody input[data-row-index="22"][data-column-index="0"]')?.value === '테스트23',
             extraBlankRows: document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length >= 25,
             addRowStillAvailable: Boolean(document.querySelector('#addRosterRow')),
-            applyAction: document.querySelector('#useRoster')?.textContent.includes('메일에 적용')
+            saveLabel: document.querySelector('#saveFilteredRoster')?.textContent.trim() === '명단 저장'
           };
         })()`);
-        if (!Object.values(gmailPickerResult).every(Boolean)) throw new Error(`Gmail Flow roster picker smoke failed: ${JSON.stringify(gmailPickerResult)}`);
-        await gmailRosterPickerWindow.webContents.executeJavaScript(`document.querySelector('#useRoster').click()`);
-        const gmailPickerCloseDeadline = Date.now() + 5000;
-        while (gmailRosterPickerWindow && !gmailRosterPickerWindow.isDestroyed() && Date.now() < gmailPickerCloseDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
-        if (gmailRosterPickerWindow && !gmailRosterPickerWindow.isDestroyed()) throw new Error('Gmail Flow roster picker did not close after applying the roster.');
+        if (!Object.values(gmailRosterResult).every(Boolean)) throw new Error(`Gmail Flow shared roster smoke failed: ${JSON.stringify(gmailRosterResult)}`);
+        const gmailRosterPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-gmail-roster-smoke.png');
+        const gmailRosterPreview = await standalone.webContents.capturePage();
+        await fs.promises.writeFile(gmailRosterPreviewPath, gmailRosterPreview.toPNG());
+        console.log(`Workspace Gmail roster preview: ${gmailRosterPreviewPath}`);
         const smokeState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#openMailRosterManager').click()`);
         const pickerDeadline = Date.now() + 5000;
@@ -640,12 +676,12 @@ app.whenReady().then(async () => {
         if (rosterManager.webContents.isLoading()) await new Promise((resolve) => rosterManager.webContents.once('did-finish-load', resolve));
         const rosterManagerResult = await rosterManager.webContents.executeJavaScript(`(async () => {
           const end = Date.now() + 5000;
-          while ((!document.querySelector('#page-roster')?.classList.contains('active') || !document.querySelector('#useRoster')?.textContent.includes('프로젝트에 적용')) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
+          while ((!document.querySelector('#page-roster')?.classList.contains('active') || !document.querySelector('#useRoster')?.textContent.includes('프로젝트에 저장')) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
           return {
             managerMode: document.body.classList.contains('roster-manager-mode'),
             rosterPage: document.querySelector('#page-roster')?.classList.contains('active'),
             projectRows: document.querySelectorAll('#rosterBody tr').length >= 5,
-            applyAction: document.querySelector('#useRoster')?.textContent.includes('프로젝트에 적용'),
+            applyAction: document.querySelector('#useRoster')?.textContent.includes('프로젝트에 저장'),
             composeHidden: getComputedStyle(document.querySelector('[data-page="compose"]')).display === 'none'
           };
         })()`);
@@ -703,6 +739,8 @@ app.whenReady().then(async () => {
         const excludedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
         const excludedProject = excludedState.projects.find((project) => project.id === smokeState.activeProjectId);
         if (excludedProject?.data.people[0]?.active !== false) throw new Error('Temporary roster exclusion was not applied to the project.');
+        const centrallySavedRoster = excludedState.library.rosters.find((roster) => roster.name === '연기 테스트 선별 명단');
+        if (!centrallySavedRoster || centrallySavedRoster.people.length !== 1 || centrallySavedRoster.people.some((person) => person.active === false)) throw new Error('Named roster was not saved to the shared workspace library without excluded people.');
         const rosterRestoreResult = await rosterManager.webContents.executeJavaScript(`(async () => {
           document.querySelector('[data-toggle-roster-row="0"]')?.click();
           const end = Date.now() + 5000;

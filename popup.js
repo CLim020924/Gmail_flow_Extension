@@ -50,10 +50,8 @@ const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const launchParams = new URLSearchParams(globalThis.location?.search || '');
 const isWindowMode = launchParams.get('mode') === 'window';
-const rosterManagerKind = launchParams.get('rosterManager') || '';
-const workspaceRosterManagerMode = rosterManagerKind === '1';
-const localRosterManagerMode = rosterManagerKind === 'local';
-const rosterManagerMode = workspaceRosterManagerMode || localRosterManagerMode;
+const workspaceRosterManagerMode = launchParams.get('rosterManager') === '1';
+const rosterManagerMode = workspaceRosterManagerMode;
 const workspaceProjectId = launchParams.get('projectId') || '';
 let workspaceSaveTimer = null;
 let restoringWorkspace = false;
@@ -66,6 +64,7 @@ let cloudSyncBusy = false;
 let composeInsertionTarget = 'body';
 let cloudSyncApplying = false;
 let cloudSyncDirty = false;
+let projectRosterSource = null;
 if (isWindowMode) document.body.classList.add('window-mode');
 if (rosterManagerMode) document.body.classList.add('roster-manager-mode');
 
@@ -393,7 +392,7 @@ async function restoreWorkspaceRoster() {
   state.rows = Array.isArray(roster.rows) ? roster.rows : [];
   state.activeRosterName = roster.rosterName || (roster.projectName ? `${roster.projectName} 명단` : '프로젝트 명단');
   state.page = 'roster';
-  $('#useRoster').textContent = '프로젝트에 적용하고 닫기';
+  $('#useRoster').textContent = '프로젝트에 저장하고 닫기';
   $('#rosterContext').textContent = `${roster.projectName || '현재 프로젝트'}와 연결된 공용 명단`;
 }
 
@@ -1084,6 +1083,50 @@ function applyMatrixAt(matrix, startRow, startColumn, trackHistory = true) {
   updateComposeState();
 }
 
+async function refreshSharedRosterSources() {
+  if (launchParams.get('workspace') !== '1' || !globalThis.gmailFlowDesktop?.listSharedRosters) return false;
+  const sources = await globalThis.gmailFlowDesktop.listSharedRosters(workspaceProjectId || undefined);
+  projectRosterSource = sources?.projectRoster || null;
+  state.savedRosters = Array.isArray(sources?.savedRosters) ? sources.savedRosters : [];
+  renderRosterQuickMenu();
+  renderSavedRosters();
+  return true;
+}
+
+async function persistNamedRoster(item) {
+  if (launchParams.get('workspace') === '1' && globalThis.gmailFlowDesktop?.saveSharedRoster) {
+    const result = await globalThis.gmailFlowDesktop.saveSharedRoster(item);
+    const saved = result?.roster;
+    if (!saved) throw new Error('공용 명단 저장 결과를 확인하지 못했습니다.');
+    const index = state.savedRosters.findIndex((roster) => roster.id === saved.id);
+    if (index >= 0) state.savedRosters[index] = saved; else state.savedRosters.unshift(saved);
+    return saved;
+  }
+  const index = state.savedRosters.findIndex((roster) => roster.id === item.id);
+  if (index >= 0) state.savedRosters[index] = item; else state.savedRosters.unshift(item);
+  await storage.set('savedRosters', state.savedRosters);
+  return item;
+}
+
+async function importSharedRoster() {
+  try {
+    await refreshSharedRosterSources();
+    const options = [];
+    if (projectRosterSource?.rows?.length) options.push({ value: `project:${projectRosterSource.id}`, text: `현재 프로젝트 명단 · ${projectRosterSource.name} · ${projectRosterSource.rows.length}명` });
+    state.savedRosters.forEach((roster) => options.push({ value: `saved:${roster.id}`, text: `저장 명단 · ${roster.name} · ${roster.rows.length}명` }));
+    if (!options.length) { await showAlert('가져올 프로젝트 명단이나 저장 명단이 없습니다. 먼저 명단 준비에서 명단을 저장해주세요.', '가져올 명단 없음'); return; }
+    const selected = await requestInput({ title: '명단 가져오기', label: '사용할 명단', message: '현재 작업에 사용할 명단을 선택하세요. 원본 명단은 변경되지 않습니다.', options, defaultValue: options[0].value });
+    if (!selected) return;
+    const roster = selected.startsWith('project:') ? projectRosterSource : state.savedRosters.find((item) => `saved:${item.id}` === selected);
+    if (!roster) throw new Error('선택한 명단을 찾지 못했습니다.');
+    loadRosterIntoEditor(roster);
+    updateRosterStatus(`“${roster.name}” ${roster.rows.length}명을 현재 작업에 가져왔습니다.`);
+    await flushWorkspaceSave();
+  } catch (error) {
+    await showAlert(error.message, '명단을 가져오지 못했습니다');
+  }
+}
+
 async function saveCurrentRoster() {
   const name = await requestTextInput({ title: '명단 저장', label: '명단 이름', defaultValue: state.activeRosterName || '새 명단', maxLength: 100 });
   if (!name?.trim()) return;
@@ -1098,19 +1141,19 @@ async function saveCurrentRoster() {
     createdAt: now,
     updatedAt: now
   };
-  state.savedRosters.unshift(item);
-  state.activeRosterName = item.name;
-  await storage.set('savedRosters', state.savedRosters);
-  $('#rosterContext').textContent = `저장된 명단: ${item.name}`;
+  const saved = await persistNamedRoster(item);
+  state.activeRosterName = saved.name;
+  $('#rosterContext').textContent = `저장된 명단: ${saved.name}`;
   updateActiveRosterText();
   renderRosterQuickMenu();
+  renderSavedRosters();
 }
 
 async function saveFilteredRoster() {
   const includedRows = state.rows.filter((row) => row.__workspaceActive !== false);
   if (!includedRows.length) return;
-  const defaultName = state.activeRosterName ? `${state.activeRosterName} 선별` : '선별 명단';
-  const name = await requestTextInput({ title: '선별 명단 저장', label: '새 명단 이름', defaultValue: defaultName, maxLength: 100 });
+  const defaultName = state.activeRosterName ? `${state.activeRosterName} 복사본` : '새 명단';
+  const name = await requestTextInput({ title: '명단 저장', label: '새 명단 이름', defaultValue: defaultName, maxLength: 100 });
   if (!name?.trim()) return;
   const now = new Date().toISOString();
   const rows = structuredClone(includedRows).map((row) => ({ ...row, __workspaceActive: true }));
@@ -1124,11 +1167,10 @@ async function saveFilteredRoster() {
     createdAt: now,
     updatedAt: now
   };
-  state.savedRosters.unshift(item);
-  await storage.set('savedRosters', state.savedRosters);
+  await persistNamedRoster(item);
   renderRosterQuickMenu();
   renderSavedRosters();
-  updateRosterStatus(`임시 제외 ${state.rows.length - rows.length}명을 뺀 “${item.name}” 명단을 새로 저장했습니다.`);
+  updateRosterStatus(`현재 포함된 ${rows.length}명을 “${item.name}” 명단으로 저장했습니다.${state.rows.length !== rows.length ? ` 임시 제외 ${state.rows.length - rows.length}명은 저장하지 않았습니다.` : ''}`);
 }
 
 async function syncWorkspaceRoster(message = '') {
@@ -1907,14 +1949,7 @@ function bindEvents() {
     });
   }
   $('#backButton').addEventListener('click', goBack);
-  $$('.nav-item').forEach((item) => item.addEventListener('click', async () => {
-    if (item.dataset.page === 'roster' && !rosterManagerMode && launchParams.get('workspace') === '1' && globalThis.gmailFlowDesktop?.openRosterPicker) {
-      await flushWorkspaceSave();
-      await globalThis.gmailFlowDesktop.openRosterPicker();
-      return;
-    }
-    showPage(item.dataset.page);
-  }));
+  $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
   $('#sendMethod').addEventListener('change', updateComposeState);
   ['gmailLabel', 'scheduleDate', 'scheduleTime', 'subject', 'body', 'postscript'].forEach((id) => {
     $(`#${id}`).addEventListener('input', updateComposeState);
@@ -2080,22 +2115,17 @@ function bindEvents() {
   $('#rosterDeleteRows').addEventListener('click', () => { closeMenus(); editRosterSelection('delete-rows'); });
   $('#rosterInsertColumn').addEventListener('click', async () => { closeMenus(); const name = await requestTextInput({ title: '컬럼 삽입', label: '컬럼 이름', defaultValue: '새 컬럼', maxLength: 100 }); if (name?.trim()) editRosterSelection('insert-column', name.trim()); });
   $('#rosterDeleteColumns').addEventListener('click', () => { closeMenus(); editRosterSelection('delete-columns'); });
+  $('#importSharedRoster').addEventListener('click', importSharedRoster);
   $('#saveFilteredRoster').addEventListener('click', saveFilteredRoster);
   $('#useRoster').addEventListener('click', async () => {
     state.activeRosterName ||= '현재 명단'; updateActiveRosterText(); updateComposeState();
     if (!rosterManagerMode) { showPage('compose'); return; }
     try {
-      $('#useRoster').disabled = true; $('#useRoster').textContent = localRosterManagerMode ? '메일에 적용 중…' : '프로젝트에 적용 중…';
-      if (localRosterManagerMode) {
-        state.page = 'compose';
-        await storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
-        await globalThis.gmailFlowDesktop.closeWindow();
-        return;
-      }
+      $('#useRoster').disabled = true; $('#useRoster').textContent = '프로젝트에 저장 중…';
       await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName });
       await globalThis.gmailFlowDesktop.closeWindow();
     } catch (error) {
-      $('#useRoster').disabled = false; $('#useRoster').textContent = localRosterManagerMode ? '메일에 적용하고 닫기' : '프로젝트에 적용하고 닫기';
+      $('#useRoster').disabled = false; $('#useRoster').textContent = '프로젝트에 저장하고 닫기';
       await showAlert(error.message, '명단을 저장하지 못했습니다');
     }
   });
@@ -2253,11 +2283,13 @@ function bindEvents() {
   $('#renameRoster').addEventListener('click', async () => {
     const roster = state.savedRosters.find((item) => item.id === state.selectedRosterId); if (!roster) return;
     const name = await requestTextInput({ title: '명단 이름 변경', label: '명단 이름', defaultValue: roster.name, maxLength: 100 }); if (!name?.trim()) return;
-    roster.name = name.trim(); roster.updatedAt = new Date().toISOString(); await storage.set('savedRosters', state.savedRosters); renderRosterQuickMenu(); showRosterDetail(roster.id); state.backStack.pop();
+    roster.name = name.trim(); roster.updatedAt = new Date().toISOString(); await persistNamedRoster(roster); renderRosterQuickMenu(); showRosterDetail(roster.id); state.backStack.pop();
   });
   $('#deleteRoster').addEventListener('click', async () => {
     const roster = state.savedRosters.find((item) => item.id === state.selectedRosterId); if (!roster || !await showConfirm(`“${roster.name}” 명단을 삭제할까요?`, '명단 삭제', '삭제')) return;
-    state.savedRosters = state.savedRosters.filter((item) => item.id !== roster.id); await storage.set('savedRosters', state.savedRosters); renderSavedRosters(); renderRosterQuickMenu(); $('#savedRosterDetail').hidden = true; $('#savedRosterList').hidden = false; state.backStack.pop();
+    state.savedRosters = state.savedRosters.filter((item) => item.id !== roster.id);
+    if (launchParams.get('workspace') === '1' && globalThis.gmailFlowDesktop?.deleteSharedRoster) await globalThis.gmailFlowDesktop.deleteSharedRoster(roster.id); else await storage.set('savedRosters', state.savedRosters);
+    renderSavedRosters(); renderRosterQuickMenu(); $('#savedRosterDetail').hidden = true; $('#savedRosterList').hidden = false; state.backStack.pop();
   });
   $('#templateItems').addEventListener('click', (event) => { const button = event.target.closest('[data-template-id]'); if (button) showTemplateDetail(button.dataset.templateId); });
   $('#applyTemplate').addEventListener('click', () => {
@@ -2428,11 +2460,7 @@ async function init() {
   state.cloudSyncMeta = await storage.get(CLOUD_SYNC_META_KEY, null);
   await restoreWorkspace();
   await restoreWorkspaceRoster();
-  if (localRosterManagerMode) {
-    state.page = 'roster';
-    $('#useRoster').textContent = '메일에 적용하고 닫기';
-    $('#rosterContext').textContent = '현재 Gmail Flow 메일 작업에 사용할 명단';
-  }
+  try { await refreshSharedRosterSources(); } catch (_) {}
   restoringWorkspace = true;
   bindEvents();
   renderRoster();

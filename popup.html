@@ -12,7 +12,7 @@
     <aside id="drawer" class="drawer" aria-label="기능 메뉴">
       <div class="drawer-title">추가 기능</div>
       <button class="nav-item active" data-page="compose">메일 작성</button>
-      <button class="nav-item" data-page="roster">명단 가져오기</button>
+      <button class="nav-item" data-page="roster">명단</button>
       <button class="nav-item" data-page="templates">저장된 템플릿</button>
       <button class="nav-item" data-page="history">발송 기록</button>
       <button class="nav-item" data-page="queue">작업 큐</button>
@@ -112,9 +112,10 @@
       </section>
 
       <section id="page-roster" class="page" data-page-panel="roster">
-        <div id="rosterEditor">
+          <div id="rosterEditor">
           <div class="section-heading">
-            <div><h2>명단 가져오기</h2><p class="muted">명단을 만들거나 저장된 데이터를 불러옵니다.</p></div>
+            <div><h2>현재 명단</h2><p class="muted">이 작업에서 사용할 명단을 확인하고 편집합니다.</p></div>
+            <button id="importSharedRoster" class="button" type="button">명단 가져오기</button>
           </div>
           <div class="toolbar">
             <button id="rosterUndo" class="button compact-action" type="button" title="실행 취소 (Ctrl+Z)" disabled>↶ 실행 취소</button>
@@ -155,7 +156,7 @@
           </div>
           <div class="sheet-status"><span id="rosterStats">컬럼 0개 · 데이터 0행</span><span id="rosterMessage">첫 컬럼을 추가하거나 표를 붙여넣으세요.</span></div>
           <div class="footer-actions">
-            <button id="saveFilteredRoster" class="button" type="button" disabled>선별 명단 저장</button>
+            <button id="saveFilteredRoster" class="button" type="button" disabled>명단 저장</button>
             <button id="useRoster" class="primary" type="button" disabled>이 명단 사용</button>
           </div>
         </div>
