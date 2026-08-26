@@ -67,6 +67,10 @@ if (rosterManagerMode) document.body.classList.add('roster-manager-mode');
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+if (rosterManagerMode) {
+  document.title = 'CMOE · 명단 준비';
+  $('.header h1').textContent = '명단 준비';
+}
 const makeId = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 const columnLetter = (index) => {
   let value = index + 1;
@@ -854,7 +858,7 @@ function clearSelectedData() {
 function updateRosterStatus(message = '') {
   const includedCount = state.rows.filter((row) => row.__workspaceActive !== false).length;
   const excludedCount = state.rows.length - includedCount;
-  $('#rosterStats').textContent = `컬럼 ${state.columns.length}개 · 포함 ${includedCount}명${excludedCount ? ` · 임시 제외 ${excludedCount}명` : ''}`;
+  $('#rosterStats').textContent = excludedCount ? `현재 ${includedCount}명이 포함되어 있고 ${excludedCount}명은 잠겨 있습니다.` : `현재 ${includedCount}명이 포함되어 있습니다.`;
   $('#rosterMessage').textContent = message || (state.columns.length ? '셀·컬럼 헤더·행 번호를 드래그하고 Ctrl+C로 복사할 수 있습니다. 컬럼 수정은 헤더를 더블클릭하세요.' : '첫 컬럼을 추가하거나 표를 붙여넣으세요.');
   const saveRosterButton = $('#saveRoster');
   if (saveRosterButton) saveRosterButton.disabled = state.rows.length === 0;

@@ -1752,6 +1752,7 @@
 
   function openRosterManager() {
     const project = activeProject();
+    if (globalThis.workspaceDesktop?.openRosterPicker) return globalThis.workspaceDesktop.openRosterPicker(project?.id || '');
     return globalThis.workspaceDesktop.openProgram('people', { projectId: project?.id || '' });
   }
 

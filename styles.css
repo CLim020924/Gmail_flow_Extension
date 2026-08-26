@@ -228,11 +228,11 @@ body.window-mode .page { max-width: 960px; }
 body.window-mode #openWindowButton { display: none; }
 body.roster-manager-mode .drawer-title,
 body.roster-manager-mode .nav-item:not([data-page="roster"]),
-body.roster-manager-mode #accountButton { display: none; }
-body.roster-manager-mode .drawer { width: 132px; }
-body.roster-manager-mode .app { grid-template-columns: 132px minmax(0, 1fr); }
+body.roster-manager-mode #accountButton,
+body.roster-manager-mode #drawerToggle { display: none; }
+body.roster-manager-mode .drawer { display: none; }
+body.roster-manager-mode .app { grid-template-columns: minmax(0, 1fr); }
 body.roster-manager-mode .header h1 { font-size: 18px; }
-body.roster-manager-mode .header h1::after { content: " · 명단 관리"; }
 
 @media (max-width: 520px) {
   body { width: 100vw; }

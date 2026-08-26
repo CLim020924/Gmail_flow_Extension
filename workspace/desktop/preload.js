@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('workspaceDesktop', {
   getAppInfo: () => ipcRenderer.invoke('workspace:app-info'),
   gmailFlowSummary: () => ipcRenderer.invoke('gmail-flow:summary'),
   openProgram: (programId, options) => ipcRenderer.invoke('program:open', programId, options),
+  openRosterPicker: (projectId) => ipcRenderer.invoke('workspace:roster:open-picker', projectId),
   openWorkspace: () => ipcRenderer.invoke('workspace:open-main'),
   createProgramShortcuts: (programId, options) => ipcRenderer.invoke('program:shortcuts', programId, options),
   removeProgramShortcuts: (programId) => ipcRenderer.invoke('program:remove-shortcuts', programId),

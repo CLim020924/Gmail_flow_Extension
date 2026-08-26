@@ -18,6 +18,7 @@ if (isSmokeTest) { app.disableHardwareAcceleration(); app.setPath('userData', pa
 
 let mainWindow;
 const programWindows = new Map();
+const rosterPickerWindows = new Map();
 let storage;
 let authManager;
 let extensionManager;
@@ -64,8 +65,37 @@ function createProgramWindow(programId, options = {}) {
   return window;
 }
 
+function createRosterPickerWindow(projectId, parentWindow = mainWindow) {
+  const key = String(projectId || 'quick');
+  const existing = rosterPickerWindows.get(key);
+  if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show(); existing.focus();
+    return existing;
+  }
+  const hasParent = Boolean(parentWindow && !parentWindow.isDestroyed());
+  const window = new BrowserWindow({
+    parent: hasParent ? parentWindow : undefined,
+    modal: hasParent,
+    width: 1080,
+    height: 840,
+    minWidth: 780,
+    minHeight: 660,
+    show: false,
+    backgroundColor: '#f5f5f3',
+    title: 'CMOE · 명단 준비',
+    webPreferences: { preload: gmailFlowHost.preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true }
+  });
+  window.setMenuBarVisibility(false);
+  window.once('ready-to-show', () => { window.show(); window.focus(); });
+  window.on('closed', () => rosterPickerWindows.delete(key));
+  window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: '1', page: 'roster', projectId: key === 'quick' ? '' : key } });
+  rosterPickerWindows.set(key, window);
+  return window;
+}
+
 function broadcastState(next) {
-  [mainWindow, ...programWindows.values()].forEach((window) => { if (window && !window.isDestroyed()) window.webContents.send('workspace:state-changed', next); });
+  [mainWindow, ...programWindows.values(), ...rosterPickerWindows.values()].forEach((window) => { if (window && !window.isDestroyed()) window.webContents.send('workspace:state-changed', next); });
 }
 
 function createWindow() {
@@ -105,6 +135,7 @@ function registerIpc() {
   });
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
   ipcMain.handle('program:open', (_event, programId, options = {}) => { if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
+  ipcMain.handle('workspace:roster:open-picker', (event, projectId) => { createRosterPickerWindow(projectId, BrowserWindow.fromWebContents(event.sender) || mainWindow); return { ok: true }; });
   ipcMain.handle('workspace:roster:get', async (_event, projectId) => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const project = current.projects.find((item) => item.id === projectId) || current.quickWorkspaces?.people;
@@ -535,7 +566,8 @@ app.whenReady().then(async () => {
         await fs.promises.writeFile(previewPath, preview.toPNG());
         console.log(`Workspace smoke preview: ${previewPath}`);
         const smokeState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
-        const rosterManager = createProgramWindow('people', { projectId: smokeState.activeProjectId });
+        const rosterManager = createRosterPickerWindow(smokeState.activeProjectId, mainWindow);
+        if (!rosterManager.isModal() || rosterManager.getParentWindow() !== mainWindow) throw new Error('Shared roster picker must open as a modal child window.');
         if (rosterManager.webContents.isLoading()) await new Promise((resolve) => rosterManager.webContents.once('did-finish-load', resolve));
         const rosterManagerResult = await rosterManager.webContents.executeJavaScript(`(async () => {
           const end = Date.now() + 5000;
