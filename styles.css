@@ -93,6 +93,7 @@ p { margin: 0; }
 .danger { color: #b3261e; }
 .footer-actions { margin-top: 14px; }
 .footer-actions .primary { flex: 1; }
+.footer-actions > .button { flex: 0 0 auto; }
 
 .menu { position: relative; }
 .menu summary { list-style: none; cursor: pointer; }
@@ -131,6 +132,13 @@ p { margin: 0; }
 .sheet tbody td.data-cell { padding: 0; }
 .sheet th { background: #f1f1ef; font-weight: 600; text-align: center; }
 .sheet .row-number { min-width: 34px; width: 34px; text-align: center; color: #777; background: #f1f1ef; }
+.sheet .row-state-heading, .sheet .row-state-cell { min-width: 44px; width: 44px; padding: 0; text-align: center; background: #f1f1ef; }
+.row-state-toggle { width: 28px; min-height: 24px; padding: 0; border: 1px solid #b9bec5; border-radius: 2px; background: #fff; color: #555; font-weight: 700; cursor: pointer; }
+.row-state-toggle:hover { border-color: #777; background: #f7f7f5; color: #111; }
+.roster-row-excluded td.data-cell { background: #f4f4f2; }
+.roster-row-excluded .cell-input { color: #8a8a8a; text-decoration: line-through; }
+.roster-row-excluded .row-number { color: #a0a0a0; text-decoration: line-through; }
+.roster-row-excluded .row-state-toggle { border-color: #7f9c88; background: #edf5ef; color: #315c3f; }
 .sheet-selector { cursor: cell; user-select: none; }
 .sheet-selector:hover { background: #e4e7eb; color: #222; }
 .sheet-selector.selected-selector { background: #cbd9ec; color: #1f3f67; box-shadow: inset 0 0 0 1px #7392bb; }

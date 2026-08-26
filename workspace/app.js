@@ -811,7 +811,7 @@
   function rosterViewIncludedIds(view, project) {
     const source = view ? view.personIds : project.data.people.map((person) => person.id);
     const excluded = new Set(view?.excludedPersonIds || []);
-    return source.filter((id) => !excluded.has(id) && project.data.people.some((person) => person.id === id));
+    return source.filter((id) => !excluded.has(id) && project.data.people.some((person) => person.id === id && person.active !== false));
   }
 
   function renderRosterViews(project) {
@@ -1040,7 +1040,7 @@
     const column = scheduleSheetColumns(project)[columnIndex]; if (!slot || !column) return '';
     if (column.kind === 'role' && column.role) {
       return project.data.assignments.filter((item) => item.slotId === slot.id && item.roleId === column.role.id)
-        .map((item) => project.data.people.find((person) => person.id === item.personId)?.name || item.personName || '').filter(Boolean).join(', ');
+        .map((item) => project.data.people.find((person) => person.id === item.personId && person.active !== false)?.name || (!item.personId ? item.personName : '')).filter(Boolean).join(', ');
     }
     if (column.kind === 'custom') return project.data.scheduleCustomValues?.[slot.id]?.[column.id] || '';
     if (column.key === 'locked') return slot.locked ? '예' : '';
@@ -1208,7 +1208,7 @@
         const heading = element('div', 'session-slot-heading'); const title = element('span'); title.append(element('strong', '', `${slot.startTime || '--:--'}–${slot.endTime || '--:--'}`), element('small', '', slot.label || '이름 없는 세션'));
         const actions = element('span', 'session-slot-actions'); const edit = element('button', '', '시간 변경'); edit.type = 'button'; edit.dataset.sessionEdit = slot.id; const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.sessionRemove = slot.id; remove.title = '세션 삭제'; actions.append(edit, remove); heading.append(title, actions); card.append(heading);
         const assignments = element('div', 'session-assignments');
-        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person) return; const chip = element('div', 'session-assignment-chip'); chip.draggable = true; chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.title = '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
+        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person || person.active === false) return; const chip = element('div', 'session-assignment-chip'); chip.draggable = true; chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.title = '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
         if (!assignments.children.length) assignments.append(element('div', 'session-drop-hint', '인원을 여기에 놓으세요'));
         card.append(assignments); column.append(card);
       }); return column;

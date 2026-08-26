@@ -113,7 +113,7 @@ function registerIpc() {
       projectId: project.id,
       projectName: project.name,
       columns: project.data.columns.map((column) => ({ id: column.id, name: column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' })),
-      rows: project.data.people.map((person) => ({ ...person.values, __workspacePersonId: person.id })),
+      rows: project.data.people.map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false })),
       peopleMeta: Object.fromEntries(project.data.people.map((person) => [person.id, { roleIds: person.roleIds, active: person.active }]))
     };
   });
@@ -134,7 +134,8 @@ function registerIpc() {
       const previous = oldPeople.get(id);
       const values = Object.fromEntries(columns.map((column) => [column.id, String(row[column.id] ?? '')]));
       const valueFor = (type) => values[columns.find((column) => column.type === type)?.id] || '';
-      return { id, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: previous?.roleIds || ['participant'], active: previous?.active !== false };
+      const active = Object.prototype.hasOwnProperty.call(row, '__workspaceActive') ? row.__workspaceActive !== false : previous?.active !== false;
+      return { id, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: previous?.roleIds || ['participant'], active };
     });
     const keptIds = new Set(people.map((person) => person.id));
     project.data.columns = columns; project.data.people = people;
@@ -551,6 +552,41 @@ app.whenReady().then(async () => {
           return { filled, undone, cleared, restored };
         })()`);
         if (![rosterSheetTools.filled, rosterSheetTools.undone, rosterSheetTools.cleared, rosterSheetTools.restored].every(Boolean)) throw new Error(`Roster sheet tools smoke failed: ${JSON.stringify(rosterSheetTools)}`);
+        const rosterExclusionTools = await rosterManager.webContents.executeJavaScript(`(async () => {
+          const secondInput = document.querySelector('#rosterBody input[data-row-index="1"]');
+          if (secondInput && !secondInput.value) { secondInput.value = '선별 저장 대상'; secondInput.dispatchEvent(new Event('input', { bubbles: true })); }
+          const toggle = document.querySelector('[data-toggle-roster-row="0"]');
+          if (!toggle) return { toggleFound: false };
+          toggle.click();
+          const syncEnd = Date.now() + 5000;
+          while (!document.querySelector('#rosterMessage')?.textContent.includes('프로젝트에 반영') && Date.now() < syncEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+          const excluded = document.querySelector('#rosterBody tr')?.classList.contains('roster-row-excluded');
+          const filteredButton = document.querySelector('#saveFilteredRoster'); filteredButton.click();
+          const dialogEnd = Date.now() + 3000;
+          while (!document.querySelector('#inputDialog')?.open && Date.now() < dialogEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+          const input = document.querySelector('#inputDialogValue'); input.value = '연기 테스트 선별 명단'; document.querySelector('#inputDialogForm').requestSubmit();
+          const saveEnd = Date.now() + 5000;
+          let filteredSaved = false;
+          while (!filteredSaved && Date.now() < saveEnd) {
+            filteredSaved = [...document.querySelectorAll('#rosterQuickMenu [data-quick-roster-id]')].some((button) => button.textContent.includes('연기 테스트 선별 명단'));
+            if (!filteredSaved) await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          return { toggleFound: true, excluded, filteredSaved };
+        })()`);
+        if (!Object.values(rosterExclusionTools).every(Boolean)) throw new Error(`Roster exclusion tools smoke failed: ${JSON.stringify(rosterExclusionTools)}`);
+        const excludedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+        const excludedProject = excludedState.projects.find((project) => project.id === smokeState.activeProjectId);
+        if (excludedProject?.data.people[0]?.active !== false) throw new Error('Temporary roster exclusion was not applied to the project.');
+        const rosterRestoreResult = await rosterManager.webContents.executeJavaScript(`(async () => {
+          document.querySelector('[data-toggle-roster-row="0"]')?.click();
+          const end = Date.now() + 5000;
+          while (!document.querySelector('#rosterMessage')?.textContent.includes('복원해 프로젝트에 반영') && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
+          return !document.querySelector('#rosterBody tr')?.classList.contains('roster-row-excluded') && document.querySelector('#rosterMessage')?.textContent.includes('복원해 프로젝트에 반영');
+        })()`);
+        if (!rosterRestoreResult) throw new Error('Temporary roster exclusion could not be restored.');
+        const restoredState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+        const restoredProject = restoredState.projects.find((project) => project.id === smokeState.activeProjectId);
+        if (restoredProject?.data.people[0]?.active === false) throw new Error('Restored roster member remained inactive in the project.');
         const rosterPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-roster-manager-smoke.png');
         const rosterPreview = await rosterManager.webContents.capturePage();
         await fs.promises.writeFile(rosterPreviewPath, rosterPreview.toPNG());
