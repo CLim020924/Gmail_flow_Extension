@@ -31,7 +31,17 @@ class DesktopOAuth {
         ? JSON.parse(this.unprotect(envelope.data))
         : envelope;
     } catch (error) {
-      if (error.code !== 'ENOENT') console.error('OAuth 정보 읽기 실패:', error);
+      if (error.code !== 'ENOENT') {
+        const backupPath = `${this.authFile}.unreadable-${Date.now()}.bak`;
+        try {
+          fs.renameSync(this.authFile, backupPath);
+          this.recovery = { required: true, backupPath };
+          console.warn('저장된 Google 로그인을 읽을 수 없어 안전하게 백업했습니다. 계정을 다시 연결해주세요.');
+        } catch (backupError) {
+          this.recovery = { required: true, backupPath: '', error: backupError.message };
+          console.warn('저장된 Google 로그인을 읽을 수 없습니다. 계정을 다시 연결해주세요.');
+        }
+      }
       this.auth = {};
     }
   }

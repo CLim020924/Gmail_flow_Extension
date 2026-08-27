@@ -41,6 +41,23 @@ oauth.fetchEmail = async () => 'remembered@example.com';
     const switchUrl = new URL(openedUrls.at(-1));
     assert.equal(switchUrl.searchParams.has('login_hint'), false);
     assert.equal(switchUrl.searchParams.get('prompt'), 'consent select_account');
+
+    fs.writeFileSync(authFile, JSON.stringify({ format: 'gmail-flow-oauth-v1', data: 'dpapi:unreadable' }), 'utf8');
+    const originalWarn = console.warn;
+    const warnings = [];
+    console.warn = (...args) => warnings.push(args.join(' '));
+    let recovered;
+    try {
+      recovered = new DesktopOAuth({
+        clientId: 'desktop-client-id', clientSecret: 'desktop-client-secret', authFile,
+        openExternal: async () => {}, unprotect: () => { throw new Error('decrypt failed'); }
+      });
+    } finally { console.warn = originalWarn; }
+    assert.deepEqual(recovered.auth, {});
+    assert.equal(recovered.recovery?.required, true);
+    assert.equal(fs.existsSync(authFile), false);
+    assert.equal(fs.existsSync(recovered.recovery.backupPath), true);
+    assert.equal(warnings.some((message) => message.includes('다시 연결')), true);
     console.log('oauth login hint test passed');
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
