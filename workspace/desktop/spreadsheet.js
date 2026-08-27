@@ -1,5 +1,7 @@
+const fs = require('node:fs');
 const path = require('node:path');
-const ExcelJS = require(path.join(__dirname, '..', 'vendor', 'node_modules', 'exceljs'));
+const packagedExcelJs = process.resourcesPath ? path.join(process.resourcesPath, 'vendor', 'node_modules', 'exceljs') : '';
+const ExcelJS = require(packagedExcelJs && fs.existsSync(packagedExcelJs) ? packagedExcelJs : path.join(__dirname, '..', 'vendor', 'node_modules', 'exceljs'));
 
 function cellValue(value) {
   if (value == null) return '';
