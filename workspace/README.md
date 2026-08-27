@@ -2,6 +2,8 @@
 
 CMOE Workspace는 명단을 먼저 입력하고, 그 명단을 일정 편성·그룹 구성·Google Forms·Zoom·Gmail Flow 작업에서 함께 사용하는 Windows 데스크톱 플랫폼입니다.
 
+기능별 사용자 요청과 변경 흐름은 [`../docs/REQUEST_CHANGE_LOG.md`](../docs/REQUEST_CHANGE_LOG.md)에서 확인할 수 있습니다. 새 기능을 추가하거나 기존 동작을 바꿀 때 해당 요청 ID, 검증 결과, 커밋을 함께 갱신합니다.
+
 ## 유동적인 업무 템플릿
 
 - 새 프로젝트는 KAC 응시자 관리, 교육 프로그램 운영, 안내문·메일, 문서·AI 검토, Excel·명단 정리 또는 빈 프로젝트로 시작할 수 있습니다.
