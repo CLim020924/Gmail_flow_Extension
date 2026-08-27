@@ -148,13 +148,17 @@ const makeId = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
 function ensureRosterRowIds(rows = state.rows) {
   (rows || []).forEach((row) => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return;
+    // Versions before 1.1.16 could write a zero-column placeholder value to
+    // the literal "undefined" key.  It is never a real roster column.
+    if (Object.prototype.hasOwnProperty.call(row, 'undefined')) delete row.undefined;
     if (!row.__gmailFlowRowId && !row.__workspacePersonId) row.__gmailFlowRowId = makeId();
   });
   return rows;
 }
 
 function rowHasRosterData(row) {
-  return Object.entries(row || {}).some(([key, value]) => !key.startsWith('__') && String(value || '').trim());
+  const columnIds = new Set(state.columns.map((column) => String(column?.id || '')).filter(Boolean));
+  return Object.entries(row || {}).some(([key, value]) => columnIds.has(key) && String(value || '').trim());
 }
 
 async function withExclusiveLock(name, operation, timeoutMs = 9000) {
@@ -1366,13 +1370,17 @@ function renderRoster() {
     const trailingCell = document.createElement('td');
     trailingCell.className = 'data-cell';
     if (state.columns.length === 0) {
-      const pasteAnchor = document.createElement('input');
-      pasteAnchor.className = 'cell-input';
-      pasteAnchor.dataset.rowIndex = String(rowIndex);
-      pasteAnchor.dataset.columnIndex = '0';
-      pasteAnchor.dataset.pasteAnchor = 'true';
-      pasteAnchor.setAttribute('aria-label', `${rowIndex + 1}행 A열 붙여넣기`);
-      trailingCell.append(pasteAnchor);
+      trailingCell.classList.add('empty-roster-cell');
+      if (rowIndex === 0) {
+        const pasteAnchor = document.createElement('div');
+        pasteAnchor.className = 'empty-roster-paste-anchor';
+        pasteAnchor.dataset.pasteAnchor = 'true';
+        pasteAnchor.tabIndex = 0;
+        pasteAnchor.setAttribute('role', 'note');
+        pasteAnchor.setAttribute('aria-label', '컬럼을 먼저 추가하세요. 표는 이 영역을 선택한 뒤 Ctrl+V로 붙여넣을 수 있습니다.');
+        pasteAnchor.textContent = '컬럼을 먼저 추가하세요 · 표 붙여넣기는 Ctrl+V';
+        trailingCell.append(pasteAnchor);
+      }
     }
     tr.append(trailingCell);
     fragment.append(tr);
@@ -1510,17 +1518,18 @@ function clearSelectedData() {
 }
 
 function updateRosterStatus(message = '') {
-  const includedCount = state.rows.filter((row) => row.__workspaceActive !== false).length;
-  const excludedCount = state.rows.length - includedCount;
+  const dataRows = state.rows.filter(rowHasRosterData);
+  const includedCount = dataRows.filter((row) => row.__workspaceActive !== false).length;
+  const excludedCount = dataRows.length - includedCount;
   $('#rosterStats').textContent = excludedCount ? `현재 ${includedCount}명이 포함되어 있고 ${excludedCount}명은 잠겨 있습니다.` : `현재 ${includedCount}명이 포함되어 있습니다.`;
   $('#rosterMessage').textContent = message || (state.columns.length ? '셀·컬럼 헤더·행 번호를 드래그하고 Ctrl+C로 복사할 수 있습니다. 컬럼 수정은 헤더를 더블클릭하세요.' : '첫 컬럼을 추가하거나 표를 붙여넣으세요.');
   const saveRosterButton = $('#saveRoster');
-  if (saveRosterButton) saveRosterButton.disabled = state.rows.length === 0;
+  if (saveRosterButton) saveRosterButton.disabled = dataRows.length === 0;
   const saveStructureButton = $('[data-structure-action="save"]');
   if (saveStructureButton) saveStructureButton.disabled = state.columns.length === 0;
   const saveFilteredButton = $('#saveFilteredRoster');
   if (saveFilteredButton) saveFilteredButton.disabled = includedCount === 0;
-  $('#useRoster').disabled = state.rows.length === 0;
+  $('#useRoster').disabled = dataRows.length === 0;
   $('#rosterUndo').disabled = rosterHistory.length === 0;
   $('#rosterRedo').disabled = rosterFuture.length === 0;
 }
@@ -1784,7 +1793,7 @@ async function saveCurrentRoster() {
 
 async function saveFilteredRoster() {
   ensureRosterRowIds();
-  const includedRows = state.rows.filter((row) => row.__workspaceActive !== false);
+  const includedRows = state.rows.filter((row) => row.__workspaceActive !== false && rowHasRosterData(row));
   if (!includedRows.length) return;
   const defaultName = state.activeRosterName ? `${state.activeRosterName} 복사본` : '새 명단';
   const name = await requestTextInput({ title: '명단 저장', label: '새 명단 이름', defaultValue: defaultName, maxLength: 100 });
@@ -2927,10 +2936,11 @@ function bindEvents() {
   });
   $('#rosterBody').addEventListener('input', (event) => {
     const input = event.target.closest('.cell-input');
-    if (!input) return;
+    const columnId = input?.dataset.columnId;
+    if (!input || !columnId || !state.columns.some((column) => column.id === columnId)) return;
     const rowIndex = Number(input.dataset.rowIndex);
     while (state.rows.length <= rowIndex) state.rows.push({});
-    state.rows[rowIndex][input.dataset.columnId] = input.value;
+    state.rows[rowIndex][columnId] = input.value;
     while (state.rows.length && !rowHasRosterData(state.rows.at(-1))) state.rows.pop();
     updateRosterStatus(); updateComposeState();
   });
@@ -2961,21 +2971,28 @@ function bindEvents() {
       await showAlert(error.message, '명단 상태를 반영하지 못했습니다');
     }
   });
-  $('#rosterBody').addEventListener('focusin', (event) => { const input = event.target.closest('.cell-input'); if (input) input.dataset.beforeRosterEdit = rosterSnapshot(); });
-  $('#rosterBody').addEventListener('change', (event) => { const input = event.target.closest('.cell-input'); if (!input?.dataset.beforeRosterEdit) return; rosterHistory.push(input.dataset.beforeRosterEdit); if (rosterHistory.length > 80) rosterHistory.shift(); rosterFuture = []; delete input.dataset.beforeRosterEdit; updateRosterStatus(); });
+  $('#rosterBody').addEventListener('focusin', (event) => { const input = event.target.closest('.cell-input[data-column-id]'); if (input) input.dataset.beforeRosterEdit = rosterSnapshot(); });
+  $('#rosterBody').addEventListener('change', (event) => { const input = event.target.closest('.cell-input[data-column-id]'); if (!input?.dataset.beforeRosterEdit) return; rosterHistory.push(input.dataset.beforeRosterEdit); if (rosterHistory.length > 80) rosterHistory.shift(); rosterFuture = []; delete input.dataset.beforeRosterEdit; updateRosterStatus(); });
   $('#rosterBody').addEventListener('paste', (event) => {
     if (event.defaultPrevented) return;
     const input = event.target.closest('.cell-input');
-    if (!input) return;
+    const pasteAnchor = event.target.closest('[data-paste-anchor="true"]');
+    if (!input && !pasteAnchor) return;
     const text = event.clipboardData?.getData('text/plain') || '';
     const matrix = parseDelimited(text);
     const isStructured = matrix.length > 1 || matrix.some((row) => row.length > 1);
+    if (pasteAnchor) {
+      event.preventDefault();
+      if (state.columns.length !== 0) return;
+      if (!isStructured) { updateRosterStatus('한 셀 값만 입력하려면 먼저 컬럼을 추가하세요. 표 형태 데이터는 Ctrl+V로 바로 붙여넣을 수 있습니다.'); return; }
+      applyTable(matrix);
+      return;
+    }
     if (!isStructured) return;
     event.preventDefault();
     const rowIndex = Number(input.dataset.rowIndex) || 0;
     const columnIndex = Number(input.dataset.columnIndex) || 0;
-    if (input.dataset.pasteAnchor === 'true' && state.columns.length === 0 && rowIndex === 0) applyTable(matrix);
-    else applyMatrixAt(matrix, rowIndex, columnIndex);
+    applyMatrixAt(matrix, rowIndex, columnIndex);
   });
   $('#savedRosterItems').addEventListener('click', (event) => { const button = event.target.closest('[data-roster-id]'); if (button) showRosterDetail(button.dataset.rosterId); });
   $('#loadSelectedRoster').addEventListener('click', () => {

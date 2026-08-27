@@ -928,7 +928,10 @@ app.whenReady().then(async () => {
             assert(document.querySelector('#rosterEditorTable') && document.querySelector('#rosterCellValue'), 'inline roster spreadsheet and formula bar');
             assert(document.querySelector('#rosterPasteInput') && document.querySelector('#chooseExcelRoster') && document.querySelector('#sharedRosterSelect'), 'inline roster paste, file import, and save-load controls');
             assert(document.querySelector('.roster-editor-guide')?.textContent.includes('드래그로 범위 선택 · Ctrl+C/V · 제외 행 잠금'), 'persistent roster spreadsheet guide');
-            const projectBId = (await globalThis.workspaceDesktop.loadState()).activeProjectId;
+            const projectBInitialState = await globalThis.workspaceDesktop.loadState(); const projectBId = projectBInitialState.activeProjectId; const projectBInitial = projectBInitialState.projects.find((project) => project.id === projectBId);
+            assert(projectBInitial.data.columns.length === 0 && projectBInitial.data.people.length === 0, 'new project roster starts without columns or people');
+            assert(document.querySelectorAll('#rosterEditorTable tbody input').length === 0 && document.querySelector('[data-empty-roster-paste-anchor="true"]'), 'zero-column inline roster has a non-editable paste target and no input cells');
+            assert(document.querySelector('#rosterCellValue').disabled && document.querySelector('#rosterCellAddress').textContent === '—' && document.querySelector('#rosterSelectionStatus').textContent === '선택 없음', 'zero-column inline roster has no editable formula target or phantom selection');
             document.querySelector('[data-empty-sheet-add-column]').click();
             await waitFor(() => document.querySelectorAll('#rosterEditorTable [data-column-name]').length === 1, 'first roster column persisted and rerendered');
             let projectBState = await globalThis.workspaceDesktop.loadState(); let projectB = projectBState.projects.find((project) => project.id === projectBId);

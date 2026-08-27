@@ -154,6 +154,14 @@ assert.deepEqual(
   [{ __gmailFlowRowId: 'active-row', name: '고객' }],
   'internal row identity metadata must not turn an empty row into a recipient'
 );
+assert.deepEqual(
+  GmailFlowCore.activeRows([{ __gmailFlowRowId: 'polluted-row', undefined: '가짜 값' }], []),
+  [],
+  'zero-column placeholder pollution must not turn into an active recipient row'
+);
+const pollutedCompose = GmailFlowCore.validateCompose({ columns: [], rows: [{ undefined: '가짜 값' }], method: '임시 저장' });
+assert.equal(pollutedCompose.valid, false, 'a polluted zero-column row must not enable draft creation');
+assert.equal(pollutedCompose.rows.length, 0, 'compose validation must only count values belonging to current columns');
 
 const baselineAfterLocalSave = localRosters;
 const desiredOnNextSave = localRosters;

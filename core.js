@@ -5,8 +5,13 @@
 
   const cleanText = (value) => String(value ?? '').trim();
   const usableColumns = (columns) => (columns || []).filter((column) => column.role !== 'excluded' && cleanText(column.name));
-  const activeRows = (rows) => (rows || []).filter((row) => Object.entries(row || {})
-    .some(([key, value]) => !key.startsWith('__') && cleanText(value)));
+  const activeRows = (rows, columns) => {
+    const columnIds = Array.isArray(columns)
+      ? new Set(columns.map((column) => cleanText(column?.id)).filter(Boolean))
+      : null;
+    return (rows || []).filter((row) => Object.entries(row || {})
+      .some(([key, value]) => !key.startsWith('__') && (!columnIds || columnIds.has(key)) && cleanText(value)));
+  };
 
   function getVariableNames(columns) {
     return usableColumns(columns).map((column) => cleanText(column.name));
@@ -60,7 +65,7 @@
 
   function validateCompose(input) {
     const columns = input.columns || [];
-    const rows = activeRows(input.rows);
+    const rows = activeRows(input.rows, columns);
     const method = input.method || '임시 저장';
     const errors = [];
     const variableNames = getVariableNames(columns);

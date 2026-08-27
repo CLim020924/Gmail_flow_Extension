@@ -297,6 +297,13 @@ app.whenReady().then(async () => {
             assert(document.querySelector('#rosterDragHelp')?.textContent.includes('Ctrl+C/X/V') && document.querySelector('#rosterFillDown'), 'roster range actions should be discoverable');
             document.querySelector('[data-page="roster"]').click();
             await waitFor(() => document.querySelector('#page-roster').classList.contains('active'), 'roster page activation');
+            assert(document.querySelectorAll('.column-header').length === 0, 'zero-column roster should have no column headers');
+            assert(document.querySelectorAll('#rosterBody .cell-input').length === 0, 'zero-column roster must not render caret-editable cells');
+            const initialPasteAnchor = document.querySelector('[data-paste-anchor="true"]');
+            assert(initialPasteAnchor && !initialPasteAnchor.matches('input, textarea, [contenteditable="true"]'), 'zero-column paste target must be non-editable');
+            initialPasteAnchor.focus();
+            assert(!document.activeElement.matches('input, textarea, [contenteditable="true"]'), 'zero-column roster focus must not expose a text caret');
+            assert(document.querySelector('#saveRoster').disabled && document.querySelector('#useRoster').disabled, 'zero-column roster cannot be saved or applied');
 
             const addColumn = document.querySelector('#addColumn');
             addColumn.click();
@@ -317,6 +324,7 @@ app.whenReady().then(async () => {
             assert(document.querySelectorAll('#rosterBody .selected-cell').length === 2, 'input-captured mouse drag should select the cell under the real pointer');
             cell.value = 'Alpha';
             cell.dispatchEvent(new Event('input', { bubbles: true }));
+            assert(state.columns.length === 1 && state.rows[0][state.columns[0].id] === 'Alpha' && !Object.prototype.hasOwnProperty.call(state.rows[0], 'undefined'), 'real cell input must write only to its real column id');
             document.querySelector('#rosterFillDown').click();
             assert([...document.querySelectorAll('#rosterBody .cell-input')].slice(0, 2).every((input) => input.value === 'Alpha'), 'fill-down should apply the first selected value to the selected cells');
             document.querySelector('#rosterUndo').click();
@@ -337,11 +345,12 @@ app.whenReady().then(async () => {
 
             document.querySelector('#resetRoster').click();
             await confirmMessageDialog();
-            await waitFor(() => document.querySelectorAll('.column-header').length === 0 && document.querySelector('[data-paste-anchor="true"]'), 'roster reset');
+            await waitFor(() => document.querySelectorAll('.column-header').length === 0 && document.querySelectorAll('#rosterBody .cell-input').length === 0 && document.querySelector('[data-paste-anchor="true"]'), 'roster reset');
             assert(document.activeElement === document.querySelector('#addColumn'), 'reset should immediately restore keyboard focus');
 
             const hwp = ['송아라','cs-smile@naver.com','010-8700-3977','cs-smile@naver.com','조민지','alswldmswl00@naver.com','010-8213-7220','alswldmswl00@naver.com','김미','k100mi@naver.com','010-2591-8813','k100mi@naver.com'].join('\\n');
-            applyTable(parseDelimited(hwp));
+            const hwpTransfer = new DataTransfer(); hwpTransfer.setData('text/plain', hwp);
+            document.querySelector('[data-paste-anchor="true"]').dispatchEvent(new ClipboardEvent('paste', { clipboardData: hwpTransfer, bubbles: true, cancelable: true }));
             await waitFor(() => document.querySelectorAll('.column-header').length === 4, 'HWP vertical record inference');
             assert([...document.querySelectorAll('.column-header')].map((element) => element.textContent).join('|').includes('이름|이메일 · 수신 이메일|전화번호|아이디'), 'HWP inferred headers and email role');
             assert(document.querySelectorAll('.column-header').length === 4 && document.querySelectorAll('#rosterBody tr').length >= 3, 'HWP inferred records');

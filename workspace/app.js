@@ -1126,9 +1126,9 @@
     const from = `${spreadsheetColumnName(minCol)}${minRow + 1}`; const to = `${spreadsheetColumnName(maxCol)}${maxRow + 1}`;
     $('#rosterSelectionStatus').textContent = from === to ? from : `${from}:${to}`;
     $('#rosterCellAddress').textContent = `${spreadsheetColumnName(focus.col)}${focus.row + 1}`;
-    const project = activeProject(); const formula = $('#rosterCellValue'); const locked = Boolean(project && focus.row > 0 && project.data.people[focus.row - 1]?.active === false);
-    formula.disabled = !project || locked; formula.value = project ? sheetCellValue(project, focus.row, focus.col) : '';
-    formula.placeholder = locked ? '제외 행은 공용 명단 관리자에서 다시 포함한 뒤 수정하세요' : '셀을 선택하세요';
+    const project = activeProject(); const formula = $('#rosterCellValue'); const column = project?.data.columns?.[focus.col]; const locked = Boolean(project && focus.row > 0 && project.data.people[focus.row - 1]?.active === false);
+    formula.disabled = !project || !column || locked; formula.value = project && column ? sheetCellValue(project, focus.row, focus.col) : '';
+    formula.placeholder = !column ? '먼저 컬럼을 추가하세요' : (locked ? '제외 행은 공용 명단 관리자에서 다시 포함한 뒤 수정하세요' : '셀을 선택하세요');
     formula.title = locked ? '제외된 행은 인라인 표에서 수정할 수 없습니다.' : '';
   }
 
@@ -1258,11 +1258,13 @@
       table.tHead.replaceChildren(letterRow, headRow);
       const rows = Array.from({ length: 5 }, (_, index) => {
         const tr = element('tr'); tr.append(element('th', 'sheet-row-number', String(index + 2)));
-        const cell = element('td', 'empty-sheet-cell'); cell.dataset.sheetRow = String(index + 1); cell.dataset.sheetCol = '0';
-        const input = element('input'); input.type = 'text'; input.readOnly = true; input.tabIndex = 0; input.placeholder = index === 0 ? '클릭한 뒤 Ctrl+V' : ''; cell.append(input); tr.append(cell); return tr;
+        const cell = element('td', 'empty-sheet-cell');
+        if (index === 0) { cell.tabIndex = 0; cell.dataset.emptyRosterPasteAnchor = 'true'; cell.setAttribute('role', 'note'); cell.setAttribute('aria-label', '컬럼을 먼저 추가하세요. 표는 이 영역을 선택한 뒤 Ctrl+V로 붙여넣을 수 있습니다.'); cell.textContent = '컬럼을 먼저 추가하세요 · 표 붙여넣기는 Ctrl+V'; }
+        tr.append(cell); return tr;
       });
-      table.tBodies[0].replaceChildren(...rows); rosterSelection = rosterSelection || { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 }, mode: 'cells' };
-      updateRosterSelection(rosterSelection.anchor, rosterSelection.focus, rosterSelection.mode); syncRosterHistoryControls(); return;
+      table.tBodies[0].replaceChildren(...rows); rosterSelection = null;
+      $('#rosterSelectionStatus').textContent = '선택 없음'; $('#rosterCellAddress').textContent = '—'; $('#rosterCellValue').value = ''; $('#rosterCellValue').disabled = true; $('#rosterCellValue').placeholder = '먼저 컬럼을 추가하세요';
+      syncRosterHistoryControls(); return;
     }
     const letterRow = element('tr', 'sheet-letter-row'); const corner = element('th', 'sheet-corner', ''); corner.dataset.selectRosterAll = 'true'; corner.title = '전체 표 선택'; letterRow.append(corner);
     project.data.columns.forEach((_column, index) => { const letter = element('th', 'sheet-letter', spreadsheetColumnName(index)); letter.dataset.selectRosterColumn = String(index); letter.title = `${spreadsheetColumnName(index)}열 전체 선택`; letterRow.append(letter); });
@@ -3686,9 +3688,16 @@
       event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`); event.preventDefault(); void clearSelectedRosterCells(project, { message: '명단 셀 잘라내기 저장됨' });
     });
     rosterTable.addEventListener('paste', async (event) => {
-      if (!rosterSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text.trim()) return;
+      const text = event.clipboardData?.getData('text/plain') || ''; if (!text.trim()) return;
       const project = activeProject(); if (!project) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return;
-      if (!project.data.columns.length) { event.preventDefault(); clearRosterHistory(); await applyRosterMatrix(matrix); rosterSelection = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 }, mode: 'cells' }; return; }
+      if (!project.data.columns.length) {
+        if (!event.target.closest('[data-empty-roster-paste-anchor="true"]')) return;
+        event.preventDefault();
+        const structured = matrix.length > 1 || matrix.some((row) => row.length > 1);
+        if (!structured) { showToast('한 셀 값만 입력하려면 먼저 컬럼을 추가하세요.'); return; }
+        clearRosterHistory(); await applyRosterMatrix(matrix); return;
+      }
+      if (!rosterSelection) return;
       const singleValue = matrix.length === 1 && matrix[0].length === 1;
       if (singleValue && rosterSelectionIsRange()) {
         event.preventDefault(); pushRosterHistory(project); const bounds = rosterSelectionBounds(); let changed = 0; let locked = 0;
@@ -3718,9 +3727,10 @@
       if (movement && (['Enter', 'Tab'].includes(event.key) || event.altKey || !event.target.matches('input, textarea, select'))) { event.preventDefault(); focusRosterCell(rosterSelection.focus.row + movement[0], rosterSelection.focus.col + movement[1], event.shiftKey && event.key !== 'Tab'); return; }
       if ((event.key === 'Delete' || event.key === 'Backspace') && (!event.target.matches('input:focus') || rosterSelectionIsRange())) { event.preventDefault(); void clearSelectedRosterCells(project); }
     });
-    $('#rosterCellValue').addEventListener('focus', (event) => { const project = activeProject(); if (project) event.target.dataset.beforeRosterEdit = rosterSnapshot(project); });
+    $('#rosterCellValue').addEventListener('focus', (event) => { const project = activeProject(); const point = rosterSelection?.focus; if (project && point && project.data.columns[point.col]) event.target.dataset.beforeRosterEdit = rosterSnapshot(project); });
     $('#rosterCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !rosterSelection) return; const point = rosterSelection.focus;
+      if (!project.data.columns[point.col]) { event.target.value = ''; delete event.target.dataset.beforeRosterEdit; return; }
       if (event.target.dataset.beforeRosterEdit) { pushRosterHistorySnapshot(event.target.dataset.beforeRosterEdit); delete event.target.dataset.beforeRosterEdit; }
       if (!setSheetCellValue(project, point.row, point.col, event.target.value)) return;
       state = Core.updateProject(state, project.id, { data: project.data });
