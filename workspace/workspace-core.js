@@ -420,7 +420,8 @@
       preferences: {
         theme: 'light',
         showArchivedProjects: false,
-        storageMode: 'local'
+        storageMode: 'local',
+        workspaceDriveConnectionId: null
       },
       updatedAt: nowIso()
     };
@@ -975,7 +976,10 @@
 
   function removeConnection(stateInput, connectionId) {
     const state = normalizeState(stateInput);
+    const removedWorkspaceDrive = workspaceDriveConnection(state)?.id === connectionId || state.preferences.workspaceDriveConnectionId === connectionId;
     state.connections = state.connections.filter((connection) => connection.id !== connectionId);
+    if (state.preferences.workspaceDriveConnectionId === connectionId) state.preferences.workspaceDriveConnectionId = null;
+    if (removedWorkspaceDrive && state.preferences.storageMode === 'drive') state.preferences.storageMode = 'local';
     state.projects = state.projects.map((project) => {
       const defaults = { ...project.settings.defaultConnectionIds };
       Object.keys(defaults).forEach((key) => { if (defaults[key] === connectionId) defaults[key] = null; });
@@ -983,6 +987,15 @@
     });
     state.updatedAt = nowIso();
     return state;
+  }
+
+  function workspaceDriveConnection(stateInput) {
+    const state = stateInput && typeof stateInput === 'object' ? stateInput : createEmptyState();
+    const connected = (Array.isArray(state.connections) ? state.connections : []).filter((connection) => connection.type === 'drive' && connection.status === 'connected');
+    const selectedId = state.preferences?.workspaceDriveConnectionId || '';
+    const selected = connected.find((connection) => connection.id === selectedId);
+    if (selectedId) return selected || null;
+    return connected.length === 1 ? connected[0] : null;
   }
 
   function getActiveProject(stateInput) {
@@ -1027,6 +1040,7 @@
     connectionIdentityMatches,
     applyConnectionAuthorization,
     removeConnection,
+    workspaceDriveConnection,
     getActiveProject,
     getProjectProgress
   };

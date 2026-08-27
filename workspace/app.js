@@ -236,7 +236,7 @@
   }
 
   function connectedDrive() {
-    return state.connections.find((connection) => connection.type === 'drive' && connection.status === 'connected');
+    return Core.workspaceDriveConnection(state);
   }
 
   function scheduleDriveStateSync() {
@@ -269,8 +269,9 @@
   async function pushStateToDrive(notify = true) {
     const connection = connectedDrive();
     if (!connection) {
-      lastDriveSyncError = new Error('Google Drive 저장 모드이지만 연결된 Drive 계정이 없습니다.');
-      if (notify) showToast('먼저 Google Drive 계정에 로그인하여 연결해주세요.', 'error');
+      const connectedCount = state.connections.filter((item) => item.type === 'drive' && item.status === 'connected').length; const selectedUnavailable = Boolean(state.preferences.workspaceDriveConnectionId);
+      lastDriveSyncError = new Error(selectedUnavailable ? '선택한 Workspace Drive 계정에 다시 로그인하거나 다른 계정을 선택해주세요.' : connectedCount > 1 ? 'Workspace 전체를 동기화할 Drive 계정을 선택해주세요.' : 'Google Drive 저장 모드이지만 연결된 Drive 계정이 없습니다.');
+      if (notify) showToast(selectedUnavailable ? '선택한 Workspace Drive 계정에 다시 로그인하거나 다른 계정을 선택해주세요.' : connectedCount > 1 ? '환경 설정에서 Workspace 전체 동기화 계정을 선택해주세요.' : '먼저 Google Drive 계정에 로그인하여 연결해주세요.', 'error');
       return false;
     }
     try {
@@ -300,6 +301,10 @@
     $('#confirmAction').className = options.danger === false ? 'primary-button' : 'danger-button';
     openDialog('confirmDialog');
     return new Promise((resolve) => { confirmResolver = resolve; });
+  }
+
+  function approveExternalChange(project, message, options = {}) {
+    return Ops.externalChangeApprovalRequired(project) ? showConfirm(message, options) : Promise.resolve(true);
   }
 
   function resolveConfirm(value) {
@@ -1356,7 +1361,10 @@
       slot.status = statusMap[text] || text || 'draft';
     } else if (column.key === 'locked') {
       slot.locked = /^(예|y|yes|true|1|잠금)$/i.test(text); project.data.assignments.filter((item) => item.slotId === slot.id).forEach((item) => { item.locked = slot.locked; });
-    } else slot[column.key] = text;
+    } else {
+      slot[column.key] = text;
+      if (column.key === 'startTime' && text && !slot.endTime) slot.endTime = Ops.addMinutesToTime(text, project.settings?.sessionDurationMinutes);
+    }
     scheduleEditGeneration += 1;
     refreshScheduleConflicts(project);
     return true;
@@ -2031,7 +2039,8 @@
   }
 
   async function requestSessionSlot(defaultValue = '') {
-    const value = await requestName('새 세션 날짜·시간', defaultValue || `${new Date().toISOString().slice(0, 10)} 09:00-10:00 새 세션`); if (!value) return null;
+    const project = activeProject(); const startTime = '09:00'; const endTime = Ops.addMinutesToTime(startTime, project?.settings?.sessionDurationMinutes);
+    const value = await requestName('새 세션 날짜·시간', defaultValue || `${new Date().toISOString().slice(0, 10)} ${startTime}-${endTime} 새 세션`); if (!value) return null;
     const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '예: 2026-08-20 09:00-10:00 필기 교육', 'error'); return null; }
     return parsed.slots[0];
   }
@@ -2272,21 +2281,9 @@
       copy.append(element('strong', '', version.name), element('small', '', formatUpdatedAt(version.createdAt)));
       const restore = element('button', 'secondary-button compact', '이 일정으로 되돌리기'); restore.type = 'button'; restore.dataset.versionRestore = String(project.data.versions.length - 1 - reverseIndex); item.append(copy, restore); versions.append(item);
     });
-    const table = $('#outputPreviewTable');
-    const headers = ['날짜', '시작', '종료', '세션명', '역할', '이름', '상태'];
-    const head = element('tr'); headers.forEach((label) => head.append(element('th', '', label))); table.tHead.replaceChildren(head);
-    const personMap = new Map(project.data.people.map((person) => [person.id, person]));
-    const roleMap = new Map(project.data.roles.map((role) => [role.id, role]));
-    const rows = [];
-    project.data.slots.slice().sort((a, b) => Ops.slotKey(a).localeCompare(Ops.slotKey(b))).forEach((slot) => {
-      const assignments = project.data.assignments.filter((assignment) => assignment.slotId === slot.id);
-      (assignments.length ? assignments : [null]).forEach((assignment) => {
-        const row = element('tr');
-        [slot.date, slot.startTime, slot.endTime, slot.label || '', assignment ? roleMap.get(assignment.roleId)?.name || '' : '', assignment ? personMap.get(assignment.personId)?.name || '' : '', slot.status].forEach((value) => row.append(element('td', '', value)));
-        rows.push(row);
-      });
-    });
-    table.tBodies[0].replaceChildren(...rows);
+    const table = $('#outputPreviewTable'); const output = Ops.scheduleOutputTable(project);
+    const head = element('tr'); output.headers.forEach((label) => head.append(element('th', '', label))); table.tHead.replaceChildren(head);
+    table.tBodies[0].replaceChildren(...output.rows.map((values) => { const row = element('tr'); values.forEach((value) => row.append(element('td', '', value))); return row; }));
   }
 
   function renderFormsPage() {
@@ -2642,7 +2639,26 @@
 
   function renderSettings() {
     $('#storageMode').value = state.preferences.storageMode || 'local';
-    $('#driveSyncStatus').textContent = state.preferences.lastDriveSyncAt ? `마지막 Drive 저장: ${formatUpdatedAt(state.preferences.lastDriveSyncAt)}` : 'Google Drive에 연결한 계정이 있어야 사용할 수 있습니다.';
+    const driveSelect = $('#workspaceDriveConnection'); const connectedDrives = state.connections.filter((connection) => connection.type === 'drive' && connection.status === 'connected'); const selectedDrive = connectedDrive(); const configuredDrive = state.connections.find((connection) => connection.id === state.preferences.workspaceDriveConnectionId && connection.type === 'drive'); const selectedDriveUnavailable = Boolean(state.preferences.workspaceDriveConnectionId && (!configuredDrive || configuredDrive.status !== 'connected'));
+    driveSelect.replaceChildren(); const placeholder = element('option', '', selectedDriveUnavailable ? '선택한 계정 다시 연결 필요' : connectedDrives.length > 1 ? '동기화할 Drive 계정 선택' : connectedDrives.length ? '연결된 Drive 계정' : '연결된 Drive 계정 없음'); placeholder.value = ''; driveSelect.append(placeholder);
+    connectedDrives.forEach((connection) => { const option = element('option', '', `${connection.label}${connection.account ? ` · ${connection.account}` : ''}`); option.value = connection.id; driveSelect.append(option); });
+    driveSelect.value = selectedDrive?.id || ''; driveSelect.disabled = connectedDrives.length === 0;
+    const hasNoDrive = connectedDrives.length === 0;
+    const needsDriveChoice = connectedDrives.length > 1 && !selectedDrive;
+    $('#pushDriveState').disabled = state.preferences.storageMode !== 'drive' || !selectedDrive;
+    $('#pushDriveState').title = selectedDriveUnavailable ? '선택한 Drive 계정에 다시 로그인하거나 다른 계정을 선택해주세요.' : hasNoDrive ? '계정 연결에서 Google Drive 계정을 먼저 연결해주세요.' : state.preferences.storageMode !== 'drive' ? '저장 위치를 Google Drive 동기화로 바꾸면 사용할 수 있습니다.' : needsDriveChoice ? 'Workspace 전체 동기화 계정을 먼저 선택해주세요.' : '';
+    $('#pullDriveState').disabled = !selectedDrive;
+    $('#driveSyncStatus').textContent = selectedDriveUnavailable
+      ? `선택한 “${configuredDrive?.label || 'Drive'}” 계정에 다시 로그인하거나 위에서 다른 Drive 계정을 선택해주세요.`
+      : hasNoDrive
+      ? '왼쪽의 “계정 연결”에서 Google Drive 계정을 연결하면 Workspace 전체 동기화를 사용할 수 있습니다.'
+      : needsDriveChoice
+      ? '연결된 Drive 계정이 여러 개입니다. Workspace 전체를 저장할 계정을 선택해주세요.'
+      : state.preferences.storageMode !== 'drive'
+        ? '현재는 이 PC에만 저장합니다. Drive 저장 버튼은 Google Drive 동기화 모드에서만 활성화됩니다.'
+        : state.preferences.lastDriveSyncAt
+          ? `${selectedDrive?.label || '선택한 계정'} · 마지막 저장 ${formatUpdatedAt(state.preferences.lastDriveSyncAt)}`
+          : selectedDrive ? `${selectedDrive.label} 계정에 Workspace 전체를 저장합니다.` : 'Google Drive에 연결한 계정이 있어야 사용할 수 있습니다.';
     $('#showArchivedSetting').checked = Boolean(state.preferences.showArchivedProjects);
     $('#toggleArchived').textContent = state.preferences.showArchivedProjects ? '진행만' : '보관함';
   }
@@ -2688,7 +2704,7 @@
 
     const container = $('#defaultConnectionSelectors');
     container.replaceChildren();
-    Core.CONNECTION_TYPES.forEach((type) => {
+    Core.CONNECTION_TYPES.filter((type) => type.id !== 'drive').forEach((type) => {
       const label = element('label', 'form-field', `기본 ${type.name} 연결`);
       const select = element('select');
       select.dataset.defaultConnectionType = type.id;
@@ -3560,16 +3576,24 @@
     $('#projectStatusFilter').addEventListener('change', renderProjectsPage);
     $('#storageMode').addEventListener('change', async (event) => {
       if (event.target.value === 'drive') {
-        if (!connectedDrive()) { event.target.value = 'local'; showToast('먼저 Google Drive 계정에 로그인하여 연결해주세요.', 'error'); navigate('connections'); return; }
+        const connection = connectedDrive(); const connectedCount = state.connections.filter((item) => item.type === 'drive' && item.status === 'connected').length;
+        if (!connection) { event.target.value = 'local'; showToast(state.preferences.workspaceDriveConnectionId ? '선택한 Workspace Drive 계정에 다시 로그인하거나 다른 계정을 선택해주세요.' : connectedCount > 1 ? 'Workspace 전체를 동기화할 Drive 계정을 먼저 선택해주세요.' : '먼저 Google Drive 계정에 로그인하여 연결해주세요.', 'error'); if (!connectedCount) navigate('connections'); else renderSettings(); return; }
+        state.preferences.workspaceDriveConnectionId = connection.id;
       }
       state.preferences.storageMode = event.target.value;
       await persist();
-      if (event.target.value === 'drive') await flushDriveStateSync(true, { force: true });
+      renderSettings(); if (event.target.value === 'drive') await flushDriveStateSync(true, { force: true });
     });
-    $('#pushDriveState').addEventListener('click', () => void flushDriveStateSync(true, { force: true }));
+    $('#workspaceDriveConnection').addEventListener('change', async (event) => {
+      const connection = state.connections.find((item) => item.id === event.target.value && item.type === 'drive' && item.status === 'connected');
+      if (!connection) { state.preferences.workspaceDriveConnectionId = null; await persist('Drive 동기화 계정 선택 해제됨'); renderSettings(); return; }
+      state.preferences.workspaceDriveConnectionId = connection.id; await persist('Drive 동기화 계정 선택됨'); renderSettings();
+      if (state.preferences.storageMode === 'drive') await flushDriveStateSync(true, { force: true });
+    });
+    $('#pushDriveState').addEventListener('click', () => { if (state.preferences.storageMode !== 'drive') { showToast('저장 위치를 Google Drive 동기화로 바꾼 뒤 저장해주세요.'); return; } void flushDriveStateSync(true, { force: true }); });
     $('#pullDriveState').addEventListener('click', async () => {
       let connection = connectedDrive();
-      if (!connection) { showToast('Google Drive에서 자료를 가져올 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
+      if (!connection) { const connectedCount = state.connections.filter((item) => item.type === 'drive' && item.status === 'connected').length; showToast(state.preferences.workspaceDriveConnectionId ? '선택한 Workspace Drive 계정에 다시 로그인하거나 다른 계정을 선택해주세요.' : connectedCount > 1 ? '환경 설정에서 가져올 Workspace Drive 계정을 선택해주세요.' : 'Google Drive에서 자료를 가져올 계정에 먼저 로그인해주세요.', 'error'); if (!connectedCount) navigate('connections'); return; }
       const connectionId = connection.id;
       let reservation = null; let externalStarted = false;
       try {
@@ -3686,7 +3710,7 @@
     $('#saveScheduleVersion').addEventListener('click', () => void saveScheduleSnapshot());
     $('#layoutType').addEventListener('change', async (event) => {
       const project = activeProject(); if (!project) return;
-      project.data.layout.type = event.target.value; state = Core.updateProject(state, project.id, { data: project.data }); await persist();
+      project.data.layout.type = event.target.value; state = Core.updateProject(state, project.id, { data: project.data }); renderLayoutPage(); await persist('일정표 형태 저장됨');
     });
     $('#exportCsvButton').addEventListener('click', () => {
       const project = activeProject(); if (!project) return;
@@ -3841,7 +3865,7 @@
       const replacementCount = pending.filter((slot) => project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id)).length;
       const replacementNotice = replacementCount ? ` 이 중 ${replacementCount}건은 일정이 바뀌어 새 회의를 만들며, 이전 회의는 Zoom에서 직접 정리해야 합니다.` : ' 이미 정상 참가 링크가 있는 일정은 건너뜁니다.';
       const projectId = project.id; const confirmationSignature = externalOperationSignature(project, 'zoom');
-      if (!await showConfirm(`${pending.length}개의 Zoom 회의를 만들까요?${replacementNotice}`, { title: 'Zoom 회의 만들기', action: '회의 만들기' })) return;
+      if (!await approveExternalChange(project, `${pending.length}개의 Zoom 회의를 만들까요?${replacementNotice}`, { title: 'Zoom 회의 만들기', action: '회의 만들기' })) return;
       project = projectById(projectId); pending = project ? pendingZoomSlots(project) : [];
       if (!project || externalOperationSignature(project, 'zoom') !== confirmationSignature) { showToast('확인하는 동안 다른 창의 일정 또는 회의 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       invalid = pending.filter((slot) => Ops.validateScheduleSlot(slot).length || !state.connections.some((item) => item.id === (slot.zoomConnectionId || defaultConnectionId(project, 'zoom')) && item.type === 'zoom' && item.status === 'connected'));
@@ -3921,7 +3945,7 @@
       let needsNewDraft = pending.some((entry) => !latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId));
       if (needsNewDraft && !connection) { showToast('메일을 만들 Gmail 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
       const projectId = project.id; const confirmationSignature = externalOperationSignature(project, 'gmailDraft');
-      if (!await showConfirm(`${pending.length}명의 메일을 Gmail 임시보관함에 만들거나 기존 내용을 수정할까요? 아직 실제 발송은 하지 않습니다.`, { title: 'Gmail 임시보관함에 저장', action: '저장하기' })) return;
+      if (!await approveExternalChange(project, `${pending.length}명의 메일을 Gmail 임시보관함에 만들거나 기존 내용을 수정할까요? 아직 실제 발송은 하지 않습니다.`, { title: 'Gmail 임시보관함에 저장', action: '저장하기' })) return;
       project = projectById(projectId); pending = project ? pendingGmailEntries(project) : [];
       if (!project || externalOperationSignature(project, 'gmailDraft') !== confirmationSignature) { showToast('확인하는 동안 다른 창의 명단·일정 또는 메일 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.status === 'connected');
@@ -4244,6 +4268,7 @@
       if (disconnectConnection) {
         const connectionId = disconnectConnection.dataset.connectionDisconnect;
         let connection = state.connections.find((item) => item.id === connectionId); if (!connection) return;
+        const wasWorkspaceDrive = connectedDrive()?.id === connectionId;
         if (!await showConfirm(`“${connection.label}” 계정의 로그인을 해제할까요? 다시 연결할 수 있도록 계정 설정은 남겨둡니다.`, { title: '계정 연결 해제', action: '연결 해제' })) return;
         let reservation = null; let externalStarted = false;
         try {
@@ -4253,16 +4278,19 @@
           if (!connection) { showToast('다른 창에서 계정 설정이 삭제되었습니다.', 'error'); return; }
           beginExternalOperation(); externalStarted = true;
           const status = await globalThis.workspaceDesktop.disconnectConnection(connectionId);
+          let needsPersist = false;
           if (status?.state) mergePersistedWorkspaceState(status.state);
           else {
             connection = state.connections.find((item) => item.id === connectionId);
             if (!connection) throw new Error('연결 해제 중 계정 설정이 삭제되었습니다.');
-            connection.status = 'needsAuth'; connection.updatedAt = new Date().toISOString(); await persist();
+            connection.status = 'needsAuth'; connection.updatedAt = new Date().toISOString(); needsPersist = true;
           }
+          if (wasWorkspaceDrive && state.preferences.storageMode === 'drive') { state.preferences.storageMode = 'local'; needsPersist = true; }
+          if (needsPersist) await persist(wasWorkspaceDrive ? 'Drive 연결 해제 · 이 PC 저장으로 전환됨' : '계정 연결 해제됨');
           if (state.preferences.storageMode === 'drive') scheduleDriveStateSync();
           if (!mailEditorDirty && !hasFocusedWorkspaceDraft()) renderAll();
           if (currentPage === 'connections') renderConnectionsPage();
-          showToast('계정 연결을 해제했습니다.');
+          showToast(wasWorkspaceDrive ? 'Drive 연결을 해제하고 이 PC 저장으로 전환했습니다.' : '계정 연결을 해제했습니다.');
         } catch (error) { showToast(`계정 연결을 해제하지 못했습니다: ${error.message}`, 'error'); }
         finally { if (reservation?.ok) await releaseExternalArtifacts(reservation.token); if (externalStarted) endExternalOperation(); }
         return;
@@ -4271,7 +4299,7 @@
       if (removeConnection) {
         const connectionId = removeConnection.dataset.connectionRemove;
         let connection = state.connections.find((item) => item.id === connectionId);
-        if (!await showConfirm(`“${connection?.label || '계정'}” 설정을 완전히 삭제할까요? 이 계정을 기본으로 사용하던 프로젝트에서도 선택이 해제됩니다.`, { title: '계정 설정 삭제', action: '삭제' })) return;
+        if (!await showConfirm(`“${connection?.label || '계정'}” 설정을 완전히 삭제할까요? 프로젝트 기본 연결과 Workspace Drive 동기화 선택에서도 해제됩니다.`, { title: '계정 설정 삭제', action: '삭제' })) return;
         let reservation = null; let externalStarted = false;
         try {
           reservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]);

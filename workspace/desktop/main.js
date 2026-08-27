@@ -213,6 +213,12 @@ async function uploadLatestWorkspaceStateToDrive(connectionId, expectedIdentity)
     throw error;
   }
   const latestState = await runWorkspaceStateTransaction(async () => WorkspaceCore.normalizeState(await storage.get('workspaceState', null)));
+  const selectedConnection = latestState.preferences.storageMode === 'drive' ? WorkspaceCore.workspaceDriveConnection(latestState) : null;
+  if (!selectedConnection || selectedConnection.id !== connectionId) {
+    const error = new Error('Workspace 전체 동기화 계정이 변경되어 이전 계정으로의 저장을 중단했습니다. 환경 설정에서 선택한 계정을 확인해주세요.');
+    error.code = 'DRIVE_SYNC_ACCOUNT_CHANGED';
+    throw error;
+  }
   const guard = await driveSyncGuards.get(connection);
   if (guard?.state === 'conflict') {
     const error = new Error(guard.reason || '다른 PC의 Drive 변경이 확인되어 자동 저장이 잠겼습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.');
@@ -314,8 +320,15 @@ async function flushMainDriveStateSync() {
       const capturedRevision = mainDriveSyncRevision;
       const latestState = await runWorkspaceStateTransaction(async () => WorkspaceCore.normalizeState(await storage.get('workspaceState', null)));
       if (latestState.preferences.storageMode !== 'drive') { mainDriveSyncDirty = false; break; }
-      const connection = latestState.connections.find((item) => item.type === 'drive' && item.status === 'connected');
-      if (!connection) throw new Error('Google Drive 저장 모드이지만 연결된 Drive 계정이 없습니다. Drive 계정을 다시 연결하거나 저장 위치를 이 PC로 바꿔주세요.');
+      const connection = WorkspaceCore.workspaceDriveConnection(latestState);
+      if (!connection) {
+        const connectedDriveCount = latestState.connections.filter((item) => item.type === 'drive' && item.status === 'connected').length;
+        throw new Error(latestState.preferences.workspaceDriveConnectionId
+          ? '선택한 Workspace Drive 계정에 다시 로그인하거나 환경 설정에서 다른 계정을 선택해주세요.'
+          : connectedDriveCount > 1
+          ? '연결된 Drive 계정이 여러 개입니다. 환경 설정에서 Workspace 전체 동기화 계정을 선택해주세요.'
+          : 'Google Drive 저장 모드이지만 연결된 Drive 계정이 없습니다. Drive 계정을 다시 연결하거나 저장 위치를 이 PC로 바꿔주세요.');
+      }
       await connectionOperations.run(connection.id, () => runDriveStateTransaction(() => uploadLatestWorkspaceStateToDrive(connection.id, WorkspaceCore.connectionIdentity(connection))));
       if (mainDriveSyncRevision === capturedRevision) mainDriveSyncDirty = false;
     }
@@ -953,6 +966,14 @@ app.whenReady().then(async () => {
             switcher.value = [...switcher.options].find((option) => option.textContent.includes('Project A')).value;
             switcher.dispatchEvent(new Event('change', { bubbles: true }));
             await waitFor(() => document.querySelector('#activeProjectName')?.textContent === 'Smoke Project A', 'project switch');
+            document.querySelector('#projectSettingsButton').click(); await waitFor(() => document.querySelector('#projectSettingsDialog').open, 'project settings');
+            assert(!document.querySelector('[data-default-connection-type="drive"]'), 'Workspace Drive sync must not be presented as a project default');
+            document.querySelector('#settingsDuration').value = '90'; document.querySelector('#settingsChangeApproval').checked = false; document.querySelector('#projectSettingsForm').requestSubmit();
+            await waitFor(() => !document.querySelector('#projectSettingsDialog').open, 'project settings saved');
+            document.querySelector('[data-nav="settings"]').click(); await waitFor(() => document.querySelector('#page-settings').classList.contains('active'), 'settings page');
+            assert(document.querySelector('#workspaceDriveConnection')?.disabled && document.querySelector('#pushDriveState')?.disabled, 'local mode with no Drive account disables the global push action');
+            assert(document.querySelector('#driveSyncStatus')?.textContent.includes('계정 연결'), 'local Drive push state gives an actionable account prompt');
+            document.querySelector('[data-nav="dashboard"]').click();
             const reservationState = await globalThis.workspaceDesktop.loadState(); const reservationProjectId = reservationState.activeProjectId;
             const firstReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'gmailDraft', ['reservation-person']);
             const competingReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'gmailDraft', ['reservation-person']);
@@ -1123,7 +1144,7 @@ app.whenReady().then(async () => {
             document.querySelector('[data-session-slot]').click(); await waitFor(() => !document.querySelector('#sessionChangePreview').hidden, 'reopen assignment preview'); document.querySelector('#sessionApplyChange').click();
             await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2, 'apply person into session');
             document.querySelector('[data-session-edit]').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'reschedule session dialog'); document.querySelector('#nameInputValue').value = '2026-07-06 10:00-11:00 변경 세션'; document.querySelector('#nameInputForm').requestSubmit(); await waitFor(() => document.querySelector('#confirmDialog').open, 'session time impact confirm'); document.querySelector('#confirmAction').click(); await waitFor(() => document.querySelector('[data-session-slot]')?.textContent.includes('10:00–11:00'), 'session time changed');
-            document.querySelector('#sessionAddEmptyTime').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'add another session dialog'); document.querySelector('#nameInputValue').value = '2026-07-06 11:00-12:00 추가 세션'; document.querySelector('#nameInputForm').requestSubmit(); await waitFor(() => document.querySelectorAll('[data-session-slot]').length === 2, 'another session added');
+            document.querySelector('#sessionAddEmptyTime').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'add another session dialog'); assert(document.querySelector('#nameInputValue').value.includes('09:00-10:30'), 'new session default uses the project duration'); document.querySelector('#nameInputValue').value = '2026-07-06 11:00-12:00 추가 세션'; document.querySelector('#nameInputForm').requestSubmit(); await waitFor(() => document.querySelectorAll('[data-session-slot]').length === 2, 'another session added');
             const moveChip = document.querySelector('[data-session-assignment]'); const movedAssignmentId = moveChip.dataset.sessionAssignment; const moveTransfer = new DataTransfer(); moveChip.dispatchEvent(new DragEvent('dragstart', { dataTransfer: moveTransfer, bubbles: true })); const targetSession = document.querySelectorAll('[data-session-slot]')[1]; targetSession.dispatchEvent(new DragEvent('drop', { dataTransfer: moveTransfer, bubbles: true, cancelable: true }));
             await waitFor(() => !document.querySelector('#sessionChangePreview').hidden, 'drag assignment preview'); assert(!document.querySelectorAll('[data-session-slot]')[1]?.querySelector('[data-session-assignment="' + movedAssignmentId + '"]'), 'drag preview does not move assignment'); document.querySelector('#sessionApplyChange').click();
             await waitFor(() => document.querySelectorAll('[data-session-slot]')[1]?.querySelector('[data-session-assignment="' + movedAssignmentId + '"]'), 'assignment moved between sessions');
@@ -1164,6 +1185,11 @@ app.whenReady().then(async () => {
             document.querySelector('[data-workflow-open="layout"]').click();
             await waitFor(() => document.querySelectorAll('#outputPreviewTable tbody tr').length >= 1, 'output preview');
             assert(document.querySelector('#page-layout h1')?.textContent === '일정표 저장·내보내기', 'output page purpose label');
+            const layoutType = document.querySelector('#layoutType'); layoutType.value = 'calendarCoach'; layoutType.dispatchEvent(new Event('change', { bubbles: true }));
+            await waitFor(() => [...document.querySelectorAll('#outputPreviewTable thead th')].some((cell) => cell.textContent === '진행 코치'), 'coach output preview');
+            layoutType.value = 'calendarZoom'; layoutType.dispatchEvent(new Event('change', { bubbles: true }));
+            await waitFor(() => [...document.querySelectorAll('#outputPreviewTable thead th')].some((cell) => cell.textContent === 'Zoom 참가 링크'), 'Zoom output preview');
+            assert([...document.querySelectorAll('#outputPreviewTable thead th')].every((cell) => cell.textContent !== '진행 코치'), 'output choices render materially different columns');
             document.querySelector('[data-nav="modules"]').click();
             await waitFor(() => document.querySelector('#page-modules').classList.contains('active'), 'modules page');
             const zoomBefore = document.querySelector('[data-module-toggle="zoom"]').textContent;

@@ -354,7 +354,8 @@
                 <option value="drive">Google Drive 동기화</option>
               </select>
             </label>
-            <p class="field-help">로그인 토큰은 동기화하지 않고 이 PC의 보안 저장소에만 보관합니다.</p>
+            <label class="form-field">Workspace 전체 동기화 계정<select id="workspaceDriveConnection" aria-label="Workspace 전체를 동기화할 Google Drive 계정"><option value="">Drive 계정 선택</option></select></label>
+            <p class="field-help">선택한 계정에는 모든 프로젝트가 포함된 Workspace 자료가 저장됩니다. 로그인 토큰은 동기화하지 않고 이 PC의 보안 저장소에만 보관합니다.</p>
             <div class="button-row"><button id="pushDriveState" class="primary-button" type="button">현재 자료를 Drive에 저장</button><button id="pullDriveState" class="secondary-button" type="button">Drive 자료를 이 PC로 가져오기</button></div>
             <p id="driveSyncStatus" class="field-help">Google Drive에 연결한 계정이 있어야 사용할 수 있습니다.</p>
           </section>
@@ -445,7 +446,8 @@
           <label class="form-field">최대 참여자<input id="settingsParticipantMax" type="number" min="1" max="999"></label>
         </div>
         <label class="check-row"><input id="settingsCoachRequired" type="checkbox"> 기본적으로 진행 코치 역할을 필수로 사용</label>
-        <label class="check-row"><input id="settingsChangeApproval" type="checkbox"> 외부 Zoom·메일 반영 전 변경 내용 승인</label>
+        <label class="check-row"><input id="settingsChangeApproval" type="checkbox"> Zoom 회의·Gmail 초안을 만들기 전에 최종 확인</label>
+        <p class="field-help">끄면 각 만들기 버튼을 누르는 즉시 외부 계정에 반영합니다.</p>
         <h3 class="settings-subtitle">프로젝트 기본 연결</h3>
         <div id="defaultConnectionSelectors" class="form-grid two"></div>
       </div>

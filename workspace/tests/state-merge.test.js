@@ -168,6 +168,7 @@ assert.equal(artifactPipelineOverlaid.data.externalArtifacts[0].status, 'superse
 assert.equal(artifactPipelineOverlaid.data.externalArtifacts[0].replacedAt, '2026-01-01T00:00:14Z');
 
 const pulledFromOtherComputer = {
+  preferences: { storageMode: 'drive', workspaceDriveConnectionId: 'remote-drive' },
   connections: [
     { id: 'remote-drive', type: 'drive', status: 'connected', account: 'remote@example.com' },
     { id: 'remote-gmail', type: 'gmail', status: 'connected', account: 'local@example.com' },
@@ -194,6 +195,7 @@ const pulledFromOtherComputer = {
   quickWorkspaces: { gmailFlow: { id: 'quick-gmailFlow', settings: { defaultConnectionIds: { gmail: 'remote-gmail' } } } }
 };
 const localConnectionContext = {
+  preferences: { storageMode: 'drive', workspaceDriveConnectionId: 'local-drive' },
   connections: [
     { id: 'local-drive', type: 'drive', status: 'connected', account: 'local@example.com' },
     { id: 'local-gmail', type: 'gmail', status: 'connected', account: 'local@example.com' },
@@ -206,6 +208,7 @@ const localConnectionContext = {
 const pulledWithLocalConnections = preserveLocalConnectionContext(pulledFromOtherComputer, localConnectionContext);
 assert.deepEqual(pulledWithLocalConnections.connections, localConnectionContext.connections, 'Drive pull must keep this computer\'s authenticated connection records');
 assert.deepEqual(pulledWithLocalConnections.deletedConnectionIds, localConnectionContext.deletedConnectionIds, 'remote connection tombstones must not remove this computer\'s accounts');
+assert.equal(pulledWithLocalConnections.preferences.workspaceDriveConnectionId, 'local-drive', 'an unmatched remote Workspace Drive choice must preserve this computer\'s explicit global sync account');
 assert.equal(pulledWithLocalConnections.projects[0].settings.defaultConnectionIds.drive, null, 'an unmatched pulled default must require explicit account selection instead of silently using another local account');
 assert.equal(pulledWithLocalConnections.projects[0].settings.defaultConnectionIds.gmail, 'local-gmail', 'a pulled default account must win when the same account is available under this computer\'s id');
 assert.equal(pulledWithLocalConnections.quickWorkspaces.gmailFlow.settings.defaultConnectionIds.gmail, 'local-gmail');

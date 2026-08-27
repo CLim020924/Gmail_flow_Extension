@@ -258,6 +258,38 @@ const project = { data: { people, roles, slots, assignments: generated.assignmen
 assert.match(Ops.scheduleToCsv(project), /날짜,시작,종료/);
 assert.match(Ops.scheduleToExcelXml(project), /<Workbook/);
 
+const outputProject = {
+  settings: { changeApprovalRequired: true },
+  data: {
+    layout: { type: 'list' },
+    people: [...people, { id: 'coach-person', name: '김코치', active: true }],
+    roles: [...roles, { id: 'coach', name: '진행 코치', active: true }],
+    slots: [{ id: 'output-slot', date: '2026-07-09', startTime: '13:00', endTime: '14:30', label: '출력 세션', status: 'confirmed' }],
+    assignments: [
+      { id: 'output-participant', slotId: 'output-slot', personId: 'p1', roleId: 'participant' },
+      { id: 'output-coach', slotId: 'output-slot', personId: 'coach-person', roleId: 'coach' }
+    ],
+    externalArtifacts: [{ kind: 'zoom', slotId: 'output-slot', status: 'created', joinUrl: 'https://zoom.example/j/output' }]
+  }
+};
+const listOutput = Ops.scheduleOutputTable(outputProject, 'list');
+const coachOutput = Ops.scheduleOutputTable(outputProject, 'calendarCoach');
+const zoomOutput = Ops.scheduleOutputTable(outputProject, 'calendarZoom');
+assert.deepEqual(listOutput.headers, ['날짜', '시작', '종료', '세션명', '역할', '이름', '상태', 'Zoom 링크']);
+assert.equal(listOutput.rows[0][7], 'https://zoom.example/j/output', 'the full list keeps the existing Zoom link column');
+assert.equal(coachOutput.headers.includes('진행 코치'), true);
+assert.equal(coachOutput.rows[0][4], '김코치');
+assert.equal(coachOutput.rows[0][5], people[0].name);
+assert.equal(zoomOutput.headers.includes('Zoom 참가 링크'), true);
+assert.equal(zoomOutput.rows[0][5], 'https://zoom.example/j/output');
+assert.notEqual(Ops.scheduleToCsv(outputProject, 'calendarCoach'), Ops.scheduleToCsv(outputProject, 'calendarZoom'));
+assert.match(Ops.scheduleToExcelXml(outputProject, 'calendarCoach'), /진행 코치/);
+assert.match(Ops.scheduleToExcelXml(outputProject, 'calendarZoom'), /Zoom 참가 링크/);
+assert.equal(Ops.addMinutesToTime('09:00', 90), '10:30');
+assert.equal(Ops.externalChangeApprovalRequired(outputProject), true);
+outputProject.settings.changeApprovalRequired = false;
+assert.equal(Ops.externalChangeApprovalRequired(outputProject), false);
+
 const mailProject = {
   name: '테스트',
   data: {

@@ -86,6 +86,22 @@ function run() {
   const missingAuthorization = Core.applyConnectionAuthorization(state, 'zoom-1', { connected: true, account: 'late@example.com' });
   assert.equal(missingAuthorization.connection, null, '로그인 기다리는 동안 삭제된 계정을 다시 만들지 않아야 한다');
 
+  let driveResult = Core.addConnection(state, { id: 'drive-1', type: 'drive', label: '회사 Drive', account: 'drive-one@example.com', status: 'connected' });
+  state = driveResult.state;
+  assert.equal(Core.workspaceDriveConnection(state).id, 'drive-1', '연결된 Drive가 하나면 Workspace 전체 동기화 계정으로 자동 사용한다');
+  driveResult = Core.addConnection(state, { id: 'drive-2', type: 'drive', label: '고객 Drive', account: 'drive-two@example.com', status: 'connected' });
+  state = driveResult.state;
+  assert.equal(Core.workspaceDriveConnection(state), null, 'Drive가 여러 개면 첫 계정을 임의로 사용하지 않는다');
+  state.preferences.workspaceDriveConnectionId = 'drive-2';
+  assert.equal(Core.workspaceDriveConnection(state).id, 'drive-2', '명시적으로 선택한 Workspace Drive 계정을 사용한다');
+  state.connections.find((connection) => connection.id === 'drive-2').status = 'needsAuth';
+  assert.equal(Core.workspaceDriveConnection(state), null, '명시적으로 선택한 Drive가 로그아웃되면 다른 계정으로 자동 전환하지 않는다');
+  state.connections.find((connection) => connection.id === 'drive-2').status = 'connected';
+  state.preferences.storageMode = 'drive';
+  state = Core.removeConnection(state, 'drive-2');
+  assert.equal(state.preferences.workspaceDriveConnectionId, null, '선택한 Drive 연결을 삭제하면 전역 동기화 선택도 해제한다');
+  assert.equal(state.preferences.storageMode, 'local', '사용 중인 Workspace Drive 계정을 삭제하면 다른 계정으로 자동 업로드하지 않도록 로컬 저장으로 전환한다');
+
   state = Core.normalizeState(state);
   assert.ok(state.installedExtensions.includes('gmailFlow'));
   assert.equal(state.quickWorkspaces.gmailFlow.id, 'quick-gmailFlow');

@@ -131,6 +131,12 @@ function preserveLocalConnectionContext(pulledState = {}, currentState = {}) {
     const connection = localById.get(connectionId);
     return connection && (!type || connection.type === type) ? connection.id : null;
   };
+  const pulledWorkspaceDriveId = next.preferences?.workspaceDriveConnectionId || null;
+  const localWorkspaceDriveId = currentState.preferences?.workspaceDriveConnectionId || null;
+  const workspaceDriveConnectionId = pulledWorkspaceDriveId
+    ? (resolveLocalConnectionId(pulledWorkspaceDriveId, 'drive') || validLocalConnectionId(localWorkspaceDriveId, 'drive') || null)
+    : (validLocalConnectionId(localWorkspaceDriveId, 'drive') || null);
+  next.preferences = { ...(next.preferences || {}), workspaceDriveConnectionId };
   next.connections = localConnections;
   next.deletedConnectionIds = JSON.parse(JSON.stringify(currentState.deletedConnectionIds || []));
 

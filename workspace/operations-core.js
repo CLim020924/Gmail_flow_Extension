@@ -576,27 +576,88 @@
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 
-  function scheduleRows(project) {
-    const data = project.data;
-    const personMap = new Map(data.people.map((person) => [person.id, person]));
-    const roleMap = new Map(data.roles.map((role) => [role.id, role]));
-    return data.slots.slice().sort((a, b) => slotKey(a).localeCompare(slotKey(b))).flatMap((slot) => {
-      const slotAssignments = data.assignments.filter((assignment) => assignment.slotId === slot.id);
-      if (!slotAssignments.length) return [[slot.date, slot.startTime, slot.endTime, slot.label, '', '', slot.status]];
+  function scheduleStatusLabel(status) {
+    return ({ draft: '편성 중', confirmed: '확정', changed: '변경됨', cancelled: '취소' })[status] || status || '편성 중';
+  }
+
+  function assignmentName(assignment, personMap) {
+    return personMap.get(assignment?.personId)?.name || assignment?.personName || assignment?.personId || '';
+  }
+
+  function isCoachRole(role) {
+    const name = clean(role?.name).toLowerCase().replace(/[\s_.·-]/g, '');
+    return role?.id === 'coach' || name.includes('코치') || name.includes('coach') || name.includes('진행자') || name.includes('강사');
+  }
+
+  function latestCreatedZoomArtifact(data, slotId) {
+    const latest = (data.externalArtifacts || []).slice().reverse().find((artifact) => artifact.kind === 'zoom' && artifact.slotId === slotId && artifact.status !== 'superseded');
+    return latest?.status === 'created' ? latest : null;
+  }
+
+  function scheduleListOutput(project, sortedSlots, personMap, roleMap) {
+    const data = project?.data || {};
+    const columns = data.scheduleSheetInitialized && Array.isArray(data.scheduleSheetColumns) ? data.scheduleSheetColumns : [];
+    if (columns.length) {
+      const rows = sortedSlots.map((slot) => columns.map((column) => {
+        if (column.kind === 'role') return (data.assignments || []).filter((assignment) => assignment.slotId === slot.id && assignment.roleId === column.roleId).map((assignment) => assignmentName(assignment, personMap)).filter(Boolean).join(', ');
+        if (column.kind === 'custom') return data.scheduleCustomValues?.[slot.id]?.[column.id] || '';
+        if (column.key === 'locked') return slot.locked || (data.assignments || []).some((assignment) => assignment.slotId === slot.id && assignment.locked) ? '예' : '';
+        if (column.key === 'status') return scheduleStatusLabel(slot.status);
+        return slot[column.key] || '';
+      }));
+      return { type: 'list', sheetName: '일정 목록', headers: columns.map((column, index) => column.name || `컬럼${index + 1}`), rows };
+    }
+    const rows = sortedSlots.flatMap((slot) => {
+      const slotAssignments = (data.assignments || []).filter((assignment) => assignment.slotId === slot.id);
+      const zoom = latestCreatedZoomArtifact(data, slot.id);
+      if (!slotAssignments.length) return [[slot.date, slot.startTime, slot.endTime, slot.label || '', '', '', scheduleStatusLabel(slot.status), zoom?.joinUrl || '']];
       return slotAssignments.map((assignment) => [
         slot.date,
         slot.startTime,
         slot.endTime,
-        slot.label,
-        roleMap.get(assignment.roleId)?.name || assignment.roleId,
-        personMap.get(assignment.personId)?.name || assignment.personName || assignment.personId,
-        slot.status
+        slot.label || '',
+        roleMap.get(assignment.roleId)?.name || assignment.roleName || assignment.roleId || '',
+        assignmentName(assignment, personMap),
+        scheduleStatusLabel(slot.status),
+        zoom?.joinUrl || ''
       ]);
     });
+    return { type: 'list', sheetName: '일정 목록', headers: ['날짜', '시작', '종료', '세션명', '역할', '이름', '상태', 'Zoom 링크'], rows };
   }
 
-  function scheduleToCsv(project) {
-    const rows = [['날짜', '시작', '종료', '세션명', '역할', '이름', '상태'], ...scheduleRows(project)];
+  function scheduleOutputTable(project, requestedType = project?.data?.layout?.type || 'list') {
+    const data = project?.data || {};
+    const type = ['list', 'calendarCoach', 'calendarZoom'].includes(requestedType) ? requestedType : 'list';
+    const people = Array.isArray(data.people) ? data.people : [];
+    const roles = Array.isArray(data.roles) ? data.roles : [];
+    const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+    const sortedSlots = (Array.isArray(data.slots) ? data.slots : []).slice().sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
+    const personMap = new Map(people.map((person) => [person.id, person]));
+    const roleMap = new Map(roles.map((role) => [role.id, role]));
+    if (type === 'list') return scheduleListOutput(project, sortedSlots, personMap, roleMap);
+
+    const coachRoleIds = new Set(roles.filter(isCoachRole).map((role) => role.id));
+    if (type === 'calendarCoach') {
+      const rows = sortedSlots.map((slot) => {
+        const slotAssignments = assignments.filter((assignment) => assignment.slotId === slot.id);
+        const coaches = slotAssignments.filter((assignment) => coachRoleIds.has(assignment.roleId)).map((assignment) => assignmentName(assignment, personMap)).filter(Boolean);
+        const participants = slotAssignments.filter((assignment) => !coachRoleIds.has(assignment.roleId)).map((assignment) => assignmentName(assignment, personMap)).filter(Boolean);
+        return [slot.date, slot.startTime, slot.endTime, slot.label || '', coaches.join(', '), participants.join(', '), scheduleStatusLabel(slot.status)];
+      });
+      return { type, sheetName: '날짜별 일정 · 코치', headers: ['날짜', '시작', '종료', '세션명', '진행 코치', '배정 인원', '상태'], rows };
+    }
+
+    const rows = sortedSlots.map((slot) => {
+      const names = assignments.filter((assignment) => assignment.slotId === slot.id).map((assignment) => assignmentName(assignment, personMap)).filter(Boolean);
+      const zoom = latestCreatedZoomArtifact(data, slot.id);
+      return [slot.date, slot.startTime, slot.endTime, slot.label || '', names.join(', '), zoom?.joinUrl || '', scheduleStatusLabel(slot.status)];
+    });
+    return { type, sheetName: '날짜별 일정 · Zoom', headers: ['날짜', '시작', '종료', '세션명', '배정 인원', 'Zoom 참가 링크', '상태'], rows };
+  }
+
+  function scheduleToCsv(project, requestedType) {
+    const output = scheduleOutputTable(project, requestedType);
+    const rows = [output.headers, ...output.rows];
     return `\ufeff${rows.map((row) => row.map(escapeCsv).join(',')).join('\r\n')}`;
   }
 
@@ -604,10 +665,23 @@
     return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  function scheduleToExcelXml(project) {
-    const rows = [['날짜', '시작', '종료', '세션명', '역할', '이름', '상태'], ...scheduleRows(project)];
+  function scheduleToExcelXml(project, requestedType) {
+    const output = scheduleOutputTable(project, requestedType);
+    const rows = [output.headers, ...output.rows];
     const body = rows.map((row, index) => `<Row>${row.map((value) => `<Cell${index === 0 ? ' ss:StyleID="Header"' : ''}><Data ss:Type="String">${escapeXml(value)}</Data></Cell>`).join('')}</Row>`).join('');
-    return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Header"><Font ss:Bold="1"/><Interior ss:Color="#DCE6F1" ss:Pattern="Solid"/></Style></Styles><Worksheet ss:Name="일정"><Table>${body}</Table></Worksheet></Workbook>`;
+    return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Header"><Font ss:Bold="1"/><Interior ss:Color="#DCE6F1" ss:Pattern="Solid"/></Style></Styles><Worksheet ss:Name="${escapeXml(output.sheetName)}"><Table>${body}</Table></Worksheet></Workbook>`;
+  }
+
+  function addMinutesToTime(time, durationMinutes) {
+    const start = timeToMinutes(time);
+    const duration = Math.max(1, Number(durationMinutes) || 60);
+    if (start == null) return '';
+    const end = Math.min((23 * 60) + 59, start + duration);
+    return `${String(Math.floor(end / 60)).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`;
+  }
+
+  function externalChangeApprovalRequired(project) {
+    return project?.settings?.changeApprovalRequired !== false;
   }
 
   function buildGoogleFormDefinition(project, type = 'availability') {
@@ -734,8 +808,11 @@
     collectScheduleConflicts,
     diffScheduleDependencies,
     planScheduleChange,
+    scheduleOutputTable,
     scheduleToCsv,
     scheduleToExcelXml,
+    addMinutesToTime,
+    externalChangeApprovalRequired,
     buildGoogleFormDefinition,
     googleFormsApiRequests,
     externalOperationFingerprint,

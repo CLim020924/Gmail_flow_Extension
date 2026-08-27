@@ -49,37 +49,11 @@ async function exportProjectWorkbook(filePath, project) {
   workbook.creator = 'CMOE Workspace';
   workbook.created = new Date();
 
-  const schedule = workbook.addWorksheet('일정 목록', { views: [{ state: 'frozen', ySplit: 1 }] });
-  const personMap = new Map(project.data.people.map((person) => [person.id, person]));
-  const roleMap = new Map(project.data.roles.map((role) => [role.id, role]));
-  const sheetColumns = project.data.scheduleSheetInitialized && Array.isArray(project.data.scheduleSheetColumns) ? project.data.scheduleSheetColumns : [];
-  if (sheetColumns.length) {
-    schedule.columns = sheetColumns.map((column, index) => ({ header: column.name || `컬럼${index + 1}`, key: column.id, width: Math.max(12, Math.min(36, String(column.name || '').length + 8)) }));
-    project.data.slots.forEach((slot) => {
-      const row = {};
-      sheetColumns.forEach((column) => {
-        if (column.kind === 'role') row[column.id] = project.data.assignments.filter((item) => item.slotId === slot.id && item.roleId === column.roleId).map((item) => personMap.get(item.personId)?.name || item.personName || '').filter(Boolean).join(', ');
-        else if (column.kind === 'custom') row[column.id] = project.data.scheduleCustomValues?.[slot.id]?.[column.id] || '';
-        else if (column.key === 'startTime') row[column.id] = slot.startTime || '';
-        else if (column.key === 'endTime') row[column.id] = slot.endTime || '';
-        else if (column.key === 'locked') row[column.id] = slot.locked ? '예' : '';
-        else if (column.key === 'status') row[column.id] = ({ draft: '편성 중', confirmed: '확정', changed: '변경됨', cancelled: '취소' })[slot.status] || slot.status || '';
-        else row[column.id] = slot[column.key] || '';
-      });
-      schedule.addRow(row);
-    });
-    schedule.autoFilter = `A1:${schedule.getColumn(schedule.columnCount).letter}1`;
-  } else {
-    schedule.columns = [
-      { header: '날짜', key: 'date', width: 14 }, { header: '시작', key: 'start', width: 10 }, { header: '종료', key: 'end', width: 10 }, { header: '세션명', key: 'label', width: 24 },
-      { header: '역할', key: 'role', width: 16 }, { header: '이름', key: 'person', width: 18 }, { header: '상태', key: 'status', width: 12 }, { header: 'Zoom 링크', key: 'zoom', width: 42 }
-    ];
-    project.data.slots.slice().sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`)).forEach((slot) => {
-      const assignments = project.data.assignments.filter((assignment) => assignment.slotId === slot.id); const zoom = project.data.externalArtifacts.find((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created');
-      (assignments.length ? assignments : [null]).forEach((assignment) => schedule.addRow({ date: slot.date, start: slot.startTime, end: slot.endTime, label: slot.label || '', role: assignment ? roleMap.get(assignment.roleId)?.name || assignment.roleId : '', person: assignment ? personMap.get(assignment.personId)?.name || assignment.personName || assignment.personId : '', status: slot.status, zoom: zoom?.joinUrl || '' }));
-    });
-    schedule.autoFilter = 'A1:H1';
-  }
+  const output = Ops.scheduleOutputTable(project);
+  const schedule = workbook.addWorksheet(output.sheetName.slice(0, 31), { views: [{ state: 'frozen', ySplit: 1 }] });
+  schedule.columns = output.headers.map((header, index) => ({ header, key: `column-${index}`, width: Math.max(12, Math.min(header.includes('링크') ? 48 : 36, String(header || '').length + (header.includes('링크') ? 34 : 8))) }));
+  output.rows.forEach((values) => schedule.addRow(Object.fromEntries(values.map((value, index) => [`column-${index}`, value]))));
+  if (schedule.columnCount) schedule.autoFilter = `A1:${schedule.getColumn(schedule.columnCount).letter}1`;
   styleHeader(schedule.getRow(1));
   schedule.eachRow((row, rowNumber) => {
     if (rowNumber > 1) {
