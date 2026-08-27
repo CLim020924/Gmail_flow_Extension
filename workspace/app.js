@@ -40,6 +40,10 @@
   let mailEditorDirty = false;
   let mailEditorProjectId = null;
   let mailDraftTimer = null;
+  let rosterFormulaPersistTimer = null;
+  let rosterFormulaDraft = null;
+  let arrangementPersistTimer = null;
+  const arrangementDrafts = new Map();
   let rosterSelection = null;
   let rosterSelecting = false;
   let arrangementSelection = null;
@@ -829,7 +833,7 @@
     const id = `column-${Date.now().toString(36)}-${project.data.columns.length}`;
     project.data.columns.push({ id, name: `컬럼${project.data.columns.length + 1}`, type: 'text' });
     project.data.people.forEach((person) => { person.values[id] = ''; });
-    renderPeoplePage();
+    return id;
   }
 
   function createProjectRole(project, name) {
@@ -853,6 +857,45 @@
       }
     }
     syncPersonDerivedFields(project);
+    return true;
+  }
+
+  function rosterFormulaPoint(project, draft = rosterFormulaDraft) {
+    if (!project || !draft) return null;
+    const column = project.data.columns.find((item) => item.id === draft.columnId);
+    if (!column) return null;
+    const columnIndex = project.data.columns.indexOf(column);
+    if (draft.row === 0) return { row: 0, col: columnIndex };
+    if (draft.personId) {
+      const personIndex = project.data.people.findIndex((person) => person.id === draft.personId);
+      if (personIndex >= 0) return { row: personIndex + 1, col: columnIndex };
+    }
+    return { row: draft.row, col: columnIndex };
+  }
+
+  function queueRosterFormulaPersist(project, point, value) {
+    const person = point.row > 0 ? project.data.people[point.row - 1] : null;
+    rosterFormulaDraft = {
+      projectId: project.id,
+      row: point.row,
+      columnId: project.data.columns[point.col]?.id || '',
+      personId: person?.id || null,
+      value: String(value ?? '')
+    };
+    persistDirty = true;
+    clearTimeout(rosterFormulaPersistTimer);
+    rosterFormulaPersistTimer = setTimeout(() => void flushRosterFormulaPersist().catch(() => {}), 450);
+  }
+
+  async function flushRosterFormulaPersist({ render = false } = {}) {
+    clearTimeout(rosterFormulaPersistTimer); rosterFormulaPersistTimer = null;
+    const draft = rosterFormulaDraft; rosterFormulaDraft = null;
+    if (!draft) return false;
+    const project = projectById(draft.projectId); const point = rosterFormulaPoint(project, draft);
+    if (!project || !point || !setSheetCellValue(project, point.row, point.col, draft.value)) return false;
+    markRosterDependenciesStale(project);
+    await persist('셀 편집 저장됨');
+    if (render && currentPage === 'people' && activeProject()?.id === project.id) renderPeoplePage();
     return true;
   }
 
@@ -1033,6 +1076,35 @@
     item.updatedAt = new Date().toISOString();
   }
 
+  function queueArrangementPersist(project, item, row, column, value) {
+    const definition = item.columns[column]; if (!project || !definition) return;
+    const rowId = row >= 0 ? item.rows[row]?.id || null : null;
+    const key = [project.id, item.id, rowId || `row:${row}`, definition.id].join('|');
+    arrangementDrafts.set(key, { projectId: project.id, itemId: item.id, row, rowId, columnId: definition.id, value: String(value ?? '') });
+    persistDirty = true;
+    clearTimeout(arrangementPersistTimer);
+    arrangementPersistTimer = setTimeout(() => void flushArrangementPersist().catch(() => {}), 450);
+  }
+
+  async function flushArrangementPersist({ render = false } = {}) {
+    clearTimeout(arrangementPersistTimer); arrangementPersistTimer = null;
+    if (!arrangementDrafts.size) return false;
+    const drafts = [...arrangementDrafts.values()]; arrangementDrafts.clear();
+    const changedProjects = new Set();
+    drafts.forEach((draft) => {
+      const project = projectById(draft.projectId); const item = project?.data.workItems.find((candidate) => candidate.id === draft.itemId); if (!project || !item) return;
+      const columnIndex = item.columns.findIndex((column) => column.id === draft.columnId); if (columnIndex < 0) return;
+      let rowIndex = draft.row;
+      if (draft.rowId) { const resolved = item.rows.findIndex((row) => row.id === draft.rowId); if (resolved >= 0) rowIndex = resolved; }
+      setArrangementCellValue(item, rowIndex, columnIndex, draft.value); changedProjects.add(project.id);
+    });
+    if (!changedProjects.size) return false;
+    changedProjects.forEach((projectId) => { const project = projectById(projectId); if (project) state = Core.updateProject(state, projectId, { data: project.data }); });
+    await persist('명단 작업표 편집됨');
+    if (render && currentPage === 'arrange') renderArrangementPage();
+    return true;
+  }
+
   function shuffled(items) {
     const next = items.slice();
     for (let index = next.length - 1; index > 0; index -= 1) { const random = crypto.getRandomValues(new Uint32Array(1))[0] % (index + 1); [next[index], next[random]] = [next[random], next[index]]; }
@@ -1184,21 +1256,44 @@
     table.append(body); container.replaceChildren(table);
   }
 
-  function scheduleSheetColumns(project) {
-    if (!project.data.scheduleSheetInitialized) {
-      project.data.scheduleSheetColumns = [
-        { id: 'schedule-date', key: 'date', name: '날짜', kind: 'system', roleId: null },
-        { id: 'schedule-start', key: 'startTime', name: '시작', kind: 'system', roleId: null },
-        { id: 'schedule-end', key: 'endTime', name: '종료', kind: 'system', roleId: null },
-        { id: 'schedule-label', key: 'label', name: '세션명', kind: 'system', roleId: null },
-        ...project.data.roles.filter((role) => role.active).map((role) => ({ id: `schedule-role-${role.id}`, key: `role:${role.id}`, name: role.name, kind: 'role', roleId: role.id })),
-        { id: 'schedule-status', key: 'status', name: '상태', kind: 'system', roleId: null },
-        { id: 'schedule-locked', key: 'locked', name: '잠금', kind: 'system', roleId: null }
-      ];
-      project.data.scheduleCustomValues ||= {}; project.data.scheduleSheetInitialized = true;
+  function defaultScheduleSheetColumns(project) {
+    return [
+      { id: 'schedule-date', key: 'date', name: '날짜', kind: 'system', roleId: null },
+      { id: 'schedule-start', key: 'startTime', name: '시작', kind: 'system', roleId: null },
+      { id: 'schedule-end', key: 'endTime', name: '종료', kind: 'system', roleId: null },
+      { id: 'schedule-label', key: 'label', name: '세션명', kind: 'system', roleId: null },
+      ...project.data.roles.filter((role) => role.active).map((role) => ({ id: `schedule-role-${role.id}`, key: `role:${role.id}`, name: role.name, kind: 'role', roleId: role.id })),
+      { id: 'schedule-status', key: 'status', name: '상태', kind: 'system', roleId: null },
+      { id: 'schedule-locked', key: 'locked', name: '잠금', kind: 'system', roleId: null }
+    ];
+  }
+
+  function ensureScheduleSheetInitialized(project) {
+    if (!project || project.data.scheduleSheetInitialized) {
+      if (project) { project.data.scheduleSheetColumns ||= []; project.data.scheduleCustomValues ||= {}; }
+      return false;
     }
-    project.data.scheduleSheetColumns ||= []; project.data.scheduleCustomValues ||= {};
-    return project.data.scheduleSheetColumns.map((column) => ({ ...column, label: column.name, role: column.roleId ? project.data.roles.find((role) => role.id === column.roleId) : null }));
+    project.data.scheduleSheetColumns = defaultScheduleSheetColumns(project);
+    project.data.scheduleCustomValues ||= {};
+    project.data.scheduleSheetInitialized = true;
+    return true;
+  }
+
+  async function persistScheduleSheetInitialization(project, message = '일정표 기본 컬럼 준비됨') {
+    if (!project || !ensureScheduleSheetInitialized(project)) return project;
+    const projectId = project.id;
+    refreshScheduleConflicts(project);
+    state = Core.updateProject(state, projectId, { data: project.data });
+    recordScheduleMergeImpact(projectId);
+    await persist(message, { scheduleProjectId: projectId });
+    return projectById(projectId);
+  }
+
+  function scheduleSheetColumns(project) {
+    const columns = project.data.scheduleSheetInitialized && Array.isArray(project.data.scheduleSheetColumns)
+      ? project.data.scheduleSheetColumns
+      : defaultScheduleSheetColumns(project);
+    return columns.map((column) => ({ ...column, label: column.name, role: column.roleId ? project.data.roles.find((role) => role.id === column.roleId) : null }));
   }
 
   function scheduleCellValue(project, rowIndex, columnIndex) {
@@ -1242,6 +1337,7 @@
   }
 
   function setScheduleCellValue(project, rowIndex, columnIndex, value, { lockedSlotIds = null } = {}) {
+    ensureScheduleSheetInitialized(project);
     const column = scheduleSheetColumns(project)[columnIndex]; if (!column) return false;
     const text = String(value ?? '').trim();
     let slot = project.data.slots[rowIndex]; if (!slot && !text) return true; if (!slot) slot = ensureScheduleRow(project, rowIndex);
@@ -1447,6 +1543,7 @@
     const project = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId);
     if (!project) return null;
     const impact = applyScheduleMutationImpact(project, baseline);
+    refreshScheduleConflicts(project);
     syncScheduleProjectState(project, `직접 편집 · 문제 ${project.data.conflicts.length}건`, impact);
     return { message, projectId, generation: scheduleEditGeneration };
   }
@@ -1471,9 +1568,11 @@
 
   function queueSchedulePersist(project, message = '일정 셀 편집 저장됨', beforeSnapshot = null) {
     if (schedulePersistProjectId && schedulePersistProjectId !== project.id) void flushSchedulePersist();
+    ensureScheduleSheetInitialized(project);
     if (!schedulePersistBaseline) schedulePersistBaseline = beforeSnapshot || scheduleSnapshot(project);
     persistDirty = true;
     schedulePersistProjectId = project.id; schedulePersistMessage = message;
+    state = Core.updateProject(state, project.id, { data: project.data });
     clearTimeout(schedulePersistTimer); schedulePersistTimer = setTimeout(() => void flushSchedulePersist(), 450);
   }
 
@@ -1986,6 +2085,8 @@
   function applyScheduleColumnName(project, column, value) {
     const cleanName = String(value || '').trim().replace(/[{}]/g, '');
     if (!project || !column || !cleanName) return false;
+    ensureScheduleSheetInitialized(project);
+    column = project.data.scheduleSheetColumns.find((item) => item.id === column.id) || column;
     const before = `${column.name}|${column.key}|${column.kind}|${column.roleId || ''}`;
     column.name = cleanName;
     if (column.kind === 'custom') {
@@ -2038,6 +2139,7 @@
     pushScheduleHistory(project);
     if (mode === 'replace') { project.data.slots = []; project.data.assignments = []; project.data.conflicts = []; project.data.scheduleCustomValues = {}; project.data.scheduleSheetColumns = importedColumns; project.data.scheduleSheetInitialized = true; }
     else {
+      ensureScheduleSheetInitialized(project);
       const current = scheduleSheetColumns(project); importedColumns.forEach((column) => { if (!current.some((item) => item.key === column.key || item.name.toLowerCase() === column.name.toLowerCase())) project.data.scheduleSheetColumns.push(column); });
     }
     const rows = (hasHeader ? matrix.slice(1) : matrix).filter((row) => row.some((value) => String(value || '').trim())); const targetColumns = scheduleSheetColumns(project); const mappedIndexes = importedColumns.map((column) => targetColumns.findIndex((item) => item.key === column.key || item.name.toLowerCase() === column.name.toLowerCase()));
@@ -2052,20 +2154,20 @@
   }
 
   async function addScheduleColumn() {
-    let project = activeProject(); if (!project) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project); const name = await requestName('추가할 일정표 컬럼 이름', `새 컬럼 ${scheduleSheetColumns(project).length + 1}`); if (!name?.trim()) return;
+    let project = activeProject(); if (!project) return; project = await persistScheduleSheetInitialization(project); if (!project) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project); const name = await requestName('추가할 일정표 컬럼 이름', `새 컬럼 ${scheduleSheetColumns(project).length + 1}`); if (!name?.trim()) return;
     project = projectById(projectId); if (!project || scheduleSnapshot(project) !== confirmationSnapshot) { showToast('다른 창의 일정표 변경을 반영했습니다. 컬럼 추가를 다시 시도해주세요.'); renderSchedulePage(); return; }
     pushScheduleHistory(project); const id = `schedule-column-${Date.now().toString(36)}`; const cleanName = name.trim().replace(/[{}]/g, ''); let key = scheduleHeaderKey(cleanName, project); if (project.data.scheduleSheetColumns.some((column) => column.key === key)) key = ''; const roleId = key.startsWith('role:') ? key.slice(5) : null; project.data.scheduleSheetColumns.push({ id, key: key || `custom:${id}`, name: cleanName, kind: roleId ? 'role' : key ? 'system' : 'custom', roleId }); refreshScheduleConflicts(project);
     syncScheduleProjectState(project, `일정 컬럼 추가 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 추가됨'); renderSchedulePage();
   }
 
   async function renameScheduleColumn(columnId) {
-    let project = activeProject(); let column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project); const name = await requestName('일정표 컬럼 이름 변경', column.name); if (!name?.trim()) return;
+    let project = activeProject(); if (!project) return; project = await persistScheduleSheetInitialization(project); let column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project); const name = await requestName('일정표 컬럼 이름 변경', column.name); if (!name?.trim()) return;
     project = projectById(projectId); column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column || scheduleSnapshot(project) !== confirmationSnapshot) { showToast('다른 창의 일정표 변경을 반영했습니다. 컬럼 이름 변경을 다시 시도해주세요.'); renderSchedulePage(); return; }
     pushScheduleHistory(project); applyScheduleColumnName(project, column, name); refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 컬럼 이름 변경 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 이름 변경됨'); renderSchedulePage();
   }
 
   async function removeScheduleColumn(columnId) {
-    let project = activeProject(); let column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project);
+    let project = activeProject(); if (!project) return; project = await persistScheduleSheetInitialization(project); let column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project);
     if (!await showConfirm(`“${column.name}” 컬럼을 표에서 삭제할까요?${column.kind === 'custom' ? ' 이 컬럼의 셀 값도 삭제됩니다.' : ' 연결된 원본 일정 데이터는 유지됩니다.'}`, { title: '일정표 컬럼 삭제', action: '삭제' })) return;
     project = projectById(projectId); column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column || scheduleSnapshot(project) !== confirmationSnapshot) { showToast('다른 창의 일정표 변경을 반영했습니다. 컬럼 삭제를 다시 시도해주세요.'); renderSchedulePage(); return; }
     pushScheduleHistory(project); project.data.scheduleSheetColumns = project.data.scheduleSheetColumns.filter((item) => item.id !== columnId);
@@ -2838,6 +2940,17 @@
   async function persistScheduleData(message = '일정 설정을 저장했습니다.') {
     await flushSchedulePersist(); const project = activeProject(); if (!project) return;
     syncRoleInputs(project);
+    if (project.data.scheduleSheetInitialized) {
+      project.data.scheduleSheetColumns.forEach((column) => {
+        if (!column.roleId) return;
+        const role = project.data.roles.find((item) => item.id === column.roleId);
+        if (role) column.name = role.name;
+      });
+    }
+    project.data.assignments.forEach((assignment) => {
+      const role = project.data.roles.find((item) => item.id === assignment.roleId);
+      if (role) assignment.roleName = role.name;
+    });
     project.data.scheduleRules = {
       ...project.data.scheduleRules,
       avoidRepeatPairing: $('#ruleAvoidRepeat').checked,
@@ -3011,16 +3124,16 @@
     });
     $('#rosterCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !rosterSelection) return; const point = rosterSelection.focus;
-      setSheetCellValue(project, point.row, point.col, event.target.value);
+      if (!setSheetCellValue(project, point.row, point.col, event.target.value)) return;
+      queueRosterFormulaPersist(project, point, event.target.value);
       const cellInput = $(`[data-sheet-row="${point.row}"][data-sheet-col="${point.col}"] input`, rosterTable); if (cellInput) cellInput.value = event.target.value;
     });
-    $('#rosterCellValue').addEventListener('change', async () => {
-      const project = activeProject(); if (!project || !rosterSelection) return;
-      markRosterDependenciesStale(project); await persist('셀 편집 저장됨'); renderPeoplePage();
-    });
-    rosterTable.addEventListener('click', (event) => {
+    $('#rosterCellValue').addEventListener('change', async () => { await flushRosterFormulaPersist({ render: true }); });
+    rosterTable.addEventListener('click', async (event) => {
       const project = activeProject(); if (!project) return;
-      if (event.target.closest('[data-empty-sheet-add-column], [data-roster-add-column]')) addRosterColumn(project);
+      if (event.target.closest('[data-empty-sheet-add-column], [data-roster-add-column]')) {
+        addRosterColumn(project); markRosterDependenciesStale(project, '명단 컬럼 추가 후 일정 재검토 필요'); await persist('명단 컬럼 추가됨'); renderPeoplePage();
+      }
     });
     }
 
@@ -3039,8 +3152,8 @@
       if (!arrangementSelecting || !arrangementSelection || !(event.buttons & 1)) return; const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!cell) return; updateArrangementSelection(arrangementSelection.anchor, { row: Number(cell.dataset.arrangementRow), col: Number(cell.dataset.arrangementCol) });
     });
     globalThis.addEventListener('mouseup', () => { arrangementSelecting = false; });
-    arrangementBoard.addEventListener('input', (event) => { if (!event.target.matches('[data-arrangement-input]')) return; const item = activeWorkItem(); const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!item || !cell) return; setArrangementCellValue(item, Number(cell.dataset.arrangementRow), Number(cell.dataset.arrangementCol), event.target.value); $('#arrangementCellValue').value = event.target.value; });
-    arrangementBoard.addEventListener('change', async (event) => { if (!event.target.matches('[data-arrangement-input]')) return; const project = activeProject(); if (!project) return; state = Core.updateProject(state, project.id, { data: project.data }); await persist('명단 작업표 편집됨'); renderArrangementPage(); });
+    arrangementBoard.addEventListener('input', (event) => { if (!event.target.matches('[data-arrangement-input]')) return; const project = activeProject(); const item = activeWorkItem(project); const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!project || !item || !cell) return; const row = Number(cell.dataset.arrangementRow); const col = Number(cell.dataset.arrangementCol); setArrangementCellValue(item, row, col, event.target.value); queueArrangementPersist(project, item, row, col, event.target.value); $('#arrangementCellValue').value = event.target.value; });
+    arrangementBoard.addEventListener('change', async (event) => { if (!event.target.matches('[data-arrangement-input]')) return; await flushArrangementPersist({ render: true }); });
     arrangementBoard.addEventListener('paste', async (event) => {
       if (!arrangementSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!/[\t\r\n]/.test(text)) return; const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return; event.preventDefault(); const start = arrangementSelection.focus; const width = Math.max(...matrix.map((row) => row.length));
       while (item.columns.length < start.col + width) { const id = `work-column-${Date.now().toString(36)}-${item.columns.length}`; item.columns.push({ id, name: `컬럼${item.columns.length + 1}` }); item.rows.forEach((row) => { row.values[id] = ''; }); }
@@ -3048,12 +3161,12 @@
     });
     arrangementBoard.addEventListener('click', async (event) => {
       const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return;
-      if (event.target.closest('[data-arrangement-add-column]')) { const id = `work-column-${Date.now().toString(36)}-${item.columns.length}`; item.columns.push({ id, name: `컬럼${item.columns.length + 1}` }); item.rows.forEach((row) => { row.values[id] = ''; }); state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 추가됨'); renderArrangementPage(); return; }
-      const rename = event.target.closest('[data-arrangement-rename-column]'); if (rename) { const column = item.columns.find((candidate) => candidate.id === rename.dataset.arrangementRenameColumn); const name = await requestName('컬럼 이름', column?.name || '컬럼'); if (!column || !name?.trim()) return; column.name = name.trim(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 이름 변경됨'); renderArrangementPage(); return; }
-      const remove = event.target.closest('[data-arrangement-remove-column]'); if (remove) { if (item.columns.length <= 1) { showToast('작업표에는 컬럼이 하나 이상 있어야 합니다.', 'error'); return; } const column = item.columns.find((candidate) => candidate.id === remove.dataset.arrangementRemoveColumn); if (!await showConfirm(`“${column?.name || '컬럼'}”을 삭제할까요?`, { title: '작업표 컬럼 삭제', action: '삭제' })) return; item.columns = item.columns.filter((candidate) => candidate.id !== column.id); item.rows.forEach((row) => { delete row.values[column.id]; }); arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 삭제됨'); renderArrangementPage(); }
+      if (event.target.closest('[data-arrangement-add-column]')) { const id = `work-column-${Date.now().toString(36)}-${item.columns.length}`; item.columns.push({ id, name: `컬럼${item.columns.length + 1}` }); item.rows.forEach((row) => { row.values[id] = ''; }); item.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 추가됨'); renderArrangementPage(); return; }
+      const rename = event.target.closest('[data-arrangement-rename-column]'); if (rename) { const column = item.columns.find((candidate) => candidate.id === rename.dataset.arrangementRenameColumn); const name = await requestName('컬럼 이름', column?.name || '컬럼'); if (!column || !name?.trim()) return; column.name = name.trim(); item.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 이름 변경됨'); renderArrangementPage(); return; }
+      const remove = event.target.closest('[data-arrangement-remove-column]'); if (remove) { if (item.columns.length <= 1) { showToast('작업표에는 컬럼이 하나 이상 있어야 합니다.', 'error'); return; } const column = item.columns.find((candidate) => candidate.id === remove.dataset.arrangementRemoveColumn); if (!await showConfirm(`“${column?.name || '컬럼'}”을 삭제할까요?`, { title: '작업표 컬럼 삭제', action: '삭제' })) return; item.columns = item.columns.filter((candidate) => candidate.id !== column.id); item.rows.forEach((row) => { delete row.values[column.id]; }); item.updatedAt = new Date().toISOString(); arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 삭제됨'); renderArrangementPage(); }
     });
-    $('#arrangementCellValue').addEventListener('input', (event) => { const item = activeWorkItem(); if (!item || !arrangementSelection) return; setArrangementCellValue(item, arrangementSelection.focus.row, arrangementSelection.focus.col, event.target.value); const input = $(`[data-arrangement-row="${arrangementSelection.focus.row}"][data-arrangement-col="${arrangementSelection.focus.col}"] input`, arrangementBoard); if (input) input.value = event.target.value; });
-    $('#arrangementCellValue').addEventListener('change', async () => { const project = activeProject(); if (!project) return; state = Core.updateProject(state, project.id, { data: project.data }); await persist('명단 작업표 편집됨'); renderArrangementPage(); });
+    $('#arrangementCellValue').addEventListener('input', (event) => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item || !arrangementSelection) return; const row = arrangementSelection.focus.row; const col = arrangementSelection.focus.col; setArrangementCellValue(item, row, col, event.target.value); queueArrangementPersist(project, item, row, col, event.target.value); const input = $(`[data-arrangement-row="${row}"][data-arrangement-col="${col}"] input`, arrangementBoard); if (input) input.value = event.target.value; });
+    $('#arrangementCellValue').addEventListener('change', async () => { await flushArrangementPersist({ render: true }); });
 
     const scheduleTable = $('#scheduleBoard');
     scheduleTable.addEventListener('mousedown', (event) => {
@@ -3094,7 +3207,7 @@
       if (!scheduleSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text) return;
       const project = activeProject(); if (!project) return; const matrix = /[\t\r\n]/.test(text) ? Ops.parseDelimited(text) : [[text]]; if (!matrix.length) return; const start = scheduleSelection.focus; const structured = matrix.length > 1 || matrix.some((row) => row.length > 1); if (!structured && shouldUseNativeScheduleClipboard(event)) return; event.preventDefault();
       if (structured && start.row <= 0 && start.col === 0 && (looksLikeScheduleHeader(matrix) || !project.data.slots.length)) { await importScheduleMatrix(matrix, 'replace'); return; }
-      const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length)); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => scheduleRowLocked(project, slot.id)).map((slot) => slot.id));
+      const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); ensureScheduleSheetInitialized(project); pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length)); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => scheduleRowLocked(project, slot.id)).map((slot) => slot.id));
       while (scheduleSheetColumns(project).length < start.col + width) { const index = project.data.scheduleSheetColumns.length; const id = `schedule-column-${Date.now().toString(36)}-${index}`; project.data.scheduleSheetColumns.push({ id, key: `custom:${id}`, name: `컬럼${index + 1}`, kind: 'custom', roleId: null }); }
       matrix.forEach((row, rowOffset) => row.map((value, colOffset) => ({ value, targetColumn: start.col + colOffset })).sort((left, right) => Number(scheduleSheetColumns(project)[left.targetColumn]?.key === 'locked') - Number(scheduleSheetColumns(project)[right.targetColumn]?.key === 'locked')).forEach(({ value, targetColumn }) => { const targetRow = start.row + rowOffset; if (targetRow === -1) applyScheduleColumnName(project, project.data.scheduleSheetColumns[targetColumn], value); else if (!setScheduleCellValue(project, targetRow, targetColumn, value, { lockedSlotIds })) lockedCells += 1; }));
       const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `셀 붙여넣기 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage();
@@ -3134,7 +3247,7 @@
     });
     $('#scheduleCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !scheduleSelection) return;
-      const rowIndex = Number(event.target.dataset.scheduleEditRow ?? scheduleSelection.focus.row); const columnIndex = Number(event.target.dataset.scheduleEditCol ?? scheduleSelection.focus.col); const column = scheduleSheetColumns(project)[columnIndex]; const slot = rowIndex >= 0 ? project.data.slots[rowIndex] : null; event.target.dataset.scheduleEditValue = event.target.value;
+      const rowIndex = Number(event.target.dataset.scheduleEditRow ?? scheduleSelection.focus.row); const columnIndex = Number(event.target.dataset.scheduleEditCol ?? scheduleSelection.focus.col); ensureScheduleSheetInitialized(project); const column = scheduleSheetColumns(project)[columnIndex]; const slot = rowIndex >= 0 ? project.data.slots[rowIndex] : null; event.target.dataset.scheduleEditValue = event.target.value;
       if (slot && scheduleRowLocked(project, slot.id) && column?.key !== 'locked') { event.target.value = scheduleCellValue(project, rowIndex, columnIndex); showToast('잠긴 일정은 잠금 셀을 먼저 해제한 뒤 편집해주세요.', 'error'); return; }
       const beforeSnapshot = event.target.dataset.scheduleImpactBefore || scheduleSnapshot(project); event.target.dataset.scheduleImpactBefore = beforeSnapshot;
       if (!event.target.dataset.scheduleEditing) { pushScheduleHistorySnapshot(beforeSnapshot); event.target.dataset.scheduleEditing = 'true'; }
@@ -3540,10 +3653,10 @@
     $('#arrangementDelete').addEventListener('click', async () => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; if (!await showConfirm(`“${item.name}” 작업표를 삭제할까요? 원본 명단은 삭제되지 않습니다.`, { title: '명단 작업 삭제', action: '삭제' })) return; project.data.workItems = project.data.workItems.filter((candidate) => candidate.id !== item.id); project.data.activeWorkItemId = project.data.workItems.at(-1)?.id || null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('명단 작업 삭제됨'); if (project.data.activeWorkItemId) renderArrangementPage(); else navigate('people'); });
     $('#arrangementImportExcel').addEventListener('click', async () => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item || !globalThis.workspaceDesktop?.chooseSpreadsheet) return; try { const result = await globalThis.workspaceDesktop.chooseSpreadsheet(); if (result.canceled || !result.matrix?.length) return; if (!await showConfirm('Excel의 첫 행을 컬럼 이름으로 사용하여 현재 작업표를 교체할까요? 원본 명단은 바뀌지 않습니다.', { title: '작업표 Excel 불러오기', action: '교체', danger: false })) return; const width = Math.max(...result.matrix.map((row) => row.length)); item.columns = Array.from({ length: width }, (_, index) => ({ id: `work-column-${Date.now().toString(36)}-${index}`, name: String(result.matrix[0]?.[index] || `컬럼${index + 1}`) })); item.rows = result.matrix.slice(1).filter((row) => row.some((value) => String(value || '').trim())).map((row, rowIndex) => ({ id: `work-row-${Date.now().toString(36)}-${rowIndex}`, personId: null, values: Object.fromEntries(item.columns.map((column, index) => [column.id, String(row[index] ?? '')])) })); item.updatedAt = new Date().toISOString(); arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('Excel 작업표 불러옴'); renderArrangementPage(); } catch (error) { showToast(`Excel을 불러오지 못했습니다: ${error.message}`, 'error'); } });
     $('#arrangementDownloadCsv').addEventListener('click', async () => { const item = activeWorkItem(); if (!item) return; if (globalThis.workspaceDesktop?.exportWorkItem) { try { const result = await globalThis.workspaceDesktop.exportWorkItem(item); if (!result.canceled) showToast('작업표를 Excel로 저장했습니다.', 'success'); } catch (error) { showToast(`Excel을 저장하지 못했습니다: ${error.message}`, 'error'); } return; } const rows = [item.columns.map((column) => column.name), ...item.rows.map((row) => item.columns.map((column) => row.values[column.id] || ''))]; const csv = rows.map((row) => row.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n'); downloadText(`${item.name}.csv`, `\ufeff${csv}`, 'text/csv;charset=utf-8'); });
-    $('#addRoleButton').addEventListener('click', () => {
+    $('#addRoleButton').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
       createProjectRole(project, `새 역할 ${project.data.roles.length + 1}`);
-      renderSchedulePage();
+      refreshScheduleConflicts(project); syncScheduleProjectState(project, `역할 추가 · 문제 ${project.data.conflicts.length}건`); await persist('일정 역할 추가됨'); renderSchedulePage();
     });
     $('#addSlotsButton').addEventListener('click', async () => {
       await flushSchedulePersist(); const project = activeProject(); if (!project) return;
@@ -3977,6 +4090,7 @@
         const used = project.data.people.some((person) => person.roleIds.includes(roleRemove.dataset.roleRemove)) || project.data.assignments.some((assignment) => assignment.roleId === roleRemove.dataset.roleRemove);
         if (used) { showToast('명단이나 일정에서 사용 중인 역할은 삭제할 수 없습니다.', 'error'); return; }
         project.data.roles = project.data.roles.filter((role) => role.id !== roleRemove.dataset.roleRemove);
+        if (project.data.scheduleSheetInitialized) project.data.scheduleSheetColumns = project.data.scheduleSheetColumns.filter((column) => column.roleId !== roleRemove.dataset.roleRemove);
         state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); return;
       }
       const slotRemove = event.target.closest('[data-slot-remove]');
@@ -4254,6 +4368,8 @@
   globalThis.flushWorkspaceEdits = async () => {
     clearTimeout(mailDraftTimer);
     await commitFocusedWorkspaceDraft();
+    await flushRosterFormulaPersist();
+    await flushArrangementPersist();
     await waitForExternalOperations();
     try { await flushSchedulePersist(); } catch (_) {}
     if (mailEditorDirty) await saveMailEditorDraft();
