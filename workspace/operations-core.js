@@ -268,6 +268,7 @@
     }
 
     for (const slot of orderedSlots) {
+      if (slot.locked) continue;
       for (const role of orderedRoles) {
         const existingCount = assignments.filter((assignment) => assignment.slotId === slot.id && assignment.roleId === role.id).length;
         const maximum = Math.max(Number(role.maxPerSession) || 0, Number(role.minPerSession) || 0);
@@ -654,6 +655,39 @@
     return requests;
   }
 
+  function externalOperationFingerprint(project, kind, connections = []) {
+    const data = project?.data || {};
+    const sorted = (items) => items.slice().sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    const lifecycle = [project?.status || '', sorted(project?.installedModules || [])];
+    const schedule = {
+      slots: sorted((data.slots || []).map((slot) => [slot.id, slot.date, slot.startTime, slot.endTime, slot.label, slot.status, Boolean(slot.locked)])),
+      assignments: sorted((data.assignments || []).map((assignment) => [assignment.id, assignment.slotId, assignment.personId, assignment.roleId, Boolean(assignment.locked)])),
+      people: sorted((data.people || []).map((person) => [person.id, person.name, person.email, person.phone, person.active !== false, sorted(Object.entries(person.values || {}))])),
+      roles: sorted((data.roles || []).map((role) => [role.id, role.name, role.active !== false]))
+    };
+    const artifacts = sorted((data.externalArtifacts || []).filter((artifact) => artifact.kind === kind).map((artifact) => [artifact.externalId || '', artifact.slotId || '', artifact.personId || '', artifact.connectionId || '', artifact.status || '', artifact.updatedAt || artifact.createdAt || '', artifact.joinUrl || '']));
+    const routing = kind === 'zoom'
+      ? [project?.settings?.defaultConnectionIds?.zoom || '', sorted((data.slots || []).map((slot) => [slot.id, slot.zoomConnectionId || '']))]
+      : kind === 'googleForm'
+        ? [project?.settings?.defaultConnectionIds?.forms || '']
+        : [project?.settings?.defaultConnectionIds?.gmail || ''];
+    const routedConnectionIds = new Set();
+    const defaultType = kind === 'zoom' ? 'zoom' : kind === 'googleForm' ? 'forms' : 'gmail';
+    if (project?.settings?.defaultConnectionIds?.[defaultType]) routedConnectionIds.add(project.settings.defaultConnectionIds[defaultType]);
+    if (kind === 'zoom') (data.slots || []).forEach((slot) => { if (slot.zoomConnectionId) routedConnectionIds.add(slot.zoomConnectionId); });
+    artifacts.forEach((artifact) => { if (artifact[3]) routedConnectionIds.add(artifact[3]); });
+    const connectionIdentity = sorted([...routedConnectionIds].map((id) => {
+      const connection = (connections || []).find((item) => item.id === id);
+      return connection ? [id, connection.type || '', connection.status || '', connection.account || '', connection.updatedAt || ''] : [id, 'missing'];
+    }));
+    const payload = kind === 'gmailDraft'
+      ? sorted(buildMailPackage(project).entries.map((entry) => [entry.personId, entry.email, entry.subject, entry.body, entry.bodyHtml]))
+      : kind === 'googleForm'
+        ? [project?.name || '', data.forms || {}, data.columns || [], data.availability || {}, schedule]
+        : [project?.name || '', schedule];
+    return JSON.stringify({ kind, lifecycle, payload, artifacts, routing, connectionIdentity });
+  }
+
   function buildMailPackage(project) {
     const personMap = new Map(project.data.people.map((person) => [person.id, person]));
     const roleMap = new Map(project.data.roles.map((role) => [role.id, role]));
@@ -704,6 +738,7 @@
     scheduleToExcelXml,
     buildGoogleFormDefinition,
     googleFormsApiRequests,
+    externalOperationFingerprint,
     buildMailPackage,
     mailPackageToCsv
   };

@@ -1,16 +1,71 @@
+let cloudStorageWriteTail = Promise.resolve();
+const cloudStorageBaselines = new Map();
+
+function cloneCloudStorageValue(value) {
+  if (value === undefined) return undefined;
+  return structuredClone(value);
+}
+
+function defaultCloudStorageValue(key) {
+  return key === 'workspaceDraft' ? null : [];
+}
+
+async function readRawStorageValue(key, fallback) {
+  let value;
+  if (globalThis.chrome?.storage?.local) {
+    const result = await chrome.storage.local.get(key);
+    value = result[key] ?? fallback;
+  } else {
+    const stored = localStorage.getItem(key);
+    value = stored ? JSON.parse(stored) : fallback;
+  }
+  return CLOUD_SYNC_KEYS.includes(key)
+    ? GmailFlowCore.normalizeCloudStorageValue(key, value)
+    : value;
+}
+
 const storage = {
   async get(key, fallback) {
-    if (globalThis.chrome?.storage?.local) {
-      const result = await chrome.storage.local.get(key);
-      return result[key] ?? fallback;
+    const value = await readRawStorageValue(key, fallback);
+    if (CLOUD_SYNC_KEYS.includes(key) && !cloudStorageBaselines.has(key)) {
+      cloudStorageBaselines.set(key, cloneCloudStorageValue(value));
     }
-    const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
+    return value;
   },
   async set(key, value) {
-    if (globalThis.chrome?.storage?.local) await chrome.storage.local.set({ [key]: value });
-    else localStorage.setItem(key, JSON.stringify(value));
-    if (CLOUD_SYNC_KEYS.includes(key)) scheduleCloudSync();
+    const tracksCloudSync = CLOUD_SYNC_KEYS.includes(key) && !cloudSyncApplying;
+    const requestedValue = CLOUD_SYNC_KEYS.includes(key)
+      ? GmailFlowCore.normalizeCloudStorageValue(key, value)
+      : cloneCloudStorageValue(value);
+    if (tracksCloudSync) cloudSyncTracker.markDirty();
+    const commit = async () => {
+      const write = async () => {
+        let committedValue = requestedValue;
+        if (CLOUD_SYNC_KEYS.includes(key) && !cloudSyncApplying) {
+          const latestValue = await readRawStorageValue(key, defaultCloudStorageValue(key));
+          const baseline = cloudStorageBaselines.has(key)
+            ? cloudStorageBaselines.get(key)
+            : cloneCloudStorageValue(latestValue);
+          committedValue = GmailFlowCore.mergeCloudStorageValue(key, baseline, requestedValue, latestValue);
+        }
+        if (globalThis.chrome?.storage?.local) await chrome.storage.local.set({ [key]: committedValue });
+        else localStorage.setItem(key, JSON.stringify(committedValue));
+        if (CLOUD_SYNC_KEYS.includes(key)) cloudStorageBaselines.set(key, cloneCloudStorageValue(requestedValue));
+        return committedValue;
+      };
+      if (CLOUD_SYNC_KEYS.includes(key)) {
+        const operation = cloudStorageWriteTail.catch(() => {}).then(write);
+        cloudStorageWriteTail = operation;
+        return operation;
+      } else {
+        return write();
+      }
+    };
+    const committedValue = CLOUD_SYNC_KEYS.includes(key) && !cloudSyncApplying
+      ? await withCloudStorageLock(commit)
+      : await commit();
+    if (tracksCloudSync) armCloudSyncTimer();
+    return committedValue;
   }
 };
 
@@ -45,7 +100,11 @@ const sendReviewState = { items: [], approved: new Set(), index: 0, senderEmail:
 const WORKSPACE_DRAFT_KEY = 'workspaceDraft';
 const DATA_STORAGE_MODE_KEY = 'dataStorageMode';
 const CLOUD_SYNC_META_KEY = 'cloudSyncMeta';
+const CLOUD_ACCOUNT_EPOCH_KEY = 'cloudAccountEpoch';
+const CLOUD_APPLY_EPOCH_KEY = 'cloudApplyEpoch';
 const CLOUD_SYNC_KEYS = ['savedRosters', 'templates', 'structureTemplates', WORKSPACE_DRAFT_KEY];
+const CLOUD_STORAGE_LOCK_NAME = 'gmail-flow-cloud-storage-v1';
+const CLOUD_NETWORK_LOCK_NAME = 'gmail-flow-cloud-network-v1';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const launchParams = new URLSearchParams(globalThis.location?.search || '');
@@ -54,7 +113,11 @@ const workspaceRosterManagerMode = launchParams.get('rosterManager') === '1';
 const rosterManagerMode = workspaceRosterManagerMode;
 const workspaceProjectId = launchParams.get('projectId') || '';
 let workspaceSaveTimer = null;
+let workspaceSaveRevision = 0;
+let workspaceSavedRevision = 0;
+let workspaceSavePromise = null;
 let restoringWorkspace = false;
+let rosterManagerApplied = false;
 let cellSelection = null;
 let rosterHistory = [];
 let rosterFuture = [];
@@ -64,7 +127,12 @@ let cloudSyncBusy = false;
 let composeInsertionTarget = 'body';
 let variableAutocompleteState = null;
 let cloudSyncApplying = false;
-let cloudSyncDirty = false;
+let cloudSyncContextRevision = 0;
+let connectionStatusRequestRevision = 0;
+const localAccountEpochIds = new Set();
+const localCloudApplyIds = new Set();
+let externalCloudApply = null;
+const cloudSyncTracker = GmailFlowCore.createSyncRevisionTracker();
 let projectRosterSource = null;
 if (isWindowMode) document.body.classList.add('window-mode');
 if (rosterManagerMode) document.body.classList.add('roster-manager-mode');
@@ -76,6 +144,97 @@ if (rosterManagerMode) {
   $('.header h1').textContent = '명단 준비';
 }
 const makeId = () => crypto.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+
+function ensureRosterRowIds(rows = state.rows) {
+  (rows || []).forEach((row) => {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return;
+    if (!row.__gmailFlowRowId && !row.__workspacePersonId) row.__gmailFlowRowId = makeId();
+  });
+  return rows;
+}
+
+function rowHasRosterData(row) {
+  return Object.entries(row || {}).some(([key, value]) => !key.startsWith('__') && String(value || '').trim());
+}
+
+async function withExclusiveLock(name, operation, timeoutMs = 9000) {
+  if (!globalThis.navigator?.locks?.request) return Promise.resolve().then(operation);
+  const controller = new AbortController();
+  let acquired = false;
+  const timeout = setTimeout(() => { if (!acquired) controller.abort(); }, timeoutMs);
+  try {
+    return await navigator.locks.request(name, { mode: 'exclusive', signal: controller.signal }, async () => {
+      acquired = true;
+      clearTimeout(timeout);
+      return operation();
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('다른 창의 Google 동기화 작업이 끝나지 않았습니다. 잠시 후 다시 시도해주세요.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function withCloudStorageLock(operation) { return withExclusiveLock(CLOUD_STORAGE_LOCK_NAME, operation); }
+function withCloudNetworkLock(operation) { return withExclusiveLock(CLOUD_NETWORK_LOCK_NAME, operation); }
+
+async function announceCloudAccountTransition() {
+  const id = makeId();
+  localAccountEpochIds.add(id);
+  await storage.set(CLOUD_ACCOUNT_EPOCH_KEY, { id, updatedAt: new Date().toISOString() });
+}
+
+function handleExternalCloudApply(marker) {
+  if (!marker?.id || localCloudApplyIds.has(marker.id)) return;
+  if (marker.phase === 'start') {
+    if (externalCloudApply?.timeout) clearTimeout(externalCloudApply.timeout);
+    const record = {
+      id: marker.id,
+      hadLocalChanges: cloudSyncTracker.dirty || workspaceSavedRevision !== workspaceSaveRevision,
+      wasInert: document.body.inert,
+      flushPromise: null,
+      timeout: null
+    };
+    externalCloudApply = record;
+    cloudSyncContextRevision += 1;
+    clearTimeout(cloudSyncTimer);
+    cloudSyncTimer = null;
+    document.body.inert = true;
+    record.flushPromise = flushWorkspaceSave();
+    record.timeout = setTimeout(() => {
+      if (externalCloudApply !== record) return;
+      externalCloudApply = null;
+      document.body.inert = record.wasInert;
+      renderCloudSyncStatus('다른 창의 Drive 데이터 적용 완료를 확인하지 못했습니다. 동기화를 다시 시도해주세요.');
+    }, 12_000);
+    return;
+  }
+  const record = externalCloudApply?.id === marker.id ? externalCloudApply : null;
+  if (!record) return;
+  clearTimeout(record.timeout);
+  externalCloudApply = null;
+  void (async () => {
+    try {
+      await record.flushPromise;
+      await withCloudStorageLock(() => cloudStorageWriteTail);
+      if (marker.phase === 'abort') {
+        document.body.inert = record.wasInert;
+        renderCloudSyncStatus('다른 창의 Drive 데이터 적용이 취소되었습니다.');
+        return;
+      }
+      if (record.hadLocalChanges && state.dataStorageMode === 'drive' && state.connectedEmail) {
+        cloudSyncTracker.markDirty();
+        await waitForCloudSyncIdle();
+        if (!await uploadCloudData({ silent: true })) throw new Error('이 창의 변경사항을 Drive에 다시 저장하지 못했습니다.');
+      }
+      globalThis.location.reload();
+    } catch (error) {
+      document.body.inert = record.wasInert;
+      renderCloudSyncStatus(`창 간 동기화 대기 · ${error.message}`);
+    }
+  })();
+}
 const columnLetter = (index) => {
   let value = index + 1;
   let result = '';
@@ -326,6 +485,7 @@ function getCurrentWork() {
 }
 
 function captureWorkspace() {
+  ensureRosterRowIds();
   return {
     version: 1,
     page: state.page,
@@ -351,6 +511,9 @@ function captureWorkspace() {
 
 function scheduleWorkspaceSave() {
   if (restoringWorkspace || rosterManagerMode) return;
+  workspaceSaveRevision += 1;
+  cloudSyncTracker.markDirty();
+  armCloudSyncTimer();
   clearTimeout(workspaceSaveTimer);
   workspaceSaveTimer = setTimeout(flushWorkspaceSave, 120);
 }
@@ -359,7 +522,16 @@ function flushWorkspaceSave() {
   if (restoringWorkspace || rosterManagerMode) return Promise.resolve();
   clearTimeout(workspaceSaveTimer);
   workspaceSaveTimer = null;
-  return storage.set(WORKSPACE_DRAFT_KEY, captureWorkspace());
+  if (workspaceSavePromise) return workspaceSavePromise;
+  workspaceSavePromise = (async () => {
+    while (workspaceSavedRevision !== workspaceSaveRevision) {
+      const revision = workspaceSaveRevision;
+      const snapshot = captureWorkspace();
+      await storage.set(WORKSPACE_DRAFT_KEY, snapshot);
+      workspaceSavedRevision = revision;
+    }
+  })().finally(() => { workspaceSavePromise = null; });
+  return workspaceSavePromise;
 }
 
 async function restoreWorkspace() {
@@ -369,6 +541,7 @@ async function restoreWorkspace() {
   state.page = ['compose', 'roster', 'templates', 'history', 'queue'].includes(saved.page) ? saved.page : 'compose';
   state.columns = Array.isArray(saved.columns) ? saved.columns : [];
   state.rows = Array.isArray(saved.rows) ? saved.rows : [];
+  ensureRosterRowIds();
   state.activeRosterName = saved.activeRosterName || '';
   state.activeTemplateId = saved.activeTemplateId || '';
   state.activeStructureTemplateId = saved.activeStructureTemplateId || '';
@@ -391,9 +564,13 @@ async function restoreWorkspaceRoster() {
   const roster = await globalThis.gmailFlowDesktop.loadWorkspaceRoster(workspaceProjectId);
   state.columns = Array.isArray(roster.columns) ? roster.columns : [];
   state.rows = Array.isArray(roster.rows) ? roster.rows : [];
+  ensureRosterRowIds();
   state.activeRosterName = roster.rosterName || (roster.projectName ? `${roster.projectName} 명단` : '프로젝트 명단');
   state.page = 'roster';
+  $('#saveFilteredRoster').textContent = '저장 자료로 복사';
+  $('#saveFilteredRoster').title = '현재 포함된 인원을 별도의 공용 명단으로 저장합니다.';
   $('#useRoster').textContent = '프로젝트에 저장하고 닫기';
+  $('#useRoster').title = '편집 내용을 현재 프로젝트 명단에 반영하고 창을 닫습니다.';
   $('#rosterContext').textContent = `${roster.projectName || '현재 프로젝트'}와 연결된 공용 명단`;
 }
 
@@ -411,14 +588,142 @@ function hasLocalSyncData(data) {
   return Boolean(draft?.columns?.length || draft?.rows?.length || draft?.compose?.subject || draft?.compose?.body || draft?.compose?.postscript);
 }
 
-function validateCloudSnapshot(snapshot) {
+function validateCloudSnapshot(snapshot, expectedAccount = '') {
   if (!snapshot || snapshot.format !== 'gmail-flow-cloud-sync' || snapshot.schemaVersion !== 1 || !snapshot.data) {
     throw new Error('Google Drive의 동기화 데이터 형식이 올바르지 않습니다.');
+  }
+  const normalizedExpected = String(expectedAccount || '').trim().toLowerCase();
+  const snapshotAccount = String(snapshot.accountEmail || '').trim().toLowerCase();
+  if (normalizedExpected && snapshotAccount !== normalizedExpected) {
+    const error = new Error(snapshotAccount
+      ? `Google Drive 동기화 데이터가 다른 계정(${snapshot.accountEmail})에서 만들어졌습니다.`
+      : 'Google Drive 동기화 데이터의 계정 정보를 확인할 수 없습니다.');
+    error.code = 'ACCOUNT_MISMATCH';
+    throw error;
   }
   for (const key of ['savedRosters', 'templates', 'structureTemplates']) {
     if (!Array.isArray(snapshot.data[key])) throw new Error(`동기화 데이터의 ${key} 항목이 손상되었습니다.`);
   }
   return snapshot;
+}
+
+function resolveCloudSyncState(metadataMatches, localData, remoteData) {
+  if (!metadataMatches) return 'remote-changed';
+  return JSON.stringify(localData) === JSON.stringify(remoteData) ? 'clean' : 'upload-local';
+}
+
+function defaultCloudSyncData() {
+  return {
+    savedRosters: [],
+    templates: [],
+    structureTemplates: [],
+    workspaceDraft: null
+  };
+}
+
+function normalizeCloudSyncData(data = {}) {
+  const defaults = defaultCloudSyncData();
+  return Object.fromEntries(CLOUD_SYNC_KEYS.map((key) => [
+    key,
+    GmailFlowCore.normalizeCloudStorageValue(key, data?.[key] ?? defaults[key])
+  ]));
+}
+
+function cloudSyncDataMatches(left, right) {
+  return JSON.stringify(normalizeCloudSyncData(left)) === JSON.stringify(normalizeCloudSyncData(right));
+}
+
+function cloudSyncBaselineData() {
+  if (state.cloudSyncMeta?.accountEmail !== state.connectedEmail || !state.cloudSyncMeta?.baselineData) return null;
+  return normalizeCloudSyncData(state.cloudSyncMeta.baselineData);
+}
+
+function expectedCloudFileFromMeta() {
+  const meta = state.cloudSyncMeta;
+  if (!meta || meta.accountEmail !== state.connectedEmail || !Object.hasOwn(meta, 'fileId')) return null;
+  if (!meta.fileId) return { exists: false };
+  return {
+    exists: true,
+    id: meta.fileId,
+    modifiedTime: meta.modifiedTime || '',
+    version: meta.version || '',
+    etag: meta.etag || ''
+  };
+}
+
+function cloudSyncMetaMatchesFile(file) {
+  const expected = expectedCloudFileFromMeta();
+  if (!expected || expected.exists === false || !file) return false;
+  if (expected.id !== file.id || expected.modifiedTime !== String(file.modifiedTime || '')) return false;
+  if (!expected.version && !expected.etag) return false;
+  if (expected.version && expected.version !== String(file.version || '')) return false;
+  if (expected.etag && expected.etag !== String(file.etag || '')) return false;
+  return true;
+}
+
+function cloudSyncConflictSections(baselineData, localData, remoteData) {
+  const baseline = normalizeCloudSyncData(baselineData || defaultCloudSyncData());
+  const local = normalizeCloudSyncData(localData);
+  const remote = normalizeCloudSyncData(remoteData);
+  return CLOUD_SYNC_KEYS.filter((key) => {
+    const baseValue = JSON.stringify(baseline[key]);
+    const localValue = JSON.stringify(local[key]);
+    const remoteValue = JSON.stringify(remote[key]);
+    return localValue !== baseValue && remoteValue !== baseValue && localValue !== remoteValue;
+  });
+}
+
+function applyPreferredCloudArrayDeletions(baselineValue, preferredValue, otherValue, mergedValue) {
+  const recordId = (entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return '';
+    if (entry.id) return `id:${String(entry.id)}`;
+    if (entry.__gmailFlowRowId) return `gmail-row:${String(entry.__gmailFlowRowId)}`;
+    if (entry.__workspacePersonId) return `workspace-person:${String(entry.__workspacePersonId)}`;
+    return '';
+  };
+  const visit = (baseline, preferred, other, merged) => {
+    if ([baseline, preferred, other, merged].every(Array.isArray)) {
+      const collections = [baseline, preferred, other, merged];
+      const identities = collections.map((entries) => entries.map(recordId));
+      const canMergeByIdentity = identities.some((ids) => ids.length)
+        && identities.every((ids) => ids.every(Boolean) && new Set(ids).size === ids.length);
+      if (!canMergeByIdentity) return merged;
+      const baselineById = new Map(baseline.map((entry) => [recordId(entry), entry]));
+      const preferredById = new Map(preferred.map((entry) => [recordId(entry), entry]));
+      const otherById = new Map(other.map((entry) => [recordId(entry), entry]));
+      return merged.flatMap((entry) => {
+        const id = recordId(entry);
+        const baselineEntry = baselineById.get(id);
+        const preferredEntry = preferredById.get(id);
+        const otherEntry = otherById.get(id);
+        if (baselineEntry && !preferredEntry && otherEntry && JSON.stringify(otherEntry) !== JSON.stringify(baselineEntry)) return [];
+        if (baselineEntry && preferredEntry && otherEntry) return [visit(baselineEntry, preferredEntry, otherEntry, entry)];
+        return [entry];
+      });
+    }
+    const allObjects = [baseline, preferred, other, merged].every((entry) => entry && typeof entry === 'object' && !Array.isArray(entry));
+    if (!allObjects) return merged;
+    return Object.fromEntries(Object.entries(merged).map(([key, value]) => [
+      key,
+      visit(baseline[key], preferred[key], other[key], value)
+    ]));
+  };
+  return visit(baselineValue, preferredValue, otherValue, mergedValue);
+}
+
+function mergeCloudSyncData(baselineData, localData, remoteData, preference = 'local') {
+  const baseline = normalizeCloudSyncData(baselineData || defaultCloudSyncData());
+  const local = normalizeCloudSyncData(localData);
+  const remote = normalizeCloudSyncData(remoteData);
+  const primary = preference === 'remote' ? remote : local;
+  const secondary = preference === 'remote' ? local : remote;
+  return Object.fromEntries(CLOUD_SYNC_KEYS.map((key) => {
+    const mergedValue = GmailFlowCore.mergeCloudStorageValue(key, baseline[key], primary[key], secondary[key]);
+    return [
+      key,
+      applyPreferredCloudArrayDeletions(baseline[key], primary[key], secondary[key], mergedValue)
+    ];
+  }));
 }
 
 async function collectSyncData() {
@@ -430,98 +735,310 @@ async function collectSyncData() {
   };
 }
 
-async function createCloudSnapshot() {
-  await flushWorkspaceSave();
+async function createCloudSnapshot(data = null) {
   return {
     format: 'gmail-flow-cloud-sync',
     schemaVersion: 1,
     updatedAt: new Date().toISOString(),
     accountEmail: state.connectedEmail,
-    data: await collectSyncData()
+    data: normalizeCloudSyncData(data || await collectSyncData())
   };
 }
 
-async function saveCloudSyncMeta(file) {
+async function saveCloudSyncMeta(file, baselineData = null) {
   state.cloudSyncMeta = {
     fileId: file?.id || '',
     modifiedTime: file?.modifiedTime || '',
+    version: String(file?.version || ''),
+    etag: file?.etag || '',
     syncedAt: new Date().toISOString(),
-    accountEmail: state.connectedEmail
+    accountEmail: state.connectedEmail,
+    baselineData: normalizeCloudSyncData(baselineData || defaultCloudSyncData())
   };
-  const wasApplying = cloudSyncApplying;
-  cloudSyncApplying = true;
-  try { await storage.set(CLOUD_SYNC_META_KEY, state.cloudSyncMeta); }
-  finally { cloudSyncApplying = wasApplying; }
-  cloudSyncDirty = false;
+  await storage.set(CLOUD_SYNC_META_KEY, state.cloudSyncMeta);
 }
 
-async function uploadCloudData({ silent = false } = {}) {
+function armCloudSyncTimer() {
+  if (cloudSyncBusy || !cloudSyncTracker.dirty || state.dataStorageMode !== 'drive' || !state.connectedEmail) return;
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(() => { cloudSyncTimer = null; void uploadCloudData({ silent: true }); }, 1500);
+}
+
+function captureCloudSyncContext() {
+  return {
+    revision: cloudSyncContextRevision,
+    mode: state.dataStorageMode,
+    account: String(state.connectedEmail || '').trim().toLowerCase()
+  };
+}
+
+function cloudSyncContextMatches(context) {
+  return context?.revision === cloudSyncContextRevision
+    && context.mode === state.dataStorageMode
+    && context.account === String(state.connectedEmail || '').trim().toLowerCase();
+}
+
+async function waitForCloudSyncIdle(timeoutMs = 9000) {
+  const deadline = Date.now() + timeoutMs;
+  while (cloudSyncBusy) {
+    if (Date.now() >= deadline) throw new Error('진행 중인 Google Drive 동기화가 끝나지 않았습니다. 잠시 후 다시 시도해주세요.');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function reconcileCloudConflict({ remote = null, localData = null, expectedRevision, expectedContext, silent = false, preference = '' } = {}) {
+  const baseline = cloudSyncBaselineData();
+  let latestRemote = remote;
+  let currentLocalData = localData ? normalizeCloudSyncData(localData) : null;
+  let selectedPreference = preference;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (cloudSyncTracker.capture() !== expectedRevision || !cloudSyncContextMatches(expectedContext)) return null;
+    if (!latestRemote) latestRemote = await withCloudNetworkLock(() => sendRuntimeMessage({ type: 'cloud-sync-download', expectedAccount: expectedContext.account }));
+    if (latestRemote.snapshot) validateCloudSnapshot(latestRemote.snapshot, expectedContext.account);
+    const remoteData = normalizeCloudSyncData(latestRemote.snapshot?.data || defaultCloudSyncData());
+    currentLocalData = normalizeCloudSyncData(currentLocalData || await collectSyncData());
+    if (cloudSyncTracker.capture() !== expectedRevision || !cloudSyncContextMatches(expectedContext)) return null;
+
+    const conflictSections = cloudSyncConflictSections(baseline, currentLocalData, remoteData);
+    if (!selectedPreference && (!baseline || conflictSections.length)) {
+      const sectionLabels = { savedRosters: '명단', templates: '메일 양식', structureTemplates: '구조 양식', workspaceDraft: '현재 작업' };
+      selectedPreference = await requestInput({
+        title: 'Drive 변경사항 병합',
+        label: '충돌 항목 우선순위',
+        message: baseline
+          ? `이 PC와 Drive에서 함께 바뀐 항목이 있습니다: ${conflictSections.map((key) => sectionLabels[key]).join(', ')}. 서로 다른 변경은 유지하고, 겹치는 값만 어느 쪽을 우선할지 선택해주세요.`
+          : '이 PC에 이전 동기화 기준이 없어 자동으로 우선순위를 판단할 수 없습니다. 서로 다른 변경은 유지하고, 겹치는 값의 우선순위를 선택해주세요.',
+        defaultValue: 'local',
+        options: [
+          { value: 'local', text: '겹치는 값은 이 PC 우선' },
+          { value: 'remote', text: '겹치는 값은 Drive 우선' }
+        ]
+      });
+      if (!selectedPreference) {
+        renderCloudSyncStatus('Drive 변경사항 병합을 취소했습니다. 이 PC 데이터는 그대로 유지됩니다.');
+        return null;
+      }
+      if (cloudSyncTracker.capture() !== expectedRevision || !cloudSyncContextMatches(expectedContext)) return null;
+    }
+
+    const mergedData = mergeCloudSyncData(baseline, currentLocalData, remoteData, selectedPreference || 'local');
+    const mergedSnapshot = await createCloudSnapshot(mergedData);
+    try {
+      const result = await withCloudNetworkLock(() => sendRuntimeMessage({
+        type: 'cloud-sync-upload',
+        snapshot: mergedSnapshot,
+        expectedFile: latestRemote.file || { exists: false },
+        expectedAccount: expectedContext.account
+      }));
+      if (cloudSyncTracker.capture() !== expectedRevision
+        || !cloudSyncContextMatches(expectedContext)
+        || !cloudSyncDataMatches(await collectSyncData(), currentLocalData)) return null;
+      const applied = await applyCloudSnapshot(mergedSnapshot, result.file, expectedRevision, expectedContext, currentLocalData);
+      return applied ? result : null;
+    } catch (error) {
+      if (!['CLOUD_SYNC_CONFLICT', 'CLOUD_SYNC_BASELINE_REQUIRED'].includes(error?.code)) throw error;
+      latestRemote = null;
+      currentLocalData = null;
+      if (!silent) renderCloudSyncStatus('다른 PC의 최신 변경사항을 다시 확인하고 있습니다…');
+    }
+  }
+  const error = new Error('다른 PC에서 Drive 데이터가 계속 변경되어 안전하게 병합하지 못했습니다. 잠시 후 다시 시도해주세요.');
+  error.code = 'CLOUD_SYNC_CONFLICT';
+  throw error;
+}
+
+async function uploadCloudData({ silent = false, expectedFile } = {}) {
   if (state.dataStorageMode !== 'drive' || !state.connectedEmail || cloudSyncBusy) return null;
+  const uploadContext = captureCloudSyncContext();
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = null;
   cloudSyncBusy = true;
+  let completed = false;
+  let uploadedRevision = null;
+  let snapshot = null;
+  let uploadExpectedFile = expectedFile;
   if (!silent) renderCloudSyncStatus('Google Drive에 저장하고 있습니다…');
   try {
-    const result = await sendRuntimeMessage({ type: 'cloud-sync-upload', snapshot: await createCloudSnapshot() });
-    await saveCloudSyncMeta(result.file);
+    await flushWorkspaceSave();
+    await withCloudStorageLock(async () => {
+      await cloudStorageWriteTail;
+      if (!cloudSyncContextMatches(uploadContext)) return;
+      uploadedRevision = cloudSyncTracker.capture();
+      snapshot = await createCloudSnapshot();
+      if (uploadExpectedFile === undefined) uploadExpectedFile = expectedCloudFileFromMeta();
+    });
+    if (!snapshot || !cloudSyncContextMatches(uploadContext)) return null;
+    const result = await withCloudNetworkLock(async () => {
+      if (!cloudSyncContextMatches(uploadContext)) return null;
+      return sendRuntimeMessage({ type: 'cloud-sync-upload', snapshot, expectedFile: uploadExpectedFile, expectedAccount: uploadContext.account });
+    });
+    if (!result) return null;
+    if (!cloudSyncContextMatches(uploadContext)) return null;
+    await saveCloudSyncMeta(result.file, snapshot.data);
+    if (!cloudSyncContextMatches(uploadContext)) return null;
+    cloudSyncTracker.markUploaded(uploadedRevision);
+    completed = true;
     renderCloudSyncStatus('Google Drive 동기화 완료 · 이 계정으로 다른 PC에서 불러올 수 있습니다.');
     return result;
   } catch (error) {
+    if (snapshot && ['CLOUD_SYNC_CONFLICT', 'CLOUD_SYNC_BASELINE_REQUIRED'].includes(error?.code)
+      && cloudSyncTracker.capture() === uploadedRevision && cloudSyncContextMatches(uploadContext)) {
+      try {
+        const reconciled = await reconcileCloudConflict({
+          localData: snapshot.data,
+          expectedRevision: uploadedRevision,
+          expectedContext: uploadContext,
+          silent
+        });
+        if (reconciled) {
+          completed = true;
+          return reconciled;
+        }
+        return null;
+      } catch (reconcileError) {
+        error = reconcileError;
+      }
+    }
     renderCloudSyncStatus(`동기화 실패 · ${error.message}`);
     if (!silent) await showAlert(error.message, 'Google Drive 동기화 실패');
     return null;
   } finally {
     cloudSyncBusy = false;
+    armCloudSyncTimer();
   }
 }
 
-function scheduleCloudSync() {
-  if (cloudSyncApplying) return;
-  cloudSyncDirty = true;
-  if (cloudSyncBusy || state.dataStorageMode !== 'drive' || !state.connectedEmail) return;
+async function flushCloudSync() {
   clearTimeout(cloudSyncTimer);
-  cloudSyncTimer = setTimeout(() => { void uploadCloudData({ silent: true }); }, 1500);
+  cloudSyncTimer = null;
+  await waitForCloudSyncIdle();
+  if (state.dataStorageMode !== 'drive') return true;
+  if (!cloudSyncTracker.dirty) return true;
+  if (!state.connectedEmail) throw new Error('Google Drive 저장 모드이지만 연결된 Google 계정이 없습니다.');
+  while (cloudSyncTracker.dirty) {
+    if (!await uploadCloudData({ silent: true })) throw new Error('Google Drive에 마지막 변경사항을 저장하지 못했습니다.');
+  }
+  return true;
 }
 
-async function applyCloudSnapshot(snapshot, file) {
-  validateCloudSnapshot(snapshot);
+async function applyCloudSnapshot(snapshot, file, expectedRevision, expectedContext, expectedLocalData) {
   clearTimeout(cloudSyncTimer);
-  restoringWorkspace = true;
-  cloudSyncApplying = true;
-  try {
-    await storage.set('savedRosters', snapshot.data.savedRosters);
-    await storage.set('templates', snapshot.data.templates);
-    await storage.set('structureTemplates', snapshot.data.structureTemplates);
-    await storage.set(WORKSPACE_DRAFT_KEY, snapshot.data.workspaceDraft || null);
-    await saveCloudSyncMeta(file);
-  } finally {
-    cloudSyncApplying = false;
-  }
-  globalThis.location.reload();
+  cloudSyncTimer = null;
+  await Promise.resolve();
+  if (cloudSyncTracker.capture() !== expectedRevision || !cloudSyncContextMatches(expectedContext)) return false;
+  validateCloudSnapshot(snapshot, expectedContext.account);
+  const verification = await withCloudNetworkLock(() => {
+    if (cloudSyncTracker.capture() !== expectedRevision || !cloudSyncContextMatches(expectedContext)) return null;
+    return sendRuntimeMessage({ type: 'cloud-sync-verify', expectedFile: file, expectedAccount: expectedContext.account });
+  });
+  if (!verification) return false;
+  if (cloudSyncTracker.capture() !== expectedRevision || !cloudSyncContextMatches(expectedContext)) return false;
+  file = verification.file;
+  return withCloudStorageLock(async () => {
+    const wasInert = document.body.inert;
+    document.body.inert = true;
+    const active = document.activeElement;
+    if (active && typeof active.blur === 'function') active.blur();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await cloudStorageWriteTail;
+    const currentLocalData = await collectSyncData();
+    if (cloudSyncTracker.capture() !== expectedRevision
+      || !cloudSyncContextMatches(expectedContext)
+      || JSON.stringify(currentLocalData) !== JSON.stringify(expectedLocalData)) {
+      document.body.inert = wasInert;
+      return false;
+    }
+    const applyId = makeId();
+    localCloudApplyIds.add(applyId);
+    restoringWorkspace = true;
+    cloudSyncApplying = true;
+    let applied = false;
+    try {
+      await storage.set(CLOUD_APPLY_EPOCH_KEY, { id: applyId, phase: 'start', updatedAt: new Date().toISOString() });
+      await storage.set('savedRosters', snapshot.data.savedRosters);
+      await storage.set('templates', snapshot.data.templates);
+      await storage.set('structureTemplates', snapshot.data.structureTemplates);
+      await storage.set(WORKSPACE_DRAFT_KEY, snapshot.data.workspaceDraft || null);
+      await saveCloudSyncMeta(file, snapshot.data);
+      cloudSyncTracker.clear();
+      applied = true;
+    } finally {
+      try {
+        await storage.set(CLOUD_APPLY_EPOCH_KEY, {
+          id: applyId,
+          phase: applied ? 'complete' : 'abort',
+          updatedAt: new Date().toISOString()
+        });
+      } catch (_) {}
+      setTimeout(() => localCloudApplyIds.delete(applyId), 15_000);
+      cloudSyncApplying = false;
+      restoringWorkspace = false;
+      if (!applied) document.body.inert = wasInert;
+    }
+    globalThis.location.reload();
+    return true;
+  });
 }
 
 async function initializeCloudSync({ interactive = false, firstActivation = false } = {}) {
   if (cloudSyncBusy || state.dataStorageMode !== 'drive') return;
   cloudSyncBusy = true;
+  const initializationRevision = cloudSyncTracker.capture();
+  const initializationContext = captureCloudSyncContext();
   renderCloudSyncStatus(interactive ? 'Google Drive 권한을 확인하고 있습니다…' : 'Google Drive 데이터를 확인하고 있습니다…');
   try {
-    if (interactive) await sendRuntimeMessage({ type: 'authorize-drive-sync' });
-    if (cloudSyncDirty && !firstActivation) {
-      cloudSyncBusy = false;
-      await uploadCloudData();
+    if (interactive) await withCloudNetworkLock(() => sendRuntimeMessage({ type: 'authorize-drive-sync', expectedAccount: initializationContext.account }));
+    if (!cloudSyncContextMatches(initializationContext)) return;
+    const remote = await withCloudNetworkLock(() => sendRuntimeMessage({ type: 'cloud-sync-download', expectedAccount: initializationContext.account }));
+    if (!cloudSyncContextMatches(initializationContext)) return;
+    let localData = normalizeCloudSyncData(await collectSyncData());
+    if (!cloudSyncContextMatches(initializationContext)) return;
+    if (cloudSyncTracker.capture() !== initializationRevision) {
+      cloudSyncTracker.markDirty();
+      const reconcileRevision = cloudSyncTracker.capture();
+      localData = normalizeCloudSyncData(await collectSyncData());
+      await reconcileCloudConflict({ remote, localData, expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive });
       return;
     }
-    const remote = await sendRuntimeMessage({ type: 'cloud-sync-download' });
-    const localData = await collectSyncData();
     if (!remote.snapshot) {
+      cloudSyncTracker.markDirty();
       cloudSyncBusy = false;
-      await uploadCloudData();
+      await uploadCloudData({ silent: !interactive, expectedFile: { exists: false } });
       return;
     }
-    validateCloudSnapshot(remote.snapshot);
-    const alreadySynced = state.cloudSyncMeta?.accountEmail === state.connectedEmail
-      && state.cloudSyncMeta?.fileId === remote.file?.id
-      && state.cloudSyncMeta?.modifiedTime === remote.file?.modifiedTime;
-    if (alreadySynced) {
+    validateCloudSnapshot(remote.snapshot, initializationContext.account);
+    const remoteData = normalizeCloudSyncData(remote.snapshot.data);
+    const metadataMatches = cloudSyncMetaMatchesFile(remote.file);
+    const syncResolution = resolveCloudSyncState(metadataMatches, localData, remote.snapshot.data);
+    if (syncResolution === 'clean') {
+      if (!state.cloudSyncMeta?.baselineData || !state.cloudSyncMeta?.version || !state.cloudSyncMeta?.etag) {
+        await saveCloudSyncMeta(remote.file, remoteData);
+      }
       renderCloudSyncStatus();
+      return;
+    }
+    if (syncResolution === 'upload-local') {
+      // The Drive file has not changed since the last successful sync, so any
+      // data difference came from this device (including a replaced renderer).
+      cloudSyncTracker.markDirty();
+      cloudSyncBusy = false;
+      await uploadCloudData({ silent: !interactive, expectedFile: remote.file });
+      return;
+    }
+    if (cloudSyncDataMatches(localData, remoteData)) {
+      await saveCloudSyncMeta(remote.file, remoteData);
+      cloudSyncTracker.clear();
+      renderCloudSyncStatus();
+      return;
+    }
+    const baseline = cloudSyncBaselineData();
+    if ((baseline && cloudSyncDataMatches(localData, baseline)) || !hasLocalSyncData(localData)) {
+      const applied = await applyCloudSnapshot(remote.snapshot, remote.file, initializationRevision, initializationContext, localData);
+      if (!applied) {
+        cloudSyncTracker.markDirty();
+        const reconcileRevision = cloudSyncTracker.capture();
+        await reconcileCloudConflict({ expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive });
+      }
       return;
     }
     if (firstActivation && hasLocalSyncData(localData)) {
@@ -535,23 +1052,67 @@ async function initializeCloudSync({ interactive = false, firstActivation = fals
           { value: 'local', text: '이 PC 데이터를 Drive에 저장' }
         ]
       });
-      if (!choice) throw new Error('동기화 설정이 취소되었습니다.');
-      if (choice === 'local') {
-        cloudSyncBusy = false;
-        await uploadCloudData();
+      if (!cloudSyncContextMatches(initializationContext)) return;
+      if (!choice) {
+        cloudSyncContextRevision += 1;
+        state.dataStorageMode = 'local';
+        await storage.set(DATA_STORAGE_MODE_KEY, 'local');
+        renderCloudSyncStatus('동기화 선택을 취소해 이 PC 저장으로 돌아갔습니다.');
         return;
       }
+      if (choice === 'local') {
+        cloudSyncTracker.markDirty();
+        const reconcileRevision = cloudSyncTracker.capture();
+        await reconcileCloudConflict({ remote, localData, expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive, preference: 'local' });
+        return;
+      }
+      if (cloudSyncTracker.capture() !== initializationRevision) {
+        cloudSyncTracker.markDirty();
+        const reconcileRevision = cloudSyncTracker.capture();
+        localData = normalizeCloudSyncData(await collectSyncData());
+        await reconcileCloudConflict({ remote, localData, expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive });
+        return;
+      }
+      const applied = await applyCloudSnapshot(remote.snapshot, remote.file, initializationRevision, initializationContext, localData);
+      if (!applied) {
+        cloudSyncTracker.markDirty();
+        const reconcileRevision = cloudSyncTracker.capture();
+        await reconcileCloudConflict({ expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive });
+      }
+      return;
     }
-    await applyCloudSnapshot(remote.snapshot, remote.file);
+    cloudSyncTracker.markDirty();
+    const reconcileRevision = cloudSyncTracker.capture();
+    await reconcileCloudConflict({ remote, localData, expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive });
   } catch (error) {
-    renderCloudSyncStatus(`동기화 대기 · ${error.message}`);
+    if (['CLOUD_SYNC_CONFLICT', 'CLOUD_SYNC_BASELINE_REQUIRED'].includes(error?.code) && cloudSyncContextMatches(initializationContext)) {
+      cloudSyncTracker.markDirty();
+      const reconcileRevision = cloudSyncTracker.capture();
+      const localData = normalizeCloudSyncData(await collectSyncData());
+      try {
+        await reconcileCloudConflict({ localData, expectedRevision: reconcileRevision, expectedContext: initializationContext, silent: !interactive });
+        return;
+      } catch (reconcileError) {
+        error = reconcileError;
+      }
+    }
+    if (firstActivation && state.dataStorageMode === 'drive') {
+      cloudSyncContextRevision += 1;
+      state.dataStorageMode = 'local';
+      try { await storage.set(DATA_STORAGE_MODE_KEY, 'local'); } catch (_) {}
+      renderCloudSyncStatus('동기화 확인에 실패해 이 PC 저장으로 돌아갔습니다.');
+    } else {
+      renderCloudSyncStatus(`동기화 대기 · ${error.message}`);
+    }
     if (interactive) await showAlert(error.message, 'Google Drive 동기화');
   } finally {
     cloudSyncBusy = false;
+    armCloudSyncTimer();
   }
 }
 
 function updateComposeState() {
+  ensureRosterRowIds();
   updateActiveRosterText();
   const method = $('#sendMethod').value;
   const work = getCurrentWork();
@@ -934,7 +1495,7 @@ function clearSelectedData() {
       if (state.rows[row]) state.rows[row][column.id] = '';
     });
   }
-  while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
+  while (state.rows.length && !rowHasRosterData(state.rows.at(-1))) state.rows.pop();
   renderRoster();
   updateComposeState();
   updateRosterStatus(protectedRows ? `선택 영역을 비웠습니다. 잠긴 ${protectedRows}개 행은 그대로 유지했습니다.` : '선택한 데이터 셀을 비웠습니다. 컬럼 이름은 유지됩니다.');
@@ -1140,7 +1701,7 @@ function applyMatrixAt(matrix, startRow, startColumn, trackHistory = true) {
       if (/^컬럼\d+$/.test(emailColumn.name)) emailColumn.name = '이메일';
     }
   }
-  while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
+  while (state.rows.length && !rowHasRosterData(state.rows.at(-1))) state.rows.pop();
   renderRoster();
   updateRosterStatus(`${matrix.length}행 × ${width}열을 셀에 붙여넣었습니다.`);
   updateComposeState();
@@ -1157,6 +1718,7 @@ async function refreshSharedRosterSources() {
 }
 
 async function persistNamedRoster(item) {
+  ensureRosterRowIds(item?.rows);
   if (launchParams.get('workspace') === '1' && globalThis.gmailFlowDesktop?.saveSharedRoster) {
     const result = await globalThis.gmailFlowDesktop.saveSharedRoster(item);
     const saved = result?.roster;
@@ -1193,6 +1755,7 @@ async function importSharedRoster() {
 async function saveCurrentRoster() {
   const name = await requestTextInput({ title: '명단 저장', label: '명단 이름', defaultValue: state.activeRosterName || '새 명단', maxLength: 100 });
   if (!name?.trim()) return;
+  ensureRosterRowIds();
   const now = new Date().toISOString();
   const item = {
     id: makeId(),
@@ -1213,6 +1776,7 @@ async function saveCurrentRoster() {
 }
 
 async function saveFilteredRoster() {
+  ensureRosterRowIds();
   const includedRows = state.rows.filter((row) => row.__workspaceActive !== false);
   if (!includedRows.length) return;
   const defaultName = state.activeRosterName ? `${state.activeRosterName} 복사본` : '새 명단';
@@ -1238,6 +1802,7 @@ async function saveFilteredRoster() {
 
 async function syncWorkspaceRoster(message = '') {
   if (!workspaceRosterManagerMode || !globalThis.gmailFlowDesktop?.saveWorkspaceRoster) return;
+  ensureRosterRowIds();
   await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName || '현재 명단' });
   if (message) updateRosterStatus(message);
 }
@@ -1308,6 +1873,7 @@ function loadRosterIntoEditor(roster) {
   if (blockLockedRosterReplacement()) return;
   state.columns = structuredClone(roster.columns);
   state.rows = structuredClone(roster.rows);
+  ensureRosterRowIds();
   state.activeRosterName = roster.name;
   state.activeStructureTemplateId = roster.linkedStructureTemplateId || '';
   const linkedTemplate = state.templates.find((template) => template.id === roster.linkedTemplateId);
@@ -1552,7 +2118,11 @@ function formatDateTime(value) {
 async function sendRuntimeMessage(message) {
   if (!globalThis.chrome?.runtime?.sendMessage) throw new Error('확장 프로그램을 새로고침한 뒤 다시 시도해주세요.');
   const response = await chrome.runtime.sendMessage(message);
-  if (!response?.ok) throw new Error(response?.error || '백그라운드 작업에 실패했습니다.');
+  if (!response?.ok) {
+    const error = new Error(response?.error || '백그라운드 작업에 실패했습니다.');
+    error.code = response?.code || '';
+    throw error;
+  }
   return response.data;
 }
 
@@ -1832,8 +2402,12 @@ function accountInitial(email) {
 }
 
 async function updateConnectionStatus() {
-  const status = await sendRuntimeMessage({ type: 'connection-status' });
+  const requestRevision = ++connectionStatusRequestRevision;
+  const status = await withCloudNetworkLock(() => sendRuntimeMessage({ type: 'connection-status' }));
+  if (requestRevision !== connectionStatusRequestRevision) return { ...status, connected: Boolean(state.connectedEmail), email: state.connectedEmail, stale: true };
+  const previousEmail = String(state.connectedEmail || '').trim().toLowerCase();
   state.connectedEmail = status.connected ? status.email || '' : '';
+  if (previousEmail !== String(state.connectedEmail || '').trim().toLowerCase()) cloudSyncContextRevision += 1;
   state.rememberedEmail = status.rememberedEmail || status.email || state.rememberedEmail || '';
   $('#oauthSetupHelp').hidden = status.configured;
   $('#connectGmail').hidden = status.connected || !status.configured;
@@ -1857,13 +2431,26 @@ async function requestGmailConnection({ switchAccount = false } = {}) {
   let connected = false;
   buttons.forEach((button) => { button.disabled = true; });
   try {
-    if (switchAccount) await chrome.identity.clearAllCachedAuthTokens();
-    const scopes = state.dataStorageMode === 'drive' ? [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE] : [GMAIL_SCOPE];
-    const result = await chrome.identity.getAuthToken({
-      interactive: true,
-      scopes,
-      loginHint: switchAccount ? '' : state.rememberedEmail,
-      selectAccount: switchAccount
+    if (switchAccount || (state.dataStorageMode === 'drive' && !state.connectedEmail)) {
+      cloudSyncContextRevision += 1;
+      connectionStatusRequestRevision += 1;
+      clearTimeout(cloudSyncTimer);
+      cloudSyncTimer = null;
+      state.connectedEmail = '';
+      await announceCloudAccountTransition();
+    }
+    const result = await withCloudNetworkLock(async () => {
+      if (switchAccount) {
+        await waitForCloudSyncIdle();
+        await chrome.identity.clearAllCachedAuthTokens();
+      }
+      const scopes = state.dataStorageMode === 'drive' ? [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE] : [GMAIL_SCOPE];
+      return chrome.identity.getAuthToken({
+        interactive: true,
+        scopes,
+        loginHint: switchAccount ? '' : state.rememberedEmail,
+        selectAccount: switchAccount
+      });
     });
     const token = typeof result === 'string' ? result : result?.token;
     if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
@@ -1873,6 +2460,7 @@ async function requestGmailConnection({ switchAccount = false } = {}) {
     connected = true;
   } catch (error) {
     await showAlert(error.message);
+    if (switchAccount) { try { await updateConnectionStatus(); } catch (_) {} }
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
   }
@@ -2201,7 +2789,9 @@ function bindEvents() {
     if (!rosterManagerMode) { showPage('compose'); return; }
     try {
       $('#useRoster').disabled = true; $('#useRoster').textContent = '프로젝트에 저장 중…';
+      ensureRosterRowIds();
       await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName });
+      rosterManagerApplied = true;
       await globalThis.gmailFlowDesktop.closeWindow();
     } catch (error) {
       $('#useRoster').disabled = false; $('#useRoster').textContent = '프로젝트에 저장하고 닫기';
@@ -2308,7 +2898,7 @@ function bindEvents() {
     const rowIndex = Number(input.dataset.rowIndex);
     while (state.rows.length <= rowIndex) state.rows.push({});
     state.rows[rowIndex][input.dataset.columnId] = input.value;
-    while (state.rows.length && Object.values(state.rows.at(-1)).every((value) => !String(value || '').trim())) state.rows.pop();
+    while (state.rows.length && !rowHasRosterData(state.rows.at(-1))) state.rows.pop();
     updateRosterStatus(); updateComposeState();
   });
   $('#rosterBody').addEventListener('click', async (event) => {
@@ -2413,17 +3003,20 @@ function bindEvents() {
     const requestedMode = event.target.value;
     if (requestedMode === 'local') {
       clearTimeout(cloudSyncTimer);
+      if (state.dataStorageMode !== 'local') cloudSyncContextRevision += 1;
       state.dataStorageMode = 'local';
       await storage.set(DATA_STORAGE_MODE_KEY, 'local');
       renderCloudSyncStatus('이 PC에만 저장하도록 변경했습니다. 내려받은 데이터는 이 PC에 유지됩니다.');
       return;
     }
+    if (state.dataStorageMode !== 'drive') cloudSyncContextRevision += 1;
     state.dataStorageMode = 'drive';
     await storage.set(DATA_STORAGE_MODE_KEY, 'drive');
     renderCloudSyncStatus('Google Drive 동기화를 준비하고 있습니다…');
     if (!state.connectedEmail) {
       const connected = await requestGmailConnection();
       if (!connected) {
+        if (state.dataStorageMode !== 'local') cloudSyncContextRevision += 1;
         state.dataStorageMode = 'local';
         await storage.set(DATA_STORAGE_MODE_KEY, 'local');
         renderCloudSyncStatus();
@@ -2433,18 +3026,38 @@ function bindEvents() {
     await initializeCloudSync({ interactive: true, firstActivation: true });
   });
   $('#syncCloudNow').addEventListener('click', async () => {
+    let firstActivation = false;
     if (!state.connectedEmail) {
       const connected = await requestGmailConnection();
       if (!connected) return;
+      firstActivation = true;
     }
-    await initializeCloudSync({ interactive: true });
+    await initializeCloudSync({ interactive: true, firstActivation });
   });
-  $('#connectGmail').addEventListener('click', () => requestGmailConnection());
-  $('#switchGmail').addEventListener('click', () => requestGmailConnection({ switchAccount: true }));
+  $('#connectGmail').addEventListener('click', async () => {
+    if (await requestGmailConnection() && state.dataStorageMode === 'drive') await initializeCloudSync({ interactive: true, firstActivation: true });
+  });
+  $('#switchGmail').addEventListener('click', async () => {
+    if (await requestGmailConnection({ switchAccount: true }) && state.dataStorageMode === 'drive') await initializeCloudSync({ interactive: true, firstActivation: true });
+  });
   $('#disconnectGmail').addEventListener('click', async () => {
     if (!await showConfirm('Google 계정에서 로그아웃할까요? 예약 작업은 다시 연결할 때까지 대기합니다.', 'Google 계정 로그아웃', '로그아웃')) return;
-    await chrome.identity.clearAllCachedAuthTokens();
-    await updateConnectionStatus();
+    cloudSyncContextRevision += 1;
+    connectionStatusRequestRevision += 1;
+    clearTimeout(cloudSyncTimer);
+    cloudSyncTimer = null;
+    state.connectedEmail = '';
+    try {
+      await announceCloudAccountTransition();
+      await withCloudNetworkLock(async () => {
+        await waitForCloudSyncIdle();
+        await chrome.identity.clearAllCachedAuthTokens();
+      });
+      await updateConnectionStatus();
+    } catch (error) {
+      try { await updateConnectionStatus(); } catch (_) {}
+      await showAlert(error.message, 'Google 계정 로그아웃 실패');
+    }
   });
   $('#historyItems').addEventListener('click', (event) => {
     const button = event.target.closest('[data-history-batch-id]'); if (button) showHistoryBatch(button.dataset.historyBatchId);
@@ -2526,9 +3139,43 @@ function bindEvents() {
     catch (error) { await showAlert(error.message); }
   });
   if (globalThis.chrome?.storage?.onChanged) chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.mailBatches) refreshMailActivity().then(renderDraftEditProgress);
+    if (area !== 'local') return;
+    if (changes.mailBatches) refreshMailActivity().then(renderDraftEditProgress);
+    if (changes[CLOUD_APPLY_EPOCH_KEY]) handleExternalCloudApply(changes[CLOUD_APPLY_EPOCH_KEY].newValue);
+    const accountEpochId = changes[CLOUD_ACCOUNT_EPOCH_KEY]?.newValue?.id;
+    if (accountEpochId && !localAccountEpochIds.delete(accountEpochId)) {
+      cloudSyncContextRevision += 1;
+      connectionStatusRequestRevision += 1;
+      clearTimeout(cloudSyncTimer);
+      cloudSyncTimer = null;
+      state.connectedEmail = '';
+      if (state.dataStorageMode === 'drive') renderCloudSyncStatus('Google 계정이 변경되었습니다. 이 창에서 다시 연결 상태를 확인해주세요.');
+    }
+    if (!cloudSyncApplying && !externalCloudApply && CLOUD_SYNC_KEYS.some((key) => changes[key])) {
+      cloudSyncTracker.markDirty();
+      armCloudSyncTimer();
+    }
   });
 }
+
+globalThis.flushWorkspaceEdits = async () => {
+  clearTimeout(workspaceSaveTimer);
+  workspaceSaveTimer = null;
+  const active = document.activeElement;
+  if (active && typeof active.blur === 'function') active.blur();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (rosterManagerMode) {
+    if (!rosterManagerApplied) {
+      ensureRosterRowIds();
+      await globalThis.gmailFlowDesktop.saveWorkspaceRoster(workspaceProjectId, { columns: state.columns, rows: state.rows, name: state.activeRosterName || '현재 명단' });
+      rosterManagerApplied = true;
+    }
+    return true;
+  }
+  await flushWorkspaceSave();
+  await flushCloudSync();
+  return true;
+};
 
 async function init() {
   state.savedRosters = await storage.get('savedRosters', []);

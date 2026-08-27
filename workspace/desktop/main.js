@@ -1,16 +1,34 @@
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { JsonStorage } = require('./storage');
 const { readWorkbookSheets, exportProjectWorkbook, exportWorkItemWorkbook } = require('./spreadsheet');
 const { AuthManager } = require('./auth-manager');
 const { ExtensionManager } = require('./extension-manager');
 const { mimeDraft } = require('./mail-mime');
-const { mergeWorkspaceState, overlayScheduleProjects } = require('./state-merge');
+const { driveSnapshotIdentityMatches, preserveLocalConnectionContext } = require('./state-merge');
+const { createTransactionQueue, createKeyedOperationCoordinator } = require('./transaction-queue');
+const { mergeSelectedWorkspaceState, resolveExternalCommit } = require('./external-commit');
 const { GmailFlowHost } = require('./gmail-flow-host');
+const { DriveSyncGuardStore, connectionGuardKey, drivePayloadsEqual, isUsableDriveEtag } = require('./drive-sync-guard');
 const WorkspaceCore = require('../workspace-core');
+const OperationsCore = require('../operations-core');
 
 const isSmokeTest = process.env.CMOE_SMOKE === '1' || process.argv.includes('--smoke-test') || app.commandLine.hasSwitch('smoke-test');
+const smokeResultPath = path.join(app.getPath('temp'), 'cmoe-workspace-smoke-result.json');
+function writeSmokeResult(status, details = {}) {
+  if (!isSmokeTest) return;
+  try { fs.writeFileSync(smokeResultPath, JSON.stringify({ status, ...details, updatedAt: new Date().toISOString() }, null, 2)); } catch (_) {}
+}
+async function captureSmokePreview(webContents, filename, label) {
+  if (!isSmokeTest || app.isPackaged) return null;
+  const previewPath = path.join(app.getPath('temp'), filename);
+  const preview = await webContents.capturePage();
+  await fs.promises.writeFile(previewPath, preview.toPNG());
+  console.log(`${label}: ${previewPath}`);
+  return previewPath;
+}
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
@@ -26,6 +44,287 @@ let gmailFlowHost;
 let isQuitting = false;
 let quitReady = false;
 let quitFlushInProgress = false;
+let mainDriveSyncTimer = null;
+let mainDriveSyncDirty = false;
+let mainDriveSyncRevision = 0;
+let mainDriveSyncPromise = null;
+let mainDriveSyncError = null;
+let driveSyncGuards;
+const externalArtifactReservations = new Map();
+const externalReservationOwners = new Set();
+const runWorkspaceStateTransaction = createTransactionQueue();
+const runDriveStateTransaction = createTransactionQueue();
+const connectionOperations = createKeyedOperationCoordinator();
+
+function releaseExternalReservation(token, ownerId = null) {
+  let released = 0;
+  for (const [key, reservation] of externalArtifactReservations) {
+    if (reservation.token === token && (ownerId == null || reservation.ownerId === ownerId)) { externalArtifactReservations.delete(key); released += 1; }
+  }
+  return released;
+}
+
+function pruneExternalReservations(now = Date.now()) {
+  for (const [key, reservation] of externalArtifactReservations) if (reservation.expiresAt <= now) externalArtifactReservations.delete(key);
+}
+
+function releaseExternalReservationsForOwner(ownerId) {
+  for (const [key, reservation] of externalArtifactReservations) if (reservation.ownerId === ownerId) externalArtifactReservations.delete(key);
+  externalReservationOwners.delete(ownerId);
+}
+
+function recomputeMergedScheduleProjects(stateInput, hints = []) {
+  let next = stateInput;
+  for (const projectId of [...new Set((Array.isArray(hints) ? hints : []).map((hint) => hint?.projectId).filter(Boolean))]) {
+    const project = next.projects?.find((item) => item.id === projectId) || Object.values(next.quickWorkspaces || {}).find((item) => item?.id === projectId);
+    if (!project) continue;
+    const conflicts = OperationsCore.collectScheduleConflicts(project);
+    next = WorkspaceCore.updateProject(next, projectId, { data: { conflicts } });
+    if (conflicts.length) next = WorkspaceCore.setModuleStatus(next, projectId, 'schedule', 'needsReview', `병합 후 일정 문제 ${conflicts.length}건`);
+  }
+  return next;
+}
+
+async function persistAuthorizedConnection(connectionId, status) {
+  return runWorkspaceStateTransaction(async () => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const applied = WorkspaceCore.applyConnectionAuthorization(current, connectionId, status);
+    if (!applied.connection) return { ...status, state: current, connectionMissing: true, accountChanged: false };
+    const next = applied.state;
+    next.updatedAt = new Date().toISOString();
+    next._revision = Number(current._revision || 0) + 1;
+    next._baseRevision = next._revision;
+    await storage.set('workspaceState', next);
+    broadcastState(next);
+    return {
+      ...status,
+      state: next,
+      connectionMissing: false,
+      accountChanged: applied.accountChanged,
+      retiredArtifacts: applied.retiredArtifacts,
+      reviewedForms: applied.reviewedForms
+    };
+  });
+}
+
+async function assertExpectedConnection(connectionId, expectedIdentity) {
+  return runWorkspaceStateTransaction(async () => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const connection = current.connections.find((item) => item.id === connectionId);
+    if (!connection || connection.status !== 'connected' || !WorkspaceCore.connectionIdentityMatches(connection, expectedIdentity)) {
+      const error = new Error('계정 연결 상태가 변경되어 외부 작업을 중단했습니다. 최신 상태에서 다시 시도해주세요.');
+      error.code = 'CONNECTION_STATE_CHANGED';
+      throw error;
+    }
+    return connection;
+  });
+}
+
+async function listDriveWorkspaceFiles(connectionId) {
+  const name = 'cmoe-workspace-state.json';
+  const query = encodeURIComponent(`name='${name}' and trashed=false`);
+  const found = await authManager.request(connectionId, `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${query}&fields=files(id%2Cname%2CmodifiedTime%2Cversion)&pageSize=10&orderBy=modifiedTime%20desc`);
+  return Array.isArray(found.files) ? found.files : [];
+}
+
+async function fetchDriveWorkspaceMetadata(connectionId, fileId) {
+  const result = await authManager.requestWithMetadata(connectionId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id%2CmodifiedTime%2Cversion%2Ctrashed`);
+  return { ...result.data, etag: result.etag };
+}
+
+async function readStableDriveWorkspaceFile(connectionId, fileId, attempts = 2) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const before = await fetchDriveWorkspaceMetadata(connectionId, fileId);
+    if (before.trashed || !isUsableDriveEtag(before.etag)) {
+      const error = new Error('Drive 데이터의 변경 버전을 확인하지 못해 안전하게 가져올 수 없습니다.');
+      error.code = 'REMOTE_DRIVE_VERSION_MISSING';
+      throw error;
+    }
+    const content = await authManager.requestWithMetadata(connectionId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`);
+    const after = await fetchDriveWorkspaceMetadata(connectionId, fileId);
+    const expected = { fileId: before.id, modifiedTime: before.modifiedTime, etag: before.etag, version: before.version };
+    if (isUsableDriveEtag(after.etag) && driveSnapshotIdentityMatches(expected, after)) {
+      if (!content.data || typeof content.data !== 'object' || content.data.format !== 'cmoe-workspace') {
+        const error = new Error('Drive의 Workspace 파일 형식을 확인할 수 없어 가져오기를 중단했습니다.');
+        error.code = 'REMOTE_DRIVE_PAYLOAD_INVALID';
+        throw error;
+      }
+      return { state: content.data, identity: { fileId: after.id, modifiedTime: after.modifiedTime, etag: after.etag, version: String(after.version || '') } };
+    }
+  }
+  const error = new Error('가져오는 동안 다른 PC의 Drive 데이터가 계속 변경되었습니다. 최신 내용을 다시 가져와주세요.');
+  error.code = 'REMOTE_DRIVE_STATE_CHANGED';
+  throw error;
+}
+
+async function throwLatchedDriveConflict(connection, code, message, snapshot = {}) {
+  try { await driveSyncGuards.markConflict(connection, message, snapshot); }
+  catch (error) { console.error('Drive 충돌 잠금 저장 실패:', error); }
+  const conflict = new Error(message);
+  conflict.code = code;
+  throw conflict;
+}
+
+async function createDriveWorkspaceFile(connection, latestState) {
+  const boundary = `cmoe_workspace_${crypto.randomBytes(12).toString('hex')}`;
+  const body = [
+    `--${boundary}`,
+    'Content-Type: application/json; charset=UTF-8',
+    '',
+    JSON.stringify({ name: 'cmoe-workspace-state.json', parents: ['appDataFolder'] }),
+    `--${boundary}`,
+    'Content-Type: application/json; charset=UTF-8',
+    '',
+    JSON.stringify(latestState),
+    `--${boundary}--`,
+    ''
+  ].join('\r\n');
+  const response = await authManager.requestWithMetadata(connection.id, 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2CmodifiedTime%2Cversion', {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body
+  });
+  const createdFileId = String(response.data?.id || '');
+  const createdVersion = String(response.data?.version || '');
+  if (!createdFileId || !createdVersion) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_VERSION_MISSING', 'Drive 파일은 생성됐지만 생성 버전을 확인하지 못했습니다. Drive 데이터를 다시 불러와 확인해주세요.', { fileId: createdFileId, version: createdVersion });
+  }
+  let snapshot;
+  try { snapshot = await fetchDriveWorkspaceMetadata(connection.id, createdFileId); }
+  catch (_) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_VERSION_MISSING', 'Drive 파일은 생성됐지만 안전한 변경 버전을 다시 확인하지 못했습니다. Drive 데이터를 다시 불러와 확인해주세요.', { fileId: createdFileId, version: createdVersion });
+  }
+  if (snapshot.trashed || String(snapshot.id || '') !== createdFileId || String(snapshot.version || '') !== createdVersion || !isUsableDriveEtag(snapshot.etag)) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_VERSION_MISSING', 'Drive 파일은 생성됐지만 안전한 변경 버전을 확인하지 못했습니다. Drive 데이터를 다시 불러와 확인해주세요.', snapshot);
+  }
+  const files = await listDriveWorkspaceFiles(connection.id);
+  if (files.length !== 1 || String(files[0]?.id || '') !== createdFileId) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_DUPLICATE_FILES', '동시에 만들어진 Workspace Drive 파일이 둘 이상 확인되어 자동 저장을 중단했습니다. 데이터를 덮어쓰지 않았으니 Drive 상태를 점검해주세요.', snapshot);
+  }
+  await driveSyncGuards.observeRemote(connection, snapshot);
+  return { ...snapshot, fileId: snapshot.id };
+}
+
+async function uploadLatestWorkspaceStateToDrive(connectionId, expectedIdentity) {
+  const connection = await assertExpectedConnection(connectionId, expectedIdentity);
+  if (!connectionGuardKey(connection)) {
+    const error = new Error('Drive 동기화 기준을 계정별로 보호할 수 없어 저장을 중단했습니다. Drive 계정에 다시 로그인해주세요.');
+    error.code = 'DRIVE_ACCOUNT_IDENTITY_MISSING';
+    throw error;
+  }
+  const latestState = await runWorkspaceStateTransaction(async () => WorkspaceCore.normalizeState(await storage.get('workspaceState', null)));
+  const guard = await driveSyncGuards.get(connection);
+  if (guard?.state === 'conflict') {
+    const error = new Error(guard.reason || '다른 PC의 Drive 변경이 확인되어 자동 저장이 잠겼습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.');
+    error.code = 'REMOTE_DRIVE_CONFLICT_LATCHED';
+    throw error;
+  }
+  const files = await listDriveWorkspaceFiles(connectionId);
+  const canonicalFile = files[0] || null;
+  if (files.length > 1) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_DUPLICATE_FILES', 'Drive에 Workspace 파일이 둘 이상 있어 어느 데이터를 기준으로 할지 안전하게 판단할 수 없습니다. 자동 저장을 중단했습니다.', canonicalFile || guard || {});
+  }
+  if (!guard || guard.state === 'empty') {
+    if (canonicalFile) {
+      const stableRemote = await readStableDriveWorkspaceFile(connectionId, canonicalFile.id);
+      const normalizedRemote = WorkspaceCore.normalizeState(stableRemote.state);
+      if (drivePayloadsEqual(latestState, normalizedRemote)) {
+        await driveSyncGuards.observeRemote(connection, stableRemote.identity);
+        return { fileId: stableRemote.identity.fileId, modifiedTime: stableRemote.identity.modifiedTime, version: stableRemote.identity.version, migratedBaseline: true };
+      }
+      await throwLatchedDriveConflict(connection, 'DRIVE_SYNC_BASELINE_REQUIRED', '이 PC가 아직 확인하지 않은 Workspace 데이터가 Drive에 있습니다. 덮어쓰지 않고 중단했으니 먼저 Drive 자료를 가져와 확인해주세요.', canonicalFile);
+    }
+    const created = await createDriveWorkspaceFile(connection, latestState);
+    return { fileId: created.fileId, modifiedTime: created.modifiedTime || new Date().toISOString(), version: created.version || '' };
+  }
+  if (guard.state !== 'ready' || !guard.fileId || !isUsableDriveEtag(guard.etag)) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_VERSION_MISSING', '마지막으로 확인한 Drive 변경 버전이 없어 자동 저장을 중단했습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.', guard || {});
+  }
+  if (!canonicalFile || String(canonicalFile.id || '') !== guard.fileId) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_STATE_CHANGED', '다른 PC에서 Drive의 Workspace 파일이 바뀌거나 삭제되어 자동 저장을 중단했습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.', guard);
+  }
+  let currentRemote;
+  try {
+    currentRemote = await fetchDriveWorkspaceMetadata(connectionId, guard.fileId);
+  } catch (error) {
+    if (error?.status === 404) await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_STATE_CHANGED', 'Drive의 Workspace 파일이 삭제되어 자동 저장을 중단했습니다. Drive 자료를 다시 확인해주세요.', guard);
+    throw error;
+  }
+  if (currentRemote.trashed
+    || String(currentRemote.id || '') !== guard.fileId
+    || !isUsableDriveEtag(currentRemote.etag)
+    || currentRemote.etag !== guard.etag
+    || (guard.version && String(currentRemote.version || '') !== guard.version)) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_STATE_CHANGED', '다른 PC에서 Drive 데이터가 변경되어 이 PC의 자동 저장을 중단했습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.', currentRemote);
+  }
+  let uploaded;
+  try {
+    uploaded = await authManager.requestWithMetadata(connectionId, `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(guard.fileId)}?uploadType=media&fields=id%2CmodifiedTime%2Cversion`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'If-Match': guard.etag },
+      body: JSON.stringify(latestState)
+    });
+  } catch (error) {
+    if ([404, 412].includes(error?.status)) await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_STATE_CHANGED', '다른 PC에서 Drive 데이터가 먼저 변경되어 이 PC의 자동 저장을 중단했습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.', guard);
+    throw error;
+  }
+  const uploadedVersion = String(uploaded.data?.version || '');
+  if (!uploadedVersion) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_VERSION_MISSING', 'Drive 저장은 완료됐지만 새 파일 버전을 확인하지 못했습니다. 추가 덮어쓰기를 막았으니 Drive 데이터를 다시 불러와 확인해주세요.', { fileId: guard.fileId });
+  }
+  let snapshot;
+  try { snapshot = await fetchDriveWorkspaceMetadata(connectionId, guard.fileId); }
+  catch (_) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_VERSION_MISSING', 'Drive 저장은 완료됐지만 새 변경 버전을 다시 확인하지 못했습니다. 추가 덮어쓰기를 막았으니 Drive 데이터를 다시 불러와 확인해주세요.', { fileId: guard.fileId, version: uploadedVersion });
+  }
+  if (snapshot.trashed || String(snapshot.id || '') !== guard.fileId || String(snapshot.version || '') !== uploadedVersion || !isUsableDriveEtag(snapshot.etag)) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_STATE_CHANGED', 'Drive 저장 직후 다른 변경이 확인되어 추가 자동 저장을 중단했습니다. 최신 Drive 데이터를 다시 불러와 확인해주세요.', snapshot);
+  }
+  const confirmedFiles = await listDriveWorkspaceFiles(connectionId);
+  if (confirmedFiles.length !== 1 || String(confirmedFiles[0]?.id || '') !== guard.fileId) {
+    await throwLatchedDriveConflict(connection, 'REMOTE_DRIVE_DUPLICATE_FILES', 'Drive 저장 중 Workspace 파일 계보가 둘 이상 확인되어 추가 자동 저장을 중단했습니다.', snapshot);
+  }
+  await driveSyncGuards.observeRemote(connection, snapshot);
+  return { fileId: snapshot.id, modifiedTime: snapshot.modifiedTime || new Date().toISOString(), version: snapshot.version || '' };
+}
+
+function markMainDriveStateDirty(nextState) {
+  mainDriveSyncRevision += 1;
+  if (nextState?.preferences?.storageMode !== 'drive') {
+    mainDriveSyncDirty = false;
+    mainDriveSyncError = null;
+    clearTimeout(mainDriveSyncTimer);
+    mainDriveSyncTimer = null;
+    return;
+  }
+  mainDriveSyncDirty = true;
+  clearTimeout(mainDriveSyncTimer);
+  mainDriveSyncTimer = setTimeout(() => {
+    mainDriveSyncTimer = null;
+    void flushMainDriveStateSync().catch((error) => { mainDriveSyncError = error; });
+  }, 1500);
+}
+
+async function flushMainDriveStateSync() {
+  clearTimeout(mainDriveSyncTimer);
+  mainDriveSyncTimer = null;
+  if (mainDriveSyncPromise) return mainDriveSyncPromise;
+  mainDriveSyncPromise = (async () => {
+    while (mainDriveSyncDirty) {
+      const capturedRevision = mainDriveSyncRevision;
+      const latestState = await runWorkspaceStateTransaction(async () => WorkspaceCore.normalizeState(await storage.get('workspaceState', null)));
+      if (latestState.preferences.storageMode !== 'drive') { mainDriveSyncDirty = false; break; }
+      const connection = latestState.connections.find((item) => item.type === 'drive' && item.status === 'connected');
+      if (!connection) throw new Error('Google Drive 저장 모드이지만 연결된 Drive 계정이 없습니다. Drive 계정을 다시 연결하거나 저장 위치를 이 PC로 바꿔주세요.');
+      await connectionOperations.run(connection.id, () => runDriveStateTransaction(() => uploadLatestWorkspaceStateToDrive(connection.id, WorkspaceCore.connectionIdentity(connection))));
+      if (mainDriveSyncRevision === capturedRevision) mainDriveSyncDirty = false;
+    }
+    mainDriveSyncError = null;
+    return true;
+  })();
+  try { return await mainDriveSyncPromise; }
+  finally { mainDriveSyncPromise = null; }
+}
 
 function jsonBody(value) {
   return { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) };
@@ -55,7 +354,7 @@ function flushWorkspaceWindow(targetWindow, timeoutMs = 10_000) {
     const timeout = setTimeout(() => reject(new Error('변경사항 저장 시간이 초과되었습니다.')), timeoutMs);
     targetWindow.webContents.executeJavaScript('globalThis.flushWorkspaceEdits?.()').then((result) => {
       clearTimeout(timeout);
-      if (result === false) reject(new Error('변경사항을 저장하지 못했습니다.')); else resolve();
+      if (result !== true) reject(new Error('이 창이 변경사항 저장 완료를 확인하지 못했습니다.')); else resolve();
     }, (error) => { clearTimeout(timeout); reject(error); });
   });
 }
@@ -92,7 +391,7 @@ function createProgramWindow(programId, options = {}) {
   const legacyGmail = (programId === 'gmailFlow' || programId === 'people') && gmailFlowHost;
   const window = new BrowserWindow({ width: legacyGmail ? 1040 : 1220, height: 820, minWidth: legacyGmail ? 760 : 900, minHeight: 640, show: false, backgroundColor: legacyGmail ? '#f5f5f3' : '#f3f4f6', title: legacyGmail ? 'Gmail Flow' : `CMOE · ${programId}`, webPreferences: { preload: legacyGmail ? gmailFlowHost.preloadPath : path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.setMenuBarVisibility(false);
-  if (!legacyGmail) protectWorkspaceWindowClose(window);
+  protectWorkspaceWindowClose(window);
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => programWindows.delete(programId));
   if (programId === 'people') window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: '1', page: 'roster', projectId: options.projectId || '' } });
@@ -124,6 +423,7 @@ function createRosterPickerWindow(projectId, parentWindow = mainWindow) {
     webPreferences: { preload: gmailFlowHost.preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
   window.setMenuBarVisibility(false);
+  protectWorkspaceWindowClose(window);
   window.once('ready-to-show', () => { window.show(); window.focus(); });
   window.on('closed', () => rosterPickerWindows.delete(key));
   window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: '1', page: 'roster', projectId: key === 'quick' ? '' : key } });
@@ -157,25 +457,49 @@ function createWindow() {
   });
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('closed', () => { mainWindow = null; });
-  mainWindow.loadFile(path.join(__dirname, '..', 'index.html'));
+  mainWindow.loadFile(path.join(__dirname, '..', 'index.html'), isSmokeTest ? { query: { smoke: '1' } } : undefined);
 }
 
 function registerIpc() {
   ipcMain.handle('workspace:load', () => storage.get('workspaceState', null));
-  ipcMain.handle('workspace:save', async (_event, incoming) => {
+  ipcMain.handle('workspace:save', (event, incoming) => runWorkspaceStateTransaction(async () => {
     const mergeHints = incoming?._mergeHints && typeof incoming._mergeHints === 'object' ? incoming._mergeHints : {};
-    const cleanIncoming = { ...(incoming || {}) };
+    const externalCommit = incoming?._externalCommit && typeof incoming._externalCommit === 'object' ? incoming._externalCommit : null;
+    let cleanIncoming = { ...(incoming || {}) };
     delete cleanIncoming._mergeHints;
+    delete cleanIncoming._externalCommit;
     const current = await storage.get('workspaceState', null);
-    const currentRevision = Number(current?._revision || 0);
-    const baseRevision = Number(cleanIncoming._baseRevision ?? currentRevision);
-    let next = baseRevision === currentRevision ? cleanIncoming : mergeWorkspaceState(current || {}, cleanIncoming);
-    if (baseRevision !== currentRevision && Array.isArray(mergeHints.scheduleProjects)) next = overlayScheduleProjects(next, cleanIncoming, mergeHints.scheduleProjects, current || {});
+    let externalConflict = false; let externalConflictReason = '';
+    if (externalCommit) {
+      pruneExternalReservations();
+      const resolved = resolveExternalCommit(WorkspaceCore.normalizeState(current), cleanIncoming, externalCommit, externalArtifactReservations, event.sender.id);
+      cleanIncoming = resolved.state;
+      externalConflict = !resolved.ok;
+      externalConflictReason = resolved.reason;
+    }
+    const mergedState = mergeSelectedWorkspaceState(current, cleanIncoming, mergeHints);
+    const { currentRevision } = mergedState;
+    let next = mergedState.state;
+    next = recomputeMergedScheduleProjects(next, mergeHints.scheduleProjects);
     next._revision = currentRevision + 1; next._baseRevision = next._revision;
     await storage.set('workspaceState', next);
-    return { ok: true, state: next, merged: baseRevision !== currentRevision };
-  });
+    return { ok: true, state: next, merged: mergedState.merged, externalConflict, externalConflictReason };
+  }));
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
+  ipcMain.handle('workspace:external-reserve', (event, payload = {}) => {
+    pruneExternalReservations();
+    const projectId = String(payload.projectId || '').trim(); const kind = String(payload.kind || '').trim();
+    const keys = [...new Set((Array.isArray(payload.keys) ? payload.keys : []).map((key) => String(key || '').trim()).filter(Boolean))];
+    if (!projectId || !['zoom', 'gmailDraft', 'googleForm', 'connection'].includes(kind) || !keys.length || keys.some((key) => key.length > 200)) throw new Error('외부 작업 예약 정보가 올바르지 않습니다.');
+    const logicalKeys = keys.map((key) => `${projectId}:${kind}:${key}`);
+    const busyKeys = logicalKeys.filter((key) => externalArtifactReservations.has(key)).map((key) => key.slice(`${projectId}:${kind}:`.length));
+    if (busyKeys.length) return { ok: false, busyKeys };
+    const token = crypto.randomUUID(); const ownerId = event.sender.id; const expiresAt = Date.now() + 15 * 60 * 1000;
+    logicalKeys.forEach((key) => externalArtifactReservations.set(key, { token, ownerId, expiresAt }));
+    if (!externalReservationOwners.has(ownerId)) { externalReservationOwners.add(ownerId); event.sender.once('destroyed', () => releaseExternalReservationsForOwner(ownerId)); }
+    return { ok: true, token, expiresAt, keys };
+  });
+  ipcMain.handle('workspace:external-release', (event, token) => ({ ok: true, released: releaseExternalReservation(String(token || ''), event.sender.id) }));
   ipcMain.handle('program:open', (_event, programId, options = {}) => { if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
   ipcMain.handle('workspace:roster:open-picker', (event, projectId) => { createRosterPickerWindow(projectId, BrowserWindow.fromWebContents(event.sender) || mainWindow); return { ok: true }; });
   ipcMain.handle('workspace:roster:sources', async (_event, projectId) => {
@@ -191,7 +515,7 @@ function registerIpc() {
     const projectRoster = project ? toPopupRoster({ id: project.id, name: project.data.rosterName || `${project.name} 명단`, columns: project.data.columns, people: project.data.people }, 'project') : null;
     return { projectRoster, savedRosters: current.library.rosters.map((roster) => toPopupRoster(roster, 'saved')) };
   });
-  ipcMain.handle('workspace:roster:library-save', async (_event, payload = {}) => {
+  ipcMain.handle('workspace:roster:library-save', (_event, payload = {}) => runWorkspaceStateTransaction(async () => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const aliases = { name: /^(이름|성명|name)$/i, email: /^(이메일|메일|email|e-mail)$/i, phone: /^(전화번호|휴대폰|연락처|phone|mobile)$/i, group: /^(그룹|분류|소속|group)$/i, id: /^(아이디|id)$/i };
     const columns = (payload.columns || []).map((column, index) => {
@@ -219,14 +543,14 @@ function registerIpc() {
         rows: item.people.map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false }))
       }
     };
-  });
-  ipcMain.handle('workspace:roster:library-delete', async (_event, rosterId) => {
+  }));
+  ipcMain.handle('workspace:roster:library-delete', (_event, rosterId) => runWorkspaceStateTransaction(async () => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     current.library.rosters = current.library.rosters.filter((item) => item.id !== rosterId);
     current.updatedAt = new Date().toISOString();
     current._revision = Number(current._revision || 0) + 1; current._baseRevision = current._revision;
     await storage.set('workspaceState', current); broadcastState(current); return { ok: true };
-  });
+  }));
   ipcMain.handle('workspace:roster:get', async (_event, projectId) => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const project = current.projects.find((item) => item.id === projectId) || current.quickWorkspaces?.people;
@@ -240,7 +564,7 @@ function registerIpc() {
       peopleMeta: Object.fromEntries(project.data.people.map((person) => [person.id, { roleIds: person.roleIds, active: person.active }]))
     };
   });
-  ipcMain.handle('workspace:roster:save', async (_event, projectId, payload = {}) => {
+  ipcMain.handle('workspace:roster:save', (_event, projectId, payload = {}) => runWorkspaceStateTransaction(async () => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const projectIndex = current.projects.findIndex((item) => item.id === projectId);
     const project = projectIndex >= 0 ? current.projects[projectIndex] : current.quickWorkspaces?.people;
@@ -261,20 +585,44 @@ function registerIpc() {
       return { id, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: previous?.roleIds || ['participant'], active };
     });
     const keptIds = new Set(people.map((person) => person.id));
+    const removedIds = new Set(project.data.people.filter((person) => !keptIds.has(person.id)).map((person) => person.id));
+    const lockedRemovedAssignment = project.data.assignments.find((assignment) => removedIds.has(assignment.personId) && (assignment.locked || project.data.slots.some((slot) => slot.id === assignment.slotId && slot.locked)));
+    if (lockedRemovedAssignment) throw new Error('잠긴 일정에 배정된 인원이 명단에서 제외되었습니다. 해당 일정의 잠금을 해제한 뒤 다시 저장해주세요.');
+    const beforeAssignments = project.data.assignments.map((assignment) => ({ ...assignment }));
+    const personSignature = (person) => JSON.stringify(person ? [person.name, person.email, person.phone, person.group, person.active !== false, [...(person.roleIds || [])].sort(), Object.entries(person.values || {}).sort(([left], [right]) => left.localeCompare(right))] : null);
+    const columnsChanged = JSON.stringify(project.data.columns.map((column) => [column.id, column.name, column.type])) !== JSON.stringify(columns.map((column) => [column.id, column.name, column.type]));
+    const rosterChanged = columnsChanged || project.data.people.length !== people.length || people.some((person) => personSignature(person) !== personSignature(oldPeople.get(person.id)));
     project.data.rosterName = String(payload.name || project.data.rosterName || `${project.name} 명단`).trim();
     project.data.columns = columns; project.data.people = people;
     project.data.assignments = project.data.assignments.filter((item) => keptIds.has(item.personId));
     project.data.availability = Object.fromEntries(Object.entries(project.data.availability || {}).filter(([personId]) => keptIds.has(personId)));
+    project.data.conflicts = OperationsCore.collectScheduleConflicts(project);
+    const zoomReviewSlotIds = project.data.slots.filter((slot) => beforeAssignments.some((assignment) => assignment.slotId === slot.id) && !project.data.assignments.some((assignment) => assignment.slotId === slot.id)).map((slot) => slot.id);
+    if (rosterChanged) {
+      const now = new Date().toISOString();
+      project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => {
+        if (artifact.kind === 'gmailDraft' && removedIds.has(artifact.personId)) return { ...artifact, status: 'superseded', replacedAt: now };
+        if (artifact.kind === 'gmailDraft' && artifact.status !== 'superseded') return { ...artifact, status: 'stale' };
+        if (artifact.kind === 'zoom' && zoomReviewSlotIds.includes(artifact.slotId) && artifact.status !== 'superseded') return { ...artifact, status: 'stale' };
+        return artifact;
+      });
+      project.data.slots.filter((slot) => zoomReviewSlotIds.includes(slot.id) && slot.status === 'confirmed').forEach((slot) => { slot.status = 'changed'; });
+    }
     project.updatedAt = new Date().toISOString();
     let next;
-    if (projectIndex >= 0) next = WorkspaceCore.setModuleStatus(WorkspaceCore.updateProject(current, project.id, { data: project.data }), project.id, 'people', people.length ? 'complete' : 'inProgress', `${people.length}명 명단 저장`);
+    if (projectIndex >= 0) {
+      next = WorkspaceCore.setModuleStatus(WorkspaceCore.updateProject(current, project.id, { data: project.data }), project.id, 'people', people.length ? 'complete' : 'inProgress', `${people.length}명 명단 저장`);
+      if (project.data.slots.length && rosterChanged) next = WorkspaceCore.setModuleStatus(next, project.id, 'schedule', project.data.conflicts.length ? 'needsReview' : 'stale', project.data.conflicts.length ? `명단 변경 후 문제 ${project.data.conflicts.length}건` : '명단 변경 후 일정 재검토 필요');
+      if (project.data.externalArtifacts.some((artifact) => artifact.kind === 'gmailDraft' && artifact.status === 'stale')) next = WorkspaceCore.setModuleStatus(next, project.id, 'gmailFlow', 'stale', '명단 변경 후 안내 메일 확인 필요');
+      if (project.data.externalArtifacts.some((artifact) => artifact.kind === 'zoom' && artifact.status === 'stale')) next = WorkspaceCore.setModuleStatus(next, project.id, 'zoom', 'stale', '명단 변경 후 Zoom 확인 필요');
+    }
     else { current.quickWorkspaces.people = WorkspaceCore.normalizeState({ ...current, quickWorkspaces: { ...current.quickWorkspaces, people: project } }).quickWorkspaces.people; next = current; }
     next.updatedAt = new Date().toISOString();
     next._revision = Number(current._revision || 0) + 1; next._baseRevision = next._revision;
     await storage.set('workspaceState', next);
     broadcastState(next);
     return { ok: true, count: people.length, state: next };
-  });
+  }));
   ipcMain.handle('window:close-self', (event) => { BrowserWindow.fromWebContents(event.sender)?.close(); return { ok: true }; });
   ipcMain.handle('workspace:open-main', () => { showWindow(); return { ok: true }; });
   ipcMain.handle('program:shortcuts', async (_event, programId, options = {}) => {
@@ -322,12 +670,19 @@ function registerIpc() {
     if (result.canceled || !result.filePath) return { canceled: true };
     await exportWorkItemWorkbook(result.filePath, item); return { canceled: false, filePath: result.filePath };
   });
-  ipcMain.handle('connection:config', (_event, connectionId, config) => authManager.setConfig(connectionId, config));
+  ipcMain.handle('connection:config', (_event, connectionId, config) => connectionOperations.transition(connectionId, () => authManager.setConfig(connectionId, config)));
   ipcMain.handle('connection:status', (_event, connectionId) => authManager.publicStatus(connectionId));
-  ipcMain.handle('connection:authorize', (_event, connectionId, options) => authManager.authorize(connectionId, options));
-  ipcMain.handle('connection:disconnect', (_event, connectionId) => authManager.disconnect(connectionId));
-  ipcMain.handle('connection:remove', (_event, connectionId) => authManager.remove(connectionId));
-  ipcMain.handle('forms:create', async (_event, connectionId, definition, requests) => {
+  ipcMain.handle('connection:authorize', (_event, connectionId, options) => connectionOperations.transition(connectionId, async () => {
+    const status = await authManager.authorize(connectionId, options);
+    return persistAuthorizedConnection(connectionId, status);
+  }));
+  ipcMain.handle('connection:disconnect', (_event, connectionId) => connectionOperations.transition(connectionId, async () => {
+    const status = await authManager.disconnect(connectionId);
+    return persistAuthorizedConnection(connectionId, status);
+  }));
+  ipcMain.handle('connection:remove', (_event, connectionId) => connectionOperations.transition(connectionId, () => authManager.remove(connectionId)));
+  ipcMain.handle('forms:create', (_event, connectionId, definition, requests, expectedIdentity) => connectionOperations.run(connectionId, async () => {
+    await assertExpectedConnection(connectionId, expectedIdentity);
     const created = await authManager.request(connectionId, 'https://forms.googleapis.com/v1/forms', jsonBody({ info: { title: definition.title, documentTitle: definition.title } }));
     const updated = await authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${encodeURIComponent(created.formId)}:batchUpdate`, jsonBody({ requests }));
     const questionIds = {};
@@ -337,16 +692,16 @@ function registerIpc() {
       if (id) questionIds[question.key] = id;
     });
     return { formId: created.formId, responderUri: created.responderUri || '', editUri: `https://docs.google.com/forms/d/${created.formId}/edit`, questionIds };
-  });
-  ipcMain.handle('forms:responses', async (_event, connectionId, formId) => {
+  }));
+  ipcMain.handle('forms:responses', (_event, connectionId, formId, expectedIdentity) => connectionOperations.run(connectionId, async () => {
+    await assertExpectedConnection(connectionId, expectedIdentity);
     const id = encodeURIComponent(formId);
-    const [form, responseData] = await Promise.all([
-      authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${id}`),
-      authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${id}/responses`)
-    ]);
+    const form = await authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${id}`);
+    const responseData = await authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${id}/responses`);
     return { form, responses: responseData.responses || [] };
-  });
-  ipcMain.handle('zoom:create', async (_event, connectionId, meeting) => {
+  }));
+  ipcMain.handle('zoom:create', (_event, connectionId, meeting, expectedIdentity) => connectionOperations.run(connectionId, async () => {
+    await assertExpectedConnection(connectionId, expectedIdentity);
     return authManager.request(connectionId, 'https://api.zoom.us/v2/users/me/meetings', jsonBody({
       topic: meeting.topic,
       type: 2,
@@ -356,34 +711,92 @@ function registerIpc() {
       agenda: meeting.agenda || '',
       settings: { waiting_room: true, join_before_host: false, mute_upon_entry: true }
     }));
-  });
-  ipcMain.handle('gmail:create-draft', async (_event, connectionId, mail) => {
+  }));
+  ipcMain.handle('gmail:create-draft', (_event, connectionId, mail, expectedIdentity) => connectionOperations.run(connectionId, async () => {
+    await assertExpectedConnection(connectionId, expectedIdentity);
     return authManager.request(connectionId, 'https://gmail.googleapis.com/gmail/v1/users/me/drafts', jsonBody({ message: { raw: mimeDraft({ to: mail.email, subject: mail.subject, body: mail.body, bodyHtml: mail.bodyHtml }) } }));
-  });
-  ipcMain.handle('gmail:update-draft', async (_event, connectionId, draftId, mail) => {
+  }));
+  ipcMain.handle('gmail:update-draft', (_event, connectionId, draftId, mail, expectedIdentity) => connectionOperations.run(connectionId, async () => {
+    await assertExpectedConnection(connectionId, expectedIdentity);
     return authManager.request(connectionId, `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${encodeURIComponent(draftId)}`, { ...jsonBody({ id: draftId, message: { raw: mimeDraft({ to: mail.email, subject: mail.subject, body: mail.body, bodyHtml: mail.bodyHtml }) } }), method: 'PUT' });
+  }));
+  ipcMain.handle('drive:push', (_event, connectionId, _rendererState, expectedIdentity) => {
+    const capturedRevision = mainDriveSyncRevision;
+    return connectionOperations.run(connectionId, () => runDriveStateTransaction(() => uploadLatestWorkspaceStateToDrive(connectionId, expectedIdentity))).then((result) => {
+      if (mainDriveSyncRevision === capturedRevision) mainDriveSyncDirty = false;
+      mainDriveSyncError = null;
+      return result;
+    });
   });
-  ipcMain.handle('drive:push', async (_event, connectionId, state) => {
-    const name = 'cmoe-workspace-state.json';
-    const query = encodeURIComponent(`name='${name}' and trashed=false`);
-    const found = await authManager.request(connectionId, `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${query}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime%20desc`);
-    let fileId = found.files?.[0]?.id;
-    if (!fileId) {
-      const created = await authManager.request(connectionId, 'https://www.googleapis.com/drive/v3/files', jsonBody({ name, parents: ['appDataFolder'] }));
-      fileId = created.id;
+  ipcMain.handle('drive:pull', (_event, connectionId, expectedIdentity) => connectionOperations.run(connectionId, () => runDriveStateTransaction(async () => {
+    const connection = await assertExpectedConnection(connectionId, expectedIdentity);
+    if (!connectionGuardKey(connection)) {
+      const error = new Error('Drive 동기화 기준을 계정별로 확인할 수 없습니다. Drive 계정에 다시 로그인해주세요.');
+      error.code = 'DRIVE_ACCOUNT_IDENTITY_MISSING';
+      throw error;
     }
-    const uploaded = await authManager.request(connectionId, `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) });
-    return { fileId, modifiedTime: uploaded.modifiedTime || new Date().toISOString() };
-  });
-  ipcMain.handle('drive:pull', async (_event, connectionId) => {
-    const name = 'cmoe-workspace-state.json';
-    const query = encodeURIComponent(`name='${name}' and trashed=false`);
-    const found = await authManager.request(connectionId, `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${query}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime%20desc`);
-    const file = found.files?.[0];
-    if (!file) return { exists: false };
-    const state = await authManager.request(connectionId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`);
-    return { exists: true, state, fileId: file.id, modifiedTime: file.modifiedTime };
-  });
+    const files = await listDriveWorkspaceFiles(connectionId);
+    if (files.length > 1) {
+      const error = new Error('Drive에 Workspace 파일이 둘 이상 있어 안전하게 가져올 수 없습니다. 데이터를 덮어쓰지 않았으니 Drive 상태를 점검해주세요.');
+      error.code = 'REMOTE_DRIVE_DUPLICATE_FILES';
+      throw error;
+    }
+    const file = files[0];
+    if (!file) {
+      await driveSyncGuards.observeEmpty(connection);
+      return { exists: false };
+    }
+    const stable = await readStableDriveWorkspaceFile(connectionId, file.id);
+    return { exists: true, state: stable.state, ...stable.identity };
+  })));
+  ipcMain.handle('drive:apply-pull', (_event, connectionId, pulledState, fileId, modifiedTime, expectedIdentity, expectedWorkspaceIdentity, etag, version) => connectionOperations.run(connectionId, () => runDriveStateTransaction(() => runWorkspaceStateTransaction(async () => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const connection = current.connections.find((item) => item.id === connectionId);
+    if (!connection || connection.status !== 'connected' || !WorkspaceCore.connectionIdentityMatches(connection, expectedIdentity)) {
+      const error = new Error('Drive 데이터를 확인하는 동안 계정 연결 상태가 변경되었습니다. 최신 상태에서 다시 시도해주세요.');
+      error.code = 'CONNECTION_STATE_CHANGED';
+      throw error;
+    }
+    const expectedRevision = Number(expectedWorkspaceIdentity?._revision || 0);
+    const expectedUpdatedAt = String(expectedWorkspaceIdentity?.updatedAt || '');
+    if (Number(current._revision || 0) !== expectedRevision || String(current.updatedAt || '') !== expectedUpdatedAt) {
+      const error = new Error('Drive 데이터를 확인하는 동안 이 PC의 Workspace가 변경되었습니다. 변경 내용을 보호하기 위해 불러오기를 중단했습니다.');
+      error.code = 'WORKSPACE_STATE_CHANGED';
+      throw error;
+    }
+    if (!isUsableDriveEtag(etag)) {
+      const error = new Error('가져온 Drive 데이터의 변경 버전을 확인할 수 없어 적용을 중단했습니다.');
+      error.code = 'REMOTE_DRIVE_VERSION_MISSING';
+      throw error;
+    }
+    const files = await listDriveWorkspaceFiles(connectionId);
+    if (files.length !== 1 || String(files[0]?.id || '') !== String(fileId || '')) {
+      const error = new Error('확인하는 동안 Drive의 Workspace 파일이 바뀌었습니다. 최신 내용을 다시 불러와 확인해주세요.');
+      error.code = 'REMOTE_DRIVE_STATE_CHANGED';
+      throw error;
+    }
+    const remoteFile = await fetchDriveWorkspaceMetadata(connectionId, fileId);
+    if (!driveSnapshotIdentityMatches({ fileId, modifiedTime, etag, version }, remoteFile)) {
+      const error = new Error('확인하는 동안 다른 PC의 Drive 데이터가 변경되었습니다. 최신 내용을 다시 불러와 확인해주세요.');
+      error.code = 'REMOTE_DRIVE_STATE_CHANGED';
+      throw error;
+    }
+    if (!isUsableDriveEtag(remoteFile.etag)) {
+      const error = new Error('Drive 데이터의 변경 버전을 확인하지 못해 안전하게 불러올 수 없습니다. 잠시 후 다시 시도해주세요.');
+      error.code = 'REMOTE_DRIVE_VERSION_MISSING';
+      throw error;
+    }
+    const next = WorkspaceCore.normalizeState(preserveLocalConnectionContext(pulledState, current));
+    next.preferences.storageMode = 'drive';
+    next.preferences.lastDriveSyncAt = modifiedTime || new Date().toISOString();
+    next.updatedAt = new Date().toISOString();
+    next._revision = Number(current._revision || 0) + 1;
+    next._baseRevision = next._revision;
+    await storage.set('workspaceState', next);
+    await driveSyncGuards.observeRemote(connection, { fileId, modifiedTime: remoteFile.modifiedTime, etag: remoteFile.etag, version: remoteFile.version });
+    broadcastState(next);
+    return { ok: true, state: next };
+  }))));
 }
 
 app.setAppUserModelId('kr.co.cmoe.workspace');
@@ -392,11 +805,16 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitFlushInProgress) return;
   quitFlushInProgress = true;
-  const windows = [...new Set([mainWindow, ...programWindows.values()].filter((window) => window && !window.isDestroyed()))];
-  Promise.all(windows.map((window) => flushWorkspaceWindow(window, 15_000))).then(() => {
+  const windows = [...new Set([mainWindow, ...programWindows.values(), ...rosterPickerWindows.values()].filter((window) => window && !window.isDestroyed()))];
+  windows.forEach((window) => window.setEnabled(false));
+  Promise.all(windows.map((window) => flushWorkspaceWindow(window, 15_000)))
+    .then(() => gmailFlowHost?.flushMailQueue?.())
+    .then(() => flushMainDriveStateSync()).then(() => {
     quitReady = true; isQuitting = true; app.quit();
   }).catch((error) => {
     quitFlushInProgress = false; isQuitting = false;
+    void gmailFlowHost?.resumeMailQueue?.().catch(console.error);
+    windows.forEach((window) => { if (!window.isDestroyed()) window.setEnabled(true); });
     const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
     void dialog.showMessageBox(parent, { type: 'warning', title: '변경사항 저장 필요', message: '아직 저장하지 못한 변경사항이 있어 앱을 종료하지 않았습니다.', detail: error?.message || '잠시 후 다시 시도해주세요.' });
   });
@@ -417,8 +835,9 @@ app.whenReady().then(async () => {
   }
   storage = new JsonStorage(path.join(userDataPath, 'workspace-data.json'), (changes) => {
     const next = changes.workspaceState?.newValue;
-    if (next) broadcastState(next);
+    if (next) { broadcastState(next); markMainDriveStateDirty(next); }
   });
+  driveSyncGuards = new DriveSyncGuardStore(storage);
   authManager = new AuthManager({
     filePath: path.join(userDataPath, 'workspace-credentials.json'),
     openExternal: (url) => shell.openExternal(url),
@@ -431,8 +850,9 @@ app.whenReady().then(async () => {
   await gmailFlowHost.initialize();
   const preMigrationState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
   const centralRosterMigrationKey = 'workspaceCentralRosterMigrationV1';
-  if (!await gmailFlowHost.storage.get(centralRosterMigrationKey, false)) {
-    const legacyRosters = await gmailFlowHost.storage.get('savedRosters', []);
+  const centralRosterMigrationState = await gmailFlowHost.storage.get({ [centralRosterMigrationKey]: false, savedRosters: [] });
+  if (!centralRosterMigrationState[centralRosterMigrationKey]) {
+    const legacyRosters = Array.isArray(centralRosterMigrationState.savedRosters) ? centralRosterMigrationState.savedRosters : [];
     const existingIds = new Set(preMigrationState.library.rosters.map((roster) => roster.id));
     let imported = 0;
     for (const roster of Array.isArray(legacyRosters) ? legacyRosters : []) {
@@ -450,7 +870,7 @@ app.whenReady().then(async () => {
       preMigrationState.updatedAt = new Date().toISOString(); preMigrationState._revision = Number(preMigrationState._revision || 0) + 1; preMigrationState._baseRevision = preMigrationState._revision;
       await storage.set('workspaceState', preMigrationState);
     }
-    await gmailFlowHost.storage.set(centralRosterMigrationKey, true);
+    await gmailFlowHost.storage.set({ [centralRosterMigrationKey]: true });
   }
   await gmailFlowHost.importLegacyRosters(preMigrationState.library?.rosters || []);
   registerIpc();
@@ -458,8 +878,10 @@ app.whenReady().then(async () => {
   if (initialProgram && !isSmokeTest) createProgramWindow(initialProgram); else createWindow();
 
   if (isSmokeTest) {
+    writeSmokeResult('running', { step: 'started' });
     const timeout = setTimeout(() => {
       console.error('Workspace smoke test timed out.');
+      writeSmokeResult('timeout', { step: 'global-timeout' });
       isQuitting = true;
       app.exit(1);
     }, 30_000);
@@ -496,6 +918,17 @@ app.whenReady().then(async () => {
             switcher.value = [...switcher.options].find((option) => option.textContent.includes('Project A')).value;
             switcher.dispatchEvent(new Event('change', { bubbles: true }));
             await waitFor(() => document.querySelector('#activeProjectName')?.textContent === 'Smoke Project A', 'project switch');
+            const reservationState = await globalThis.workspaceDesktop.loadState(); const reservationProjectId = reservationState.activeProjectId;
+            const firstReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'gmailDraft', ['reservation-person']);
+            const competingReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'gmailDraft', ['reservation-person']);
+            assert(firstReservation.ok && !competingReservation.ok, 'the same external artifact key cannot be processed by two windows at once');
+            assert(JSON.stringify(firstReservation.keys) === JSON.stringify(['reservation-person']), 'reservation IPC must return the exact normalized key set used by the commit guard');
+            await globalThis.workspaceDesktop.releaseExternalArtifacts(firstReservation.token);
+            const releasedReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'gmailDraft', ['reservation-person']);
+            assert(releasedReservation.ok, 'released external artifact keys can be reserved again'); await globalThis.workspaceDesktop.releaseExternalArtifacts(releasedReservation.token);
+            const formsReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'googleForm', ['forms']);
+            const competingFormsReservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(reservationProjectId, 'googleForm', ['forms']);
+            assert(formsReservation.ok && !competingFormsReservation.ok, 'Google Forms operations are serialized per project'); await globalThis.workspaceDesktop.releaseExternalArtifacts(formsReservation.token);
             assert(document.querySelector('#activeWorkflowTemplate')?.textContent.includes('교육 프로그램 운영'), 'workflow template badge');
             const checklistCard = [...document.querySelectorAll('#workflowGrid .workflow-card')].find((card) => card.querySelector('h3')?.textContent.includes('출결·수료'));
             checklistCard.querySelector('[data-workflow-step-open]').click();
@@ -553,6 +986,10 @@ app.whenReady().then(async () => {
             assert(document.querySelector('#arrangementBoard tbody [data-arrangement-row="0"][data-arrangement-col="0"] input').value === '그룹 1', 'sequential group draft');
             const arrangementCell = document.querySelector('#arrangementBoard [data-arrangement-row="0"][data-arrangement-col="0"]'); arrangementCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 })); globalThis.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
             const arrangementCopy = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: arrangementCopy, bubbles: true, cancelable: true }));
+            const focusedArrangementInput = arrangementCell.querySelector('input'); focusedArrangementInput.focus(); focusedArrangementInput.value = '종료 직전 저장'; focusedArrangementInput.dispatchEvent(new Event('input', { bubbles: true }));
+            await globalThis.flushWorkspaceEdits();
+            const flushedArrangementState = await globalThis.workspaceDesktop.loadState(); const flushedArrangementProject = flushedArrangementState.projects.find((project) => project.id === flushedArrangementState.activeProjectId);
+            assert(flushedArrangementProject.data.workItems.some((item) => item.rows.some((row) => Object.values(row.values).includes('종료 직전 저장'))), 'focused arrangement cell must be committed by the quit flush');
             document.querySelector('#page-arrange [data-nav-link="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'back to people');
             document.querySelector('#rosterStartTask').click(); await waitFor(() => document.querySelector('[data-open-arrangement]'), 'saved arrangement listed'); document.querySelector('[data-open-arrangement]').click(); await waitFor(() => document.querySelector('#page-arrange').classList.contains('active'), 'reopen saved arrangement'); document.querySelector('#page-arrange [data-nav-link="people"]').click();
@@ -599,6 +1036,8 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#confirmDialog').open, 'schedule paste replacement confirm'); document.querySelector('#confirmAction').click();
             await waitFor(() => [...document.querySelectorAll('[data-schedule-rename-column]')].some((button) => button.textContent === '운영 메모'), 'dynamic schedule column import');
             assert([...document.querySelectorAll('#scheduleBoard tbody input')].some((input) => input.value === '확인 완료'), 'custom schedule cell persisted in editor');
+            await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2, 'generic participant column mapped to assignments');
+            assert([...document.querySelectorAll('#sessionPersonPool [data-session-person]')].every((chip) => chip.textContent.includes('일정 1개')), 'customer counts, calendar cards, and spreadsheet assignments must stay consistent');
             document.querySelector('#saveScheduleVersion').click();
             await new Promise((resolve) => setTimeout(resolve, 250));
             document.querySelector('#page-schedule [data-nav-link="dashboard"]').click();
@@ -637,7 +1076,10 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelectorAll('[data-mail-edit]').length === 2, 'mail preview');
             document.querySelector('[data-mail-edit]').click();
             await waitFor(() => document.querySelector('#mailEditDialog').open, 'personal mail editor');
-            document.querySelector('#mailEditSubject').value += ' 개인수정';
+            document.querySelector('#mailEditSubject').value += ' 개인수정'; document.querySelector('#mailEditSubject').focus(); document.querySelector('#mailEditSubject').dispatchEvent(new Event('input', { bubbles: true }));
+            await globalThis.flushWorkspaceEdits();
+            const flushedPersonalMailState = await globalThis.workspaceDesktop.loadState(); const flushedPersonalMailProject = flushedPersonalMailState.projects.find((project) => project.id === flushedPersonalMailState.activeProjectId);
+            assert(flushedPersonalMailProject.data.communication.mailEdits[document.querySelector('#mailEditPersonId').value]?.subject.endsWith('개인수정'), 'open personal mail editor must be committed by the quit flush');
             document.querySelector('#mailEditForm').requestSubmit();
             await waitFor(() => !document.querySelector('#mailEditDialog').open, 'personal mail saved');
             const persisted = await globalThis.workspaceDesktop.loadState();
@@ -656,47 +1098,59 @@ app.whenReady().then(async () => {
         `);
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#toastRegion').replaceChildren(); document.querySelector('#dashboardContent').scrollIntoView({block:'start'});`);
         await new Promise((resolve) => setTimeout(resolve, 350));
-        const workflowPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-workflow-smoke.png');
-        const workflowPreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(workflowPreviewPath, workflowPreview.toPNG());
-        console.log(`Workspace workflow preview: ${workflowPreviewPath}`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-workflow-smoke.png', 'Workspace workflow preview');
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#newProjectButton').click()`);
         await new Promise((resolve) => setTimeout(resolve, 250));
-        const templatePreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-template-picker-smoke.png');
-        const templatePreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(templatePreviewPath, templatePreview.toPNG());
-        console.log(`Workspace template picker preview: ${templatePreviewPath}`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-template-picker-smoke.png', 'Workspace template picker preview');
         await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-close-dialog="newProjectDialog"]').click()`);
-        await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-workflow-open="schedule"]').click(); document.querySelector('#toastRegion').replaceChildren(); document.querySelector('.session-planner-panel').scrollIntoView({block:'start'});`);
+        await mainWindow.webContents.executeJavaScript(`(async () => {
+          const waitFor = async (predicate, label) => { const end = Date.now() + 5000; while (!predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25)); if (!predicate()) throw new Error('Timed out waiting for ' + label); };
+          document.querySelector('[data-workflow-open="schedule"]').click();
+          await waitFor(() => document.querySelector('#page-schedule')?.classList.contains('active'), 'schedule screenshot page');
+          await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2 && document.querySelectorAll('[data-session-slot]').length === 1, 'consistent schedule screenshot state');
+          document.querySelector('#sessionAddEmptyTime').click();
+          await waitFor(() => document.querySelector('#nameInputDialog').open, 'visual target slot dialog');
+          document.querySelector('#nameInputValue').value = '2026-07-06 11:00-12:00 변경 후보'; document.querySelector('#nameInputForm').requestSubmit();
+          await waitFor(() => document.querySelectorAll('[data-session-slot]').length === 2, 'visual target slot');
+          document.querySelector('[data-session-assignment]').click();
+          await waitFor(() => !document.querySelector('#sessionSelectedPersonPanel').hidden, 'selected customer');
+          document.querySelectorAll('[data-session-slot]')[1].click();
+          await waitFor(() => !document.querySelector('#sessionChangePreview').hidden, 'visible before-and-after preview');
+          document.querySelector('#toastRegion').replaceChildren(); document.querySelector('.session-planner-panel').scrollIntoView({block:'start'}); window.scrollBy(0, -70);
+          return true;
+        })()`);
         await new Promise((resolve) => setTimeout(resolve, 350));
-        const sessionPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-session-planner-smoke.png');
-        const sessionPreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(sessionPreviewPath, sessionPreview.toPNG());
-        console.log(`Workspace session planner preview: ${sessionPreviewPath}`);
-        await mainWindow.webContents.executeJavaScript(`document.querySelector('.schedule-board-panel').scrollIntoView({block:'start'});`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-session-planner-smoke.png', 'Workspace session planner preview');
+        writeSmokeResult('running', { step: app.isPackaged ? 'session-planner-verified' : 'session-planner-preview' });
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('#sessionCancelChange').click()`);
+        writeSmokeResult('running', { step: 'cleanup-preview-cancelled' });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const removalStarted = await mainWindow.webContents.executeJavaScript(`(() => { const extra = [...document.querySelectorAll('[data-session-slot]')].find((card) => card.textContent.includes('11:00–12:00')); const remove = extra?.querySelector('[data-session-remove]'); if (!remove) return false; remove.click(); return true; })()`);
+        if (!removalStarted) throw new Error('Visual target cleanup button was not found.');
+        writeSmokeResult('running', { step: 'cleanup-remove-clicked' });
+        const confirmDeadline = Date.now() + 5000;
+        while (!await mainWindow.webContents.executeJavaScript(`Boolean(document.querySelector('#confirmDialog').open)`) && Date.now() < confirmDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
+        if (!await mainWindow.webContents.executeJavaScript(`Boolean(document.querySelector('#confirmDialog').open)`)) throw new Error('Timed out waiting for visual target cleanup confirmation.');
+        writeSmokeResult('running', { step: 'cleanup-confirm-visible' });
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('#confirmAction').click()`);
+        writeSmokeResult('running', { step: 'cleanup-confirm-clicked' });
+        const cleanupDeadline = Date.now() + 5000;
+        while (!await mainWindow.webContents.executeJavaScript(`document.querySelectorAll('[data-session-slot]').length === 1`) && Date.now() < cleanupDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
+        if (!await mainWindow.webContents.executeJavaScript(`document.querySelectorAll('[data-session-slot]').length === 1`)) throw new Error('Timed out waiting for visual target cleanup.');
+        writeSmokeResult('running', { step: 'cleanup-complete' });
+        await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-session-clear-person]')?.click(); document.querySelector('#toastRegion').replaceChildren(); document.querySelector('.schedule-board-panel').scrollIntoView({block:'start'}); window.scrollBy(0, -70);`);
         await new Promise((resolve) => setTimeout(resolve, 250));
-        const schedulePreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-schedule-smoke.png');
-        const schedulePreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(schedulePreviewPath, schedulePreview.toPNG());
-        console.log(`Workspace schedule preview: ${schedulePreviewPath}`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-schedule-smoke.png', 'Workspace schedule preview');
+        writeSmokeResult('running', { step: 'schedule-preview' });
         await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-workflow-open="people"]').click()`);
         await new Promise((resolve) => setTimeout(resolve, 350));
-        const peoplePreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-people-smoke.png');
-        const peoplePreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(peoplePreviewPath, peoplePreview.toPNG());
-        console.log(`Workspace people preview: ${peoplePreviewPath}`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-people-smoke.png', 'Workspace people preview');
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#rosterStartTask').click(); document.querySelector('[data-open-arrangement]')?.click();`);
         await new Promise((resolve) => setTimeout(resolve, 350));
-        const arrangementPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-arrangement-smoke.png');
-        const arrangementPreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(arrangementPreviewPath, arrangementPreview.toPNG());
-        console.log(`Workspace arrangement preview: ${arrangementPreviewPath}`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-arrangement-smoke.png', 'Workspace arrangement preview');
         await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-nav="dashboard"]').click(); document.querySelector('[data-workflow-open="gmailFlow"]').click(); document.querySelector('#toastRegion').replaceChildren(); document.querySelector('#page-gmailFlow').scrollIntoView({block:'start'});`);
         await new Promise((resolve) => setTimeout(resolve, 350));
-        const gmailPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-gmail-smoke.png');
-        const gmailPreview = await mainWindow.webContents.capturePage();
-        await fs.promises.writeFile(gmailPreviewPath, gmailPreview.toPNG());
-        console.log(`Workspace Gmail preview: ${gmailPreviewPath}`);
+        await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-gmail-smoke.png', 'Workspace Gmail preview');
         const standalone = createProgramWindow('gmailFlow');
         if (standalone.webContents.isLoading()) await new Promise((resolve) => standalone.webContents.once('did-finish-load', resolve));
         const standaloneResult = await standalone.webContents.executeJavaScript(`
@@ -717,11 +1171,28 @@ app.whenReady().then(async () => {
           })()
         `);
         if (!Object.values(standaloneResult).every(Boolean)) throw new Error(`Standalone Gmail Flow smoke failed: ${JSON.stringify(standaloneResult)}`);
+        const disconnectedCleanFlush = await standalone.webContents.executeJavaScript(`(async () => {
+          const previousMode = state.dataStorageMode; const previousEmail = state.connectedEmail; const previousContextRevision = cloudSyncContextRevision;
+          try {
+            state.dataStorageMode = 'drive'; state.connectedEmail = ''; cloudSyncTracker.clear();
+            const clean = await globalThis.flushWorkspaceEdits();
+            cloudSyncTracker.markDirty();
+            let dirtyBlocked = false;
+            try { await globalThis.flushWorkspaceEdits(); } catch (error) { dirtyBlocked = /연결된 Google 계정/.test(error.message); }
+            cloudSyncTracker.clear(); state.connectedEmail = 'smoke@example.com';
+            const beforeDraft = await storage.get(WORKSPACE_DRAFT_KEY, null);
+            const expectedRevision = cloudSyncTracker.capture(); const expectedContext = captureCloudSyncContext();
+            const applyPromise = applyCloudSnapshot({ format: 'gmail-flow-cloud-sync', schemaVersion: 1, data: { savedRosters: [], templates: [], structureTemplates: [], workspaceDraft: { remote: true } } }, { id: 'remote-smoke' }, expectedRevision, expectedContext);
+            cloudSyncContextRevision += 1; state.dataStorageMode = 'local';
+            const staleApplyBlocked = await applyPromise === false && JSON.stringify(await storage.get(WORKSPACE_DRAFT_KEY, null)) === JSON.stringify(beforeDraft);
+            return clean === true && dirtyBlocked && staleApplyBlocked;
+          } finally {
+            state.dataStorageMode = previousMode; state.connectedEmail = previousEmail; cloudSyncContextRevision = previousContextRevision; cloudSyncTracker.clear();
+          }
+        })()`);
+        if (disconnectedCleanFlush !== true) throw new Error('Drive flush/context guards did not protect clean, dirty, and mode-switch states.');
         await new Promise((resolve) => setTimeout(resolve, 600));
-        const previewPath = path.join(app.getPath('temp'), 'cmoe-workspace-standalone-smoke.png');
-        const preview = await standalone.webContents.capturePage();
-        await fs.promises.writeFile(previewPath, preview.toPNG());
-        console.log(`Workspace smoke preview: ${previewPath}`);
+        await captureSmokePreview(standalone.webContents, 'cmoe-workspace-standalone-smoke.png', 'Workspace smoke preview');
         const gmailRosterResult = await standalone.webContents.executeJavaScript(`(async () => {
           document.querySelector('.nav-item[data-page="roster"]').click();
           const end = Date.now() + 5000;
@@ -767,10 +1238,7 @@ app.whenReady().then(async () => {
           };
         })()`);
         if (!Object.values(gmailRosterResult).every(Boolean)) throw new Error(`Gmail Flow shared roster smoke failed: ${JSON.stringify(gmailRosterResult)}`);
-        const gmailRosterPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-gmail-roster-smoke.png');
-        const gmailRosterPreview = await standalone.webContents.capturePage();
-        await fs.promises.writeFile(gmailRosterPreviewPath, gmailRosterPreview.toPNG());
-        console.log(`Workspace Gmail roster preview: ${gmailRosterPreviewPath}`);
+        await captureSmokePreview(standalone.webContents, 'cmoe-workspace-gmail-roster-smoke.png', 'Workspace Gmail roster preview');
         const smokeState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#openMailRosterManager').click()`);
         const pickerDeadline = Date.now() + 5000;
@@ -789,6 +1257,7 @@ app.whenReady().then(async () => {
             managerMode: document.body.classList.contains('roster-manager-mode'),
             rosterPage: document.querySelector('#page-roster')?.classList.contains('active'),
             projectRows: document.querySelectorAll('#rosterBody tr').length >= 5,
+            copyAction: document.querySelector('#saveFilteredRoster')?.textContent.includes('저장 자료로 복사'),
             applyAction: document.querySelector('#useRoster')?.textContent.includes('프로젝트에 저장'),
             composeHidden: getComputedStyle(document.querySelector('[data-page="compose"]')).display === 'none'
           };
@@ -859,10 +1328,11 @@ app.whenReady().then(async () => {
         const restoredState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
         const restoredProject = restoredState.projects.find((project) => project.id === smokeState.activeProjectId);
         if (restoredProject?.data.people[0]?.active === false) throw new Error('Restored roster member remained inactive in the project.');
-        const rosterPreviewPath = path.join(app.getPath('temp'), 'cmoe-workspace-roster-manager-smoke.png');
-        const rosterPreview = await rosterManager.webContents.capturePage();
-        await fs.promises.writeFile(rosterPreviewPath, rosterPreview.toPNG());
-        console.log(`Workspace roster manager preview: ${rosterPreviewPath}`);
+        await captureSmokePreview(rosterManager.webContents, 'cmoe-workspace-roster-manager-smoke.png', 'Workspace roster manager preview');
+        await rosterManager.webContents.executeJavaScript(`(async () => { const input = document.querySelector('#rosterBody .cell-input'); input.value = '송아라 종료저장'; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus(); await globalThis.flushWorkspaceEdits(); })()`);
+        const flushedRosterState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+        const flushedRosterProject = flushedRosterState.projects.find((project) => project.id === smokeState.activeProjectId);
+        if (flushedRosterProject?.data.people[0]?.name !== '송아라 종료저장') throw new Error('Shared roster manager close flush did not persist the focused cell edit.');
         await rosterManager.webContents.executeJavaScript(`(() => { const input = document.querySelector('#rosterBody .cell-input'); input.value = '송아라 수정'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('#useRoster').click(); })()`);
         const closeDeadline = Date.now() + 5000;
         while (!rosterManager.isDestroyed() && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -871,11 +1341,28 @@ app.whenReady().then(async () => {
         const appliedProject = appliedState.projects.find((project) => project.id === smokeState.activeProjectId);
         if (appliedProject?.data.people[0]?.name !== '송아라 수정') throw new Error('Shared roster manager changes were not applied to the project.');
         clearTimeout(timeout);
+        console.log('Workspace smoke test passed.');
+        writeSmokeResult('passed', { step: 'complete' });
         isQuitting = true;
         app.exit(result?.passed ? 0 : 1);
       } catch (error) {
         clearTimeout(timeout);
         console.error('Workspace smoke test failed:', error);
+        writeSmokeResult('failed', { step: 'exception', error: error?.stack || error?.message || String(error) });
+        try {
+          const diagnostics = await mainWindow.webContents.executeJavaScript(`({
+            page: [...document.querySelectorAll('.page.active')].map((item) => item.dataset.page),
+            project: document.querySelector('#activeProjectName')?.textContent || '',
+            roleCells: [...document.querySelectorAll('#scheduleBoard .schedule-role-cell input')].map((input) => input.value),
+            sessionAssignments: [...document.querySelectorAll('[data-session-assignment]')].map((item) => ({ id: item.dataset.sessionAssignment, person: item.dataset.sessionPerson, text: item.textContent })),
+            scheduleSummary: document.querySelector('#scheduleBoardSummary')?.textContent || '',
+            saveStatus: document.querySelector('#saveStatus')?.textContent || '',
+            navigationTrace: globalThis.__workspaceNavigationTrace || []
+          })`);
+          const failedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null)); const failedProject = failedState.projects.find((project) => project.id === failedState.activeProjectId);
+          console.error('Workspace smoke diagnostics:', JSON.stringify({ dom: diagnostics, state: { activeProjectId: failedState.activeProjectId, revision: failedState._revision, slots: failedProject?.data.slots.length, assignments: failedProject?.data.assignments, conflicts: failedProject?.data.conflicts } }));
+          await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-failed-smoke.png', 'Workspace failed smoke preview');
+        } catch (diagnosticError) { console.error('Workspace smoke diagnostics failed:', diagnosticError); }
         isQuitting = true;
         app.exit(1);
       }

@@ -47,7 +47,7 @@
 | REQ-20260819-04 | KAC, 교육, 안내, 문서 검토, Excel 등 업무가 바뀌어도 단계와 형식을 사용자가 구성·저장하게 해달라. | 고정 프로젝트 유형 → 순서·설명·체크리스트·설정을 바꾸는 버전형 업무 템플릿 | 완료 · `4270e0b` |
 | REQ-20260819-05 | 예전 Gmail Flow의 UI와 기능을 빼거나 위치를 크게 바꾸지 말고 버튼을 단순·일관되게 유지해달라. | 새 플랫폼식 버튼 재배치 → 기존 화면 성격 유지, 자주 쓰는 동작 우선, 나머지는 메뉴로 묶음 | 계속 적용 중 · UI 후속 커밋군 |
 | REQ-20260819-06 | 처음 사용하는 사람도 기능을 알 수 있도록 번역·이름·설명을 친숙하게 해달라. | 기술/모듈 중심 명칭 → 업무 목적 중심 한글 명칭과 단계 설명 | 적용 중 · Workspace 화면 문구/워크플로 UI |
-| REQ-20260827-04 | 다른 컴퓨터에 설치했을 때 `Cannot find module 'exceljs'` 오류 없이 실행하고 싶다. | 개발 PC의 모듈 경로 의존 → ExcelJS 런타임 포함, 잠금 파일 기반 설치, 빌드 사전검사, 선택형 OAuth 로컬 파일 | 배포 검증 중 · `414f6a9`, `c5831f2` |
+| REQ-20260827-04 | 다른 컴퓨터에 설치했을 때 `Cannot find module 'exceljs'` 오류 없이 실행하고 싶다. | 개발 PC의 모듈 경로 의존 → ExcelJS 런타임 포함, 잠금 파일 기반 설치, 빌드 사전검사, 선택형 OAuth 로컬 파일 | 배포 검증 완료 · `414f6a9`, `c5831f2` 및 1.1.12 릴리스 변경 |
 
 ### 전역 명단과 Excel식 편집
 
@@ -80,7 +80,7 @@
 - 결정: 기존 각진 패널·작은 상태 표시·Excel 일정표를 유지하고, 별도 복잡한 화면 대신 기존 일정 페이지 안에서 고객을 먼저 고르는 흐름을 추가했다.
 - 최종 동작: 고객 검색 → 변경할 현재 일정 선택 → 전체 날짜의 이동 가능·확인 필요·차단 후보 확인 → 다른 고객/Zoom/메일 영향 미리보기 → 변경 적용 또는 취소. 직접 표 편집·가져오기·행 삭제도 같은 후속 확인 규칙을 사용한다. 실행 취소·다시 실행은 일정만 복원하고 실제 Gmail·Zoom 식별자와 최신 이력은 보존한 채 영향받은 결과물을 보수적으로 `다시 확인 필요`로 유지한다.
 - 구현: `workspace/index.html`, `workspace/styles.css`, `workspace/app.js`, `workspace/operations-core.js`, `workspace/desktop/main.js`.
-- 검증: 일정 변경 순수 함수 테스트, 전체 Workspace 단위 테스트 7종, 문법 검사, 데스크톱 smoke 시나리오 갱신, 데스크톱/좁은 화면 로컬 브라우저 검토와 적용·취소·Undo·Redo 상호작용 확인. 설치본 smoke 통과 여부는 `REQ-20260827-04`의 배포 검사에서 별도로 확인한다.
+- 검증: 일정 변경 순수 함수와 동기화·저장·인증 회귀 테스트를 포함한 전체 Node 테스트 16개, JavaScript 문법 검사, 개발용 전체 화면 smoke, 데스크톱/좁은 화면 검토와 적용·취소·Undo·Redo 상호작용 확인. 최종 1.1.12 패키지 실행 smoke도 통과했다.
 - 커밋: `8ebf327`
 
 ### REQ-20260827-04 · 다른 PC 설치본의 런타임 누락 방지
@@ -88,9 +88,9 @@
 - 사용자 요청: “이렇게 떠 다른 컴퓨터에 설치하니까.” 설치본 시작 직후 Electron 메인 프로세스에서 `Cannot find module 'exceljs'`가 발생했다.
 - 이전 단계: 개발 PC에 존재하는 ExcelJS 설치 경로에 의존했고, Git에서 제외한 `desktop/oauth-credentials.local.js`도 시작 시 무조건 읽었다. 따라서 개발 PC에서는 실행돼도 깨끗한 체크아웃이나 다른 PC의 설치본에서는 시작 실패가 날 수 있었다.
 - 결정: 현재 `workspace/vendor` 구조를 유지하되 ExcelJS 전체 런타임을 설치 리소스로 복사하고, 빌드 직전에 설치 버전·잠금 파일·리소스 매핑을 검사한다. OAuth 로컬 파일은 선택 사항으로 바꾸고 설치 파일에서 제외한다.
-- 최종 동작: 깨끗한 환경에서 `npm ci`가 `vendor/package-lock.json`에 고정된 ExcelJS를 설치한다. `build:installer`는 사전검사 실패 시 설치 파일 생성을 중단한다. Gmail Flow는 로컬 Client Secret 파일이 없어도 시작하고, 빈 Secret을 Google 토큰 요청에 보내지 않는다. 다음 설치본 버전은 `1.1.11`이다.
+- 최종 동작: 깨끗한 환경에서 `npm ci`가 `vendor/package-lock.json`에 고정된 ExcelJS를 설치한다. `build:installer`는 사전검사 실패 시 설치 파일 생성을 중단한다. Gmail Flow는 로컬 Client Secret 파일이 없어도 시작하고, 빈 Secret을 Google 토큰 요청에 보내지 않는다. 최초 수정 설치본은 `1.1.11`, 다중 창·Drive 종료 안전성까지 보강한 현재 설치본은 `1.1.12`이다.
 - 구현: `workspace/package.json`, `workspace/scripts/preflight-build.js`, `workspace/desktop/gmail-flow-host.js`, `desktop/oauth.js`, `desktop/main.js`.
-- 검증: OAuth Secret 유무 단위 테스트, 관련 JavaScript 문법 검사, ExcelJS 4.4.0 로드·잠금 파일 일치·패키징 경로 사전검사 통과. 최종 설치 EXE의 smoke 검사는 배포 전 계속 진행한다.
+- 검증: OAuth Secret 유무를 포함한 Node 테스트 16개, JavaScript 문법 검사, ExcelJS 4.4.0 로드·잠금 파일 일치·패키징 경로 사전검사를 통과했다. 최종 1.1.12의 `win-unpacked` 실행 smoke가 종료 코드 0으로 통과했고, 설치본 내부 ExcelJS 4.4.0·최신 Gmail Flow 파일·Drive 동기화 보호 모듈 포함 여부와 로컬 OAuth 비밀 파일 미포함도 확인했다.
 - 커밋: `414f6a9`, `c5831f2`
 
 ## 현재 미완료 또는 계속 개선할 항목

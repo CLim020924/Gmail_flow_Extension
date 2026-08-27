@@ -483,8 +483,8 @@ button.variable-chip.valid:hover { border-color: #397c60; background: #e1f3e9; }
 .confirm-dialog { width: min(440px, calc(100vw - 40px)); }
 .confirm-dialog .dialog-body p { margin: 0; color: #475463; line-height: 1.65; white-space: pre-line; }
 
-.toast-region { position: fixed; top: 84px; right: 22px; z-index: 20; display: grid; gap: 7px; width: min(360px, calc(100vw - 40px)); pointer-events: none; }
-.toast { transform: translateY(-7px); opacity: 0; padding: 12px 14px; border: 1px solid #9faab5; border-left: 4px solid #5c748a; background: #fff; box-shadow: 0 7px 20px rgba(19,29,39,.16); color: #344150; line-height: 1.45; transition: .16s ease; }
+.toast-region { position: fixed; right: 22px; bottom: 22px; z-index: 20; display: grid; align-content: end; gap: 7px; width: min(360px, calc(100vw - 40px)); pointer-events: none; }
+.toast { transform: translateY(7px); opacity: 0; padding: 12px 14px; border: 1px solid #9faab5; border-left: 4px solid #5c748a; background: #fff; box-shadow: 0 7px 20px rgba(19,29,39,.16); color: #344150; line-height: 1.45; transition: .16s ease; }
 .toast.show { transform: translateY(0); opacity: 1; }
 .toast.success { border-left-color: var(--success); }
 .toast.error { border-left-color: var(--danger); }
@@ -632,7 +632,7 @@ button.variable-chip.valid:hover { border-color: #397c60; background: #e1f3e9; }
 .session-slot-heading strong, .session-slot-heading small { display: block; }
 .session-slot-heading small { margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .session-slot-actions { display: flex; align-items: start; gap: 3px; }
-.session-slot-actions button { min-height: 24px; padding: 2px 5px; border: 0; background: transparent; color: #607080; font-size: 9px; opacity: .45; }
+.session-slot-actions button { min-height: 24px; padding: 2px 5px; border: 0; background: transparent; color: #536779; font-size: 9px; opacity: .7; }
 .session-slot-card:hover .session-slot-actions button, .session-slot-card:focus-within .session-slot-actions button { opacity: 1; }
 .session-assignments { display: grid; gap: 4px; min-height: 74px; padding: 6px; }
 .session-assignment-chip { display: flex; align-items: center; justify-content: space-between; gap: 5px; padding: 5px 6px; border: 1px solid #ccd5dc; background: #f5f8fa; cursor: grab; font-size: 10px; }
@@ -640,7 +640,9 @@ button.variable-chip.valid:hover { border-color: #397c60; background: #e1f3e9; }
 .session-assignment-chip.selected-assignment { border-color: var(--primary); box-shadow: inset 3px 0 0 var(--primary); }
 .session-assignment-chip button { width: 20px; min-height: 20px; padding: 0; border: 0; background: transparent; color: #8b3030; }
 .session-drop-hint { display: grid; place-items: center; min-height: 62px; border: 1px dashed #c6cdd4; color: #84909b; font-size: 10px; }
-.session-empty-drop { flex: 0 0 190px; min-height: 128px; align-self: start; border: 2px dashed #bfc8d0; background: #f7f9fa; color: #657584; }
+.session-empty-drop { flex: 0 0 190px; display: grid; place-items: center; align-content: center; gap: 5px; min-height: 128px; align-self: start; padding: 12px; border: 2px dashed #bfc8d0; background: #f7f9fa; color: #657584; }
+.session-empty-drop strong { font-size: 12px; }
+.session-empty-drop small { font-size: 9px; font-weight: 500; }
 .session-empty-drop.drag-over { border-color: var(--primary); background: #eaf4fb; color: var(--primary); }
 
 @media (max-width: 900px) {

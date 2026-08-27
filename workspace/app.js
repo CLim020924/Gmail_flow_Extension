@@ -2,6 +2,7 @@
   const Core = globalThis.WorkspaceCore;
   const Ops = globalThis.OperationsCore;
   const launchParams = new URLSearchParams(location.search);
+  const smokeDiagnostics = launchParams.get('smoke') === '1';
   const standaloneProgram = launchParams.get('mode') === 'standalone' ? launchParams.get('app') : '';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -25,13 +26,19 @@
   };
 
   let state = Core.createEmptyState();
+  let persistedStateBaseline = Core.createEmptyState();
   let currentPage = 'dashboard';
+  let navigationGeneration = 0;
   let confirmResolver = null;
   let nameInputResolver = null;
   let saveTimer = null;
   let driveSyncTimer = null;
+  let driveSyncDirty = false;
+  let driveSyncPromise = null;
+  let lastDriveSyncError = null;
   let extensionManifests = [];
   let mailEditorDirty = false;
+  let mailEditorProjectId = null;
   let mailDraftTimer = null;
   let rosterSelection = null;
   let rosterSelecting = false;
@@ -65,6 +72,8 @@
   let workflowEditorDraft = [];
   let workflowEditorTemplateDraft = null;
   let gmailFlowSummary = { connected: false, email: '', rosters: 0, templates: 0, structures: 0 };
+  const navigationTrace = [];
+  if (smokeDiagnostics) globalThis.__workspaceNavigationTrace = navigationTrace;
 
   const storage = {
     async load() {
@@ -72,16 +81,36 @@
       try { return JSON.parse(localStorage.getItem('cmoeWorkspaceState') || 'null'); }
       catch (_) { return null; }
     },
-    async save(nextState, { scheduleProjects = [] } = {}) {
+    async save(nextState, { scheduleProjects = [], baseState = null, externalCommit = null } = {}) {
       if (globalThis.workspaceDesktop) {
         nextState._baseRevision = Number(nextState._baseRevision ?? nextState._revision ?? 0);
-        const payload = scheduleProjects.length ? { ...nextState, _mergeHints: { scheduleProjects } } : nextState;
+        const payload = { ...nextState, _mergeHints: { baseState, scheduleProjects }, ...(externalCommit ? { _externalCommit: externalCommit } : {}) };
         return globalThis.workspaceDesktop.saveState(payload);
       }
       localStorage.setItem('cmoeWorkspaceState', JSON.stringify(nextState));
-      return { ok: true };
+      return { ok: true, state: nextState };
     }
   };
+
+  const cloneState = (value) => JSON.parse(JSON.stringify(value));
+
+  function acceptPersistedBaseline(nextState) {
+    const nextRevision = Number(nextState?._revision || 0);
+    if (nextRevision >= Number(persistedStateBaseline?._revision || 0)) persistedStateBaseline = cloneState(nextState);
+  }
+
+  function mergePersistedWorkspaceState(nextState) {
+    const returnedState = Core.normalizeState(nextState);
+    const mergeBase = cloneState(persistedStateBaseline);
+    const returnedIsNewer = Number(returnedState._revision || 0) > Number(mergeBase._revision || 0)
+      || (Number(returnedState._revision || 0) === Number(mergeBase._revision || 0) && String(returnedState.updatedAt || '') >= String(mergeBase.updatedAt || ''));
+    const authoritativeState = returnedIsNewer ? returnedState : mergeBase;
+    const localState = cloneState(state);
+    acceptPersistedBaseline(authoritativeState);
+    state = Core.normalizeState(Core.threeWayMerge(mergeBase, authoritativeState, localState));
+    if (JSON.stringify(state) !== JSON.stringify(authoritativeState)) persistDirty = true;
+    return state;
+  }
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -127,46 +156,38 @@
     }, 2600);
   }
 
-  async function persist(message = '저장됨', { scheduleProjectId = null, scheduleGeneration = null } = {}) {
+  async function persist(message = '저장됨', { scheduleProjectId = null, externalCommit = null } = {}) {
     persistDirty = true;
     const scheduleOnlyProjectIds = new Set([...pendingScheduleMergeHints.entries()].filter(([, impact]) => impact.scheduleOnly !== false).map(([projectId]) => projectId)); if (scheduleProjectId) scheduleOnlyProjectIds.add(scheduleProjectId);
     const autoCommitted = commitSchedulePersistState();
     const scheduleProjects = [...pendingScheduleMergeHints.entries()].map(([projectId, impact]) => ({ projectId, ...impact, scheduleOnly: scheduleOnlyProjectIds.has(projectId) }));
     pendingScheduleMergeHints.clear();
     [scheduleProjectId, autoCommitted?.projectId].filter(Boolean).forEach((projectId) => { if (!scheduleProjects.some((item) => item.projectId === projectId)) scheduleProjects.push({ projectId, changedSlotIds: [], zoomReviewSlotIds: [], affectedPersonIds: [], scheduleOnly: scheduleOnlyProjectIds.has(projectId) }); });
-    const scheduleProjectIds = new Set(scheduleProjects.map((item) => item.projectId));
-    const guardedProjectId = scheduleProjectId || autoCommitted?.projectId || scheduleProjects[0]?.projectId || activeProject()?.id || null;
-    const guardedGeneration = scheduleGeneration ?? autoCommitted?.generation ?? scheduleEditGeneration;
     const requestSequence = ++persistSequence;
     persistSaving += 1;
+    let requestHadLocalAdvance = false;
     clearTimeout(saveTimer);
     $('#saveStatus').textContent = '저장 중…';
     try {
       const currentStamp = Number.isNaN(Date.parse(state.updatedAt)) ? 0 : Date.parse(state.updatedAt);
       const requestUpdatedAt = new Date(Math.max(Date.now(), currentStamp + 1)).toISOString(); state.updatedAt = requestUpdatedAt;
-      const result = await storage.save(state, { scheduleProjects });
+      const requestState = cloneState(state);
+      const requestBaseState = cloneState(persistedStateBaseline);
+      const result = await storage.save(requestState, { scheduleProjects, baseState: requestBaseState, externalCommit });
       if (result?.state) {
         const normalized = Core.normalizeState(result.state);
-        const localAdvanced = requestSequence !== persistSequence || state.updatedAt !== requestUpdatedAt;
-        const scheduleAdvanced = guardedProjectId && scheduleEditGeneration !== guardedGeneration;
-        if (!localAdvanced && !scheduleAdvanced) state = normalized;
-        else if (!localAdvanced && scheduleAdvanced) {
-          const localProject = state.projects.find((item) => item.id === guardedProjectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === guardedProjectId);
-          const advancedImpact = localProject && schedulePersistProjectId === guardedProjectId && schedulePersistBaseline ? scheduleMutationImpact(JSON.parse(schedulePersistBaseline), { slots: localProject.data.slots, assignments: localProject.data.assignments }) : null;
-          state = localProject ? overlayLocalScheduleState(normalized, guardedProjectId, localProject, advancedImpact) : normalized;
-        } else {
-          state._revision = Math.max(Number(state._revision || 0), Number(normalized._revision || 0));
-          state._baseRevision = Math.max(Number(state._baseRevision || 0), Number(normalized._baseRevision || normalized._revision || 0));
-        }
+        const localAdvanced = requestSequence !== persistSequence || JSON.stringify(state) !== JSON.stringify(requestState); requestHadLocalAdvance = localAdvanced;
+        acceptPersistedBaseline(normalized);
+        state = localAdvanced ? Core.normalizeState(Core.threeWayMerge(requestState, normalized, state)) : normalized;
       }
       if (result?.merged) showToast('다른 창의 변경사항과 안전하게 병합했습니다.');
-      if (requestSequence === persistSequence && !schedulePersistBaseline) persistDirty = false;
+      if (requestSequence === persistSequence && !schedulePersistBaseline && !requestHadLocalAdvance) persistDirty = false;
       if (state.preferences.storageMode === 'drive') {
-        clearTimeout(driveSyncTimer);
-        driveSyncTimer = setTimeout(() => void pushStateToDrive(false), 1500);
+        scheduleDriveStateSync();
       }
       $('#saveStatus').textContent = message;
       saveTimer = setTimeout(() => { $('#saveStatus').textContent = '저장됨'; }, 1600);
+      return result;
     } catch (error) {
       scheduleProjects.forEach(({ projectId, scheduleOnly, ...impact }) => recordScheduleMergeImpact(projectId, impact, { scheduleOnly }));
       $('#saveStatus').textContent = '저장 실패';
@@ -190,27 +211,72 @@
   function beginExternalOperation() { externalOperationCount += 1; }
   function endExternalOperation() {
     externalOperationCount = Math.max(0, externalOperationCount - 1);
-    if (!externalOperationCount) { const resolvers = externalOperationIdleResolvers; externalOperationIdleResolvers = []; resolvers.forEach((resolve) => resolve()); }
+    if (!externalOperationCount) { const resolvers = externalOperationIdleResolvers; externalOperationIdleResolvers = []; resolvers.forEach((resolve) => resolve()); applyDeferredWorkspaceState(); }
   }
   function waitForExternalOperations() {
     if (!externalOperationCount) return Promise.resolve();
     return new Promise((resolve) => externalOperationIdleResolvers.push(resolve));
   }
 
+  async function reserveExternalArtifacts(projectId, kind, keys) {
+    const reservationKeys = [...new Set((keys || []).map((key) => String(key || '').trim()).filter(Boolean))];
+    if (!globalThis.workspaceDesktop?.reserveExternalArtifacts) return { ok: true, token: null, keys: reservationKeys };
+    const reservation = await globalThis.workspaceDesktop.reserveExternalArtifacts(projectId, kind, reservationKeys);
+    return { ...reservation, keys: reservationKeys };
+  }
+
+  async function releaseExternalArtifacts(token) {
+    if (token && globalThis.workspaceDesktop?.releaseExternalArtifacts) {
+      try { await globalThis.workspaceDesktop.releaseExternalArtifacts(token); } catch (_) {}
+    }
+  }
+
   function connectedDrive() {
     return state.connections.find((connection) => connection.type === 'drive' && connection.status === 'connected');
   }
 
+  function scheduleDriveStateSync() {
+    driveSyncDirty = true;
+    clearTimeout(driveSyncTimer);
+    driveSyncTimer = setTimeout(() => {
+      driveSyncTimer = null;
+      void flushDriveStateSync(false);
+    }, 1500);
+  }
+
+  async function flushDriveStateSync(notify = false, { force = false } = {}) {
+    clearTimeout(driveSyncTimer);
+    driveSyncTimer = null;
+    if (state.preferences.storageMode !== 'drive') { driveSyncDirty = false; return true; }
+    if (force) driveSyncDirty = true;
+    if (driveSyncPromise) return driveSyncPromise;
+    driveSyncPromise = (async () => {
+      while (driveSyncDirty) {
+        driveSyncDirty = false;
+        if (!await pushStateToDrive(notify)) { driveSyncDirty = true; return false; }
+        notify = false;
+      }
+      return true;
+    })();
+    try { return await driveSyncPromise; }
+    finally { driveSyncPromise = null; }
+  }
+
   async function pushStateToDrive(notify = true) {
     const connection = connectedDrive();
-    if (!connection) { if (notify) showToast('먼저 Google Drive 계정에 로그인하여 연결해주세요.', 'error'); return false; }
+    if (!connection) {
+      lastDriveSyncError = new Error('Google Drive 저장 모드이지만 연결된 Drive 계정이 없습니다.');
+      if (notify) showToast('먼저 Google Drive 계정에 로그인하여 연결해주세요.', 'error');
+      return false;
+    }
     try {
-      const result = await globalThis.workspaceDesktop.pushDriveState(connection.id, state);
+      const result = await globalThis.workspaceDesktop.pushDriveState(connection.id, state, Core.connectionIdentity(connection));
+      lastDriveSyncError = null;
       state.preferences.lastDriveSyncAt = result.modifiedTime || new Date().toISOString();
       if ($('#driveSyncStatus')) $('#driveSyncStatus').textContent = `마지막 Drive 저장: ${formatUpdatedAt(state.preferences.lastDriveSyncAt)}`;
       if (notify) showToast('현재 Workspace 데이터를 Drive에 저장했습니다.', 'success');
       return true;
-    } catch (error) { if (notify) showToast(`Drive 저장 실패: ${error.message}`, 'error'); return false; }
+    } catch (error) { lastDriveSyncError = error; if (notify) showToast(`Drive 저장 실패: ${error.message}`, 'error'); return false; }
   }
 
   function openDialog(id) {
@@ -261,7 +327,9 @@
   }
 
   function navigate(page) {
-    if (currentPage === 'gmailFlow' && page !== 'gmailFlow' && mailEditorDirty) void saveMailEditorDraft();
+    if (currentPage === 'gmailFlow' && page !== 'gmailFlow' && mailEditorDirty) void saveMailEditorDraft(mailEditorProjectId);
+    if (smokeDiagnostics) { navigationTrace.push({ from: currentPage, to: page, stack: new Error().stack?.split('\n').slice(1, 5) }); if (navigationTrace.length > 30) navigationTrace.shift(); }
+    navigationGeneration += 1;
     currentPage = page;
     const module = Core.MODULE_CATALOG.find((item) => item.id === page);
     const visiblePage = module?.page === 'declarative' ? 'declarative' : page;
@@ -282,12 +350,28 @@
     if (visiblePage === 'declarative') renderDeclarativePage(page);
   }
 
-  async function saveMailEditorDraft() {
-    const project = activeProject(); if (!project || !mailEditorDirty) return;
+  function captureMailEditorDraft(projectId = mailEditorProjectId) {
+    const project = projectById(projectId) || activeProject(); if (!project || !mailEditorDirty) return null;
+    const previousSubject = project.data.communication.subjectTemplate;
+    const previousHtml = project.data.communication.bodyHtmlTemplate;
     project.data.communication.subjectTemplate = $('#mailSubjectTemplate').value;
     project.data.communication.bodyHtmlTemplate = sanitizeRichHtml($('#mailBodyEditor').innerHTML);
     project.data.communication.bodyTemplate = $('#mailBodyEditor').innerText;
-    project.updatedAt = new Date().toISOString(); mailEditorDirty = false;
+    const templateChanged = previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate;
+    if (templateChanged) {
+      let affected = false;
+      project.data.externalArtifacts.forEach((artifact) => { if (artifact.kind === 'gmailDraft' && artifact.status !== 'superseded') { artifact.status = 'stale'; affected = true; } });
+      state = Core.updateProject(state, project.id, { data: project.data });
+      if (affected && project.installedModules.includes('gmailFlow')) state = Core.setModuleStatus(state, project.id, 'gmailFlow', 'stale', '공통 메일 내용 변경 후 Gmail 확인 필요');
+    }
+    const savedProject = projectById(project.id) || project;
+    savedProject.updatedAt = new Date().toISOString(); mailEditorDirty = false;
+    mailEditorProjectId = savedProject.id;
+    return savedProject;
+  }
+
+  async function saveMailEditorDraft(projectId = mailEditorProjectId) {
+    const project = captureMailEditorDraft(projectId); if (!project) return;
     await persist('메일 편집 자동 저장됨');
   }
 
@@ -1115,7 +1199,7 @@
         .map((item) => project.data.people.find((person) => person.id === item.personId && person.active !== false)?.name || (!item.personId ? item.personName : '')).filter(Boolean).join(', ');
     }
     if (column.kind === 'custom') return project.data.scheduleCustomValues?.[slot.id]?.[column.id] || '';
-    if (column.key === 'locked') return slot.locked ? '예' : '';
+    if (column.key === 'locked') return scheduleRowLocked(project, slot.id) ? '예' : '';
     if (column.key === 'status') return ({ draft: '편성 중', confirmed: '확정', changed: '변경됨', cancelled: '취소' })[slot.status] || slot.status || '편성 중';
     return slot[column.key] || '';
   }
@@ -1144,22 +1228,14 @@
   }
 
   function refreshScheduleConflicts(project) {
-    const scheduleView = project.data.rosterViews.find((item) => item.id === project.data.scheduleRules.rosterViewId) || null;
-    const conflicts = [
-      ...scheduleSheetConflicts(project),
-      ...Ops.validateAssignments({ assignments: project.data.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots }).map((message) => ({ type: 'validation', message })),
-      ...Ops.validateScheduleConstraints({ assignments: project.data.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots, availability: project.data.availability, rules: project.data.scheduleRules, targetPersonIds: rosterViewIncludedIds(scheduleView, project) })
-    ];
-    const unique = new Map();
-    conflicts.forEach((conflict) => unique.set([conflict.type || '', conflict.personId || '', conflict.slotId || '', conflict.roleId || '', conflict.message].join('|'), conflict));
-    project.data.conflicts = [...unique.values()];
+    project.data.conflicts = Ops.collectScheduleConflicts(project);
   }
 
   function setScheduleCellValue(project, rowIndex, columnIndex, value, { lockedSlotIds = null } = {}) {
     const column = scheduleSheetColumns(project)[columnIndex]; if (!column) return false;
     const text = String(value ?? '').trim();
     let slot = project.data.slots[rowIndex]; if (!slot && !text) return true; if (!slot) slot = ensureScheduleRow(project, rowIndex);
-    if (lockedSlotIds?.has(slot.id) || (slot.locked && column.key !== 'locked')) return false;
+    if ((lockedSlotIds?.has(slot.id) || scheduleRowLocked(project, slot.id)) && column.key !== 'locked') return false;
     if (column.kind === 'role' && column.role) {
       project.data.assignments = project.data.assignments.filter((item) => !(item.slotId === slot.id && item.roleId === column.role.id));
       peopleTokens(text).forEach((name, position) => {
@@ -1256,9 +1332,16 @@
     clearScheduleHistory();
   }
 
+  function hasFocusedWorkspaceDraft() {
+    const target = document.activeElement;
+    return Boolean(target?.matches?.('[data-person-row], [data-column-name], #rosterCellValue, [data-arrangement-input], #arrangementCellValue, [data-schedule-input], #scheduleCellValue, #mailSubjectTemplate, #mailBodyEditor, #mailEditSubject, #mailEditBody'));
+  }
+
   function applyIncomingWorkspaceState(nextState) {
     resetScheduleHistoryForIncomingState(nextState);
+    acceptPersistedBaseline(nextState);
     state = nextState;
+    if (state.preferences.storageMode === 'drive') scheduleDriveStateSync();
     if (mailEditorDirty && currentPage === 'gmailFlow') {
       showToast('다른 창의 변경사항을 받았습니다. 작성 중인 메일은 그대로 보호됩니다.');
       renderGmailPage();
@@ -1267,7 +1350,7 @@
   }
 
   function applyDeferredWorkspaceState() {
-    if (!deferredWorkspaceState || persistSaving || schedulePersistBaseline) return;
+    if (!deferredWorkspaceState || persistSaving || persistDirty || externalOperationCount || schedulePersistBaseline || mailEditorDirty || hasFocusedWorkspaceDraft()) return;
     const nextState = deferredWorkspaceState;
     deferredWorkspaceState = null;
     const nextRevision = Number(nextState._revision || 0);
@@ -1301,6 +1384,12 @@
     const before = typeof beforeSnapshot === 'string' ? JSON.parse(beforeSnapshot) : beforeSnapshot;
     const impact = scheduleMutationImpact(before, { slots: project.data.slots, assignments: project.data.assignments });
     markScheduleChangeStale(project, impact, { markConfirmedSlots: false });
+    const beforeSlots = new Map((before.slots || []).map((slot) => [slot.id, slot]));
+    const assignmentSignature = (items, slotId) => (items || []).filter((assignment) => assignment.slotId === slotId).map((assignment) => [assignment.personId || assignment.personName || '', assignment.roleId || assignment.roleName || ''].join('|')).sort().join(',');
+    project.data.slots.filter((slot) => slot.status === 'confirmed' && impact.changedSlotIds.includes(slot.id)).forEach((slot) => {
+      const previous = beforeSlots.get(slot.id); const dependencyChanged = !previous || [slot.date, slot.startTime, slot.endTime, slot.label].join('|') !== [previous.date, previous.startTime, previous.endTime, previous.label].join('|') || assignmentSignature(project.data.assignments, slot.id) !== assignmentSignature(before.assignments, slot.id);
+      if (dependencyChanged) slot.status = 'changed';
+    });
     return impact;
   }
 
@@ -1379,7 +1468,7 @@
   }
 
   function syncScheduleRowLockControls(project, rowIndex) {
-    const locked = Boolean(project.data.slots[rowIndex]?.locked);
+    const locked = scheduleRowLocked(project, project.data.slots[rowIndex]?.id);
     $$(`[data-schedule-row="${rowIndex}"][data-schedule-col]`, $('#scheduleBoard')).forEach((cell) => {
       const column = scheduleSheetColumns(project)[Number(cell.dataset.scheduleCol)]; const input = cell.querySelector('[data-schedule-input]');
       if (input) input.disabled = Boolean(locked && column?.key !== 'locked');
@@ -1399,7 +1488,7 @@
     $('#scheduleBoard [data-select-schedule-all]')?.classList.toggle('sheet-row-selected', mode === 'all');
     const address = (row, col) => `${spreadsheetColumnName(col)}${row + 2}`; const from = address(minRow, minCol); const to = address(maxRow, maxCol);
     $('#scheduleSelectionStatus').textContent = from === to ? from : `${from}:${to}`; $('#scheduleCellAddress').textContent = address(focus.row, focus.col);
-    const column = scheduleSheetColumns(project)[focus.col]; const locked = focus.row >= 0 && project.data.slots[focus.row]?.locked && column?.key !== 'locked'; $('#scheduleCellValue').disabled = !column || locked; $('#scheduleCellValue').title = locked ? '잠금 셀을 먼저 해제하면 편집할 수 있습니다.' : ''; $('#scheduleCellValue').value = focus.row === -1 ? column?.name || '' : scheduleCellValue(project, focus.row, focus.col);
+    const column = scheduleSheetColumns(project)[focus.col]; const locked = focus.row >= 0 && scheduleRowLocked(project, project.data.slots[focus.row]?.id) && column?.key !== 'locked'; $('#scheduleCellValue').disabled = !column || locked; $('#scheduleCellValue').title = locked ? '잠금 셀을 먼저 해제하면 편집할 수 있습니다.' : ''; $('#scheduleCellValue').value = focus.row === -1 ? column?.name || '' : scheduleCellValue(project, focus.row, focus.col);
   }
 
   function selectedScheduleMatrix(project) {
@@ -1429,7 +1518,7 @@
       const slot = sortedSlots[rowIndex]; const tr = element('tr'); if (slot) tr.dataset.scheduleSlot = slot.id; const number = element('th', 'sheet-row-number', String(rowIndex + 2)); number.dataset.selectScheduleRow = String(rowIndex); tr.append(number);
       columns.forEach((column, columnIndex) => {
         const td = element('td', column.role ? 'schedule-role-cell' : ''); td.dataset.scheduleRow = String(rowIndex); td.dataset.scheduleCol = String(columnIndex);
-        const input = element('input'); input.type = 'text'; input.value = scheduleCellValue(project, rowIndex, columnIndex); input.dataset.scheduleInput = 'true'; input.autocomplete = 'off'; input.disabled = Boolean(slot?.locked && column.key !== 'locked');
+        const input = element('input'); input.type = 'text'; input.value = scheduleCellValue(project, rowIndex, columnIndex); input.dataset.scheduleInput = 'true'; input.autocomplete = 'off'; input.disabled = Boolean(slot && scheduleRowLocked(project, slot.id) && column.key !== 'locked');
         if (column.role) { input.setAttribute('list', `schedule-role-${column.role.id}`); const unknown = peopleTokens(input.value).some((name) => !project.data.people.some((person) => [person.name, person.email, person.phone].includes(name))); td.classList.toggle('schedule-invalid', unknown); }
         td.append(input); tr.append(td);
       });
@@ -1503,6 +1592,162 @@
     });
   }
 
+  function scheduleRowLocked(project, slotId) {
+    const slot = project?.data.slots.find((item) => item.id === slotId);
+    return Boolean(slot?.locked || project?.data.assignments.some((assignment) => assignment.slotId === slotId && assignment.locked));
+  }
+
+  function hasLockedSchedule(project) {
+    return Boolean(project?.data.slots.some((slot) => slot.locked) || project?.data.assignments.some((assignment) => assignment.locked));
+  }
+
+  function lockedScheduleWouldChange(project, version) {
+    const nextSlots = Array.isArray(version?.slots) ? version.slots : [];
+    const nextAssignments = Array.isArray(version?.assignments) ? version.assignments : [];
+    const slotSignature = (slot) => JSON.stringify(slot ? [slot.id, slot.date, slot.startTime, slot.endTime, slot.label, slot.status, Boolean(slot.locked)] : null);
+    const assignmentSignature = (assignment) => JSON.stringify(assignment ? [assignment.id, assignment.slotId, assignment.personId, assignment.roleId, Boolean(assignment.locked)] : null);
+    const protectedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id));
+    project.data.assignments.filter((assignment) => assignment.locked).forEach((assignment) => protectedSlotIds.add(assignment.slotId));
+    for (const slotId of protectedSlotIds) {
+      const currentSlot = project.data.slots.find((slot) => slot.id === slotId);
+      const nextSlot = nextSlots.find((slot) => slot.id === slotId);
+      if (slotSignature(currentSlot) !== slotSignature(nextSlot)) return true;
+      const currentRow = project.data.assignments.filter((assignment) => assignment.slotId === slotId).map(assignmentSignature).sort();
+      const nextRow = nextAssignments.filter((assignment) => assignment.slotId === slotId).map(assignmentSignature).sort();
+      if (JSON.stringify(currentRow) !== JSON.stringify(nextRow)) return true;
+    }
+    return false;
+  }
+
+  function scheduleHistoryPairs(project) {
+    const pairs = new Map();
+    (project.data.versions || []).forEach((version) => {
+      const bySlot = new Map();
+      (version.assignments || []).forEach((assignment) => {
+        if (!assignment.personId) return;
+        if (!bySlot.has(assignment.slotId)) bySlot.set(assignment.slotId, new Set());
+        bySlot.get(assignment.slotId).add(assignment.personId);
+      });
+      bySlot.forEach((ids) => {
+        const people = [...ids].sort();
+        for (let left = 0; left < people.length; left += 1) for (let right = left + 1; right < people.length; right += 1) pairs.set(`${people[left]}|${people[right]}`, [people[left], people[right]]);
+      });
+    });
+    return [...pairs.values()];
+  }
+
+  function externalOperationSignature(project, kind) {
+    return Ops.externalOperationFingerprint(project, kind, state.connections);
+  }
+
+  function externalCommitGuard({ reservation, project, kind, expectedConnections = [], conflictState }) {
+    const latestConnections = latestKnownWorkspaceState().connections || [];
+    return {
+      token: reservation?.token || '',
+      projectId: project?.id || '',
+      kind,
+      reservationKeys: reservation?.keys || [],
+      expectedFingerprint: Ops.externalOperationFingerprint(project, kind, latestConnections),
+      expectedConnections: [...new Map(expectedConnections.filter(Boolean).map((identity) => [identity.id, identity])).values()],
+      conflictState
+    };
+  }
+
+  function markExternalArtifactsForCommitConflict(stateInput, projectId, kind, updates, reason) {
+    let next = cloneState(stateInput);
+    const project = next.projects.find((item) => item.id === projectId) || Object.values(next.quickWorkspaces || {}).find((item) => item?.id === projectId);
+    if (!project) return next;
+    const updateKeys = new Set((updates || []).map((item, index) => scheduleArtifactKey(item, index)));
+    project.data.externalArtifacts = project.data.externalArtifacts.map((artifact, index) => {
+      if (artifact.kind !== kind || !updateKeys.has(scheduleArtifactKey(artifact, index)) || artifact.status === 'superseded') return artifact;
+      return { ...artifact, status: 'stale', reviewReason: reason, updatedAt: artifact.updatedAt || new Date().toISOString() };
+    });
+    next = Core.updateProject(next, projectId, { data: { externalArtifacts: project.data.externalArtifacts } });
+    const moduleId = kind === 'gmailDraft' ? 'gmailFlow' : kind;
+    if (project.installedModules.includes(moduleId)) next = Core.setModuleStatus(next, projectId, moduleId, 'needsReview', reason);
+    return next;
+  }
+
+  function externalOperationStateChanged(projectId, kind, baseSignature) {
+    const currentProject = projectById(projectId);
+    if (!currentProject || externalOperationSignature(currentProject, kind) !== baseSignature) return true;
+    const deferredProject = deferredWorkspaceState?.projects?.find((item) => item.id === projectId) || Object.values(deferredWorkspaceState?.quickWorkspaces || {}).find((item) => item?.id === projectId);
+    return Boolean(deferredProject && Ops.externalOperationFingerprint(deferredProject, kind, deferredWorkspaceState.connections) !== baseSignature);
+  }
+
+  function latestKnownProject(projectId) {
+    const latestState = latestKnownWorkspaceState();
+    return latestState.projects?.find((item) => item.id === projectId)
+      || Object.values(latestState.quickWorkspaces || {}).find((item) => item?.id === projectId)
+      || projectById(projectId);
+  }
+
+  function latestKnownWorkspaceState() {
+    const deferredIsNewer = deferredWorkspaceState && (Number(deferredWorkspaceState._revision || 0) > Number(state._revision || 0)
+      || (Number(deferredWorkspaceState._revision || 0) === Number(state._revision || 0) && String(deferredWorkspaceState.updatedAt || '') > String(state.updatedAt || '')));
+    return deferredIsNewer ? deferredWorkspaceState : state;
+  }
+
+  function workspaceStateIdentity(workspaceState) {
+    return { _revision: Number(workspaceState?._revision || 0), updatedAt: String(workspaceState?.updatedAt || '') };
+  }
+
+  function workspaceStateIdentityMatches(workspaceState, expectedIdentity) {
+    const actual = workspaceStateIdentity(workspaceState);
+    return actual._revision === Number(expectedIdentity?._revision || 0) && actual.updatedAt === String(expectedIdentity?.updatedAt || '');
+  }
+
+  function latestKnownConnection(connectionId) {
+    return latestKnownWorkspaceState().connections?.find((item) => item.id === connectionId) || null;
+  }
+
+  function latestActiveExternalArtifact(project, kind, predicate = () => true) {
+    return (project?.data.externalArtifacts || [])
+      .filter((artifact) => artifact.kind === kind && artifact.status !== 'superseded' && predicate(artifact))
+      .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')))[0] || null;
+  }
+
+  function retireArtifactsForConnection(connection, reason = '계정 변경 후 외부 항목 재확인 필요') {
+    if (!connection) return 0;
+    const artifactKind = connection.type === 'gmail' ? 'gmailDraft' : connection.type === 'zoom' ? 'zoom' : '';
+    let retired = 0;
+    const projectIds = [...state.projects.map((project) => project.id), ...Object.values(state.quickWorkspaces || {}).map((project) => project?.id).filter(Boolean)];
+    projectIds.forEach((projectId) => {
+      const project = projectById(projectId); if (!project) return;
+      let projectRetired = 0;
+      let linkedFormsChanged = false;
+      const externalArtifacts = project.data.externalArtifacts.map((artifact) => {
+        if (!artifactKind || artifact.kind !== artifactKind || artifact.connectionId !== connection.id || artifact.status === 'superseded') return artifact;
+        projectRetired += 1;
+        return { ...artifact, status: 'superseded', replacedAt: new Date().toISOString(), replacementReason: reason };
+      });
+      let forms = project.data.forms;
+      if (connection.type === 'forms') {
+        const linkedForms = (project.data.forms.linkedForms || []).map((linked) => {
+          if (linked.connectionId !== connection.id) return linked;
+          linkedFormsChanged = true;
+          return { ...linked, needsReview: true, reviewReason: reason };
+        });
+        if (linkedFormsChanged) forms = { ...project.data.forms, linkedForms };
+      }
+      if (!projectRetired && !linkedFormsChanged) return;
+      retired += projectRetired;
+      state = Core.updateProject(state, projectId, { data: { externalArtifacts, forms } });
+      const moduleId = connection.type === 'gmail' ? 'gmailFlow' : connection.type;
+      if (project.installedModules.includes(moduleId)) state = Core.setModuleStatus(state, projectId, moduleId, 'needsReview', reason);
+      recordScheduleMergeImpact(projectId, null, { scheduleOnly: false });
+    });
+    return retired;
+  }
+
+  function pendingZoomSlots(project) {
+    return project.data.slots.filter((slot) => slot.status !== 'cancelled' && project.data.assignments.some((assignment) => assignment.slotId === slot.id) && !project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created'));
+  }
+
+  function pendingGmailEntries(project) {
+    return Ops.buildMailPackage(project).entries.filter((entry) => latestActiveExternalArtifact(project, 'gmailDraft', (artifact) => artifact.personId === entry.personId)?.status !== 'created');
+  }
+
   function renderSessionChangePreview(project) {
     const panel = $('#sessionChangePreview');
     if (!pendingSessionChange) { panel.hidden = true; return; }
@@ -1549,8 +1794,20 @@
     const zoomSlots = impact.zoomReviewSlotIds || impact.changedSlotIds;
     project.data.externalArtifacts.forEach((artifact) => {
       if (artifact.kind === 'zoom' && artifact.status !== 'superseded' && zoomSlots.includes(artifact.slotId)) artifact.status = 'stale';
-      if (artifact.kind === 'gmailDraft' && impact.affectedPersonIds.includes(artifact.personId)) artifact.status = 'stale';
+      if (artifact.kind === 'gmailDraft' && artifact.status !== 'superseded' && impact.affectedPersonIds.includes(artifact.personId)) artifact.status = 'stale';
     });
+  }
+
+  function markRosterDependenciesStale(project, summary = '명단 변경 후 일정 재검토 필요') {
+    refreshScheduleConflicts(project);
+    let gmailAffected = false;
+    project.data.externalArtifacts.forEach((artifact) => {
+      if (artifact.kind === 'gmailDraft' && artifact.status !== 'superseded') { artifact.status = 'stale'; gmailAffected = true; }
+    });
+    state = Core.updateProject(state, project.id, { data: project.data });
+    if (project.data.slots.length) state = Core.setModuleStatus(state, project.id, 'schedule', project.data.conflicts.length ? 'needsReview' : 'stale', project.data.conflicts.length ? `명단 변경 후 문제 ${project.data.conflicts.length}건` : summary);
+    if (gmailAffected && project.installedModules.includes('gmailFlow')) state = Core.setModuleStatus(state, project.id, 'gmailFlow', 'stale', '명단 변경 후 안내 메일 확인 필요');
+    recordScheduleMergeImpact(project.id, null, { scheduleOnly: false });
   }
 
   async function applyPendingSessionChange() {
@@ -1628,14 +1885,14 @@
           }
         }
         const heading = element('div', 'session-slot-heading'); const title = element('span'); title.append(element('strong', '', `${slot.startTime || '--:--'}–${slot.endTime || '--:--'}`), element('small', '', slot.label || '이름 없는 세션'));
-        const actions = element('span', 'session-slot-actions'); const edit = element('button', '', '시간 변경'); edit.type = 'button'; edit.dataset.sessionEdit = slot.id; edit.disabled = Boolean(slot.locked); edit.title = slot.locked ? '잠금을 해제한 뒤 변경할 수 있습니다.' : '세션 시간 변경'; const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.sessionRemove = slot.id; remove.disabled = Boolean(slot.locked); remove.title = slot.locked ? '잠금을 해제한 뒤 삭제할 수 있습니다.' : '세션 삭제'; actions.append(edit, remove); heading.append(title, actions); card.append(heading);
+        const rowLocked = scheduleRowLocked(project, slot.id); const actions = element('span', 'session-slot-actions'); const edit = element('button', '', '시간 변경'); edit.type = 'button'; edit.dataset.sessionEdit = slot.id; edit.disabled = rowLocked; edit.title = rowLocked ? '잠금을 해제한 뒤 변경할 수 있습니다.' : '세션 시간 변경'; const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.sessionRemove = slot.id; remove.disabled = rowLocked; remove.title = rowLocked ? '잠금을 해제한 뒤 삭제할 수 있습니다.' : '세션 삭제'; actions.append(edit, remove); heading.append(title, actions); card.append(heading);
         const assignments = element('div', 'session-assignments');
-        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person || person.active === false) return; const chip = element('div', `session-assignment-chip${selectedSessionPersonId === person.id ? ' selected-person' : ''}${selectedSessionAssignmentId === assignment.id ? ' selected-assignment' : ''}`); chip.draggable = true; chip.tabIndex = 0; chip.setAttribute('role', 'button'); chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.title = '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
+        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person || person.active === false) return; const chip = element('div', `session-assignment-chip${selectedSessionPersonId === person.id ? ' selected-person' : ''}${selectedSessionAssignmentId === assignment.id ? ' selected-assignment' : ''}`); chip.draggable = !(assignment.locked || slot.locked); chip.tabIndex = 0; chip.setAttribute('role', 'button'); chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.disabled = Boolean(assignment.locked || slot.locked); eject.title = eject.disabled ? '잠금을 해제한 뒤 일정에서 뺄 수 있습니다.' : '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
         if (!assignments.children.length) assignments.append(element('div', 'session-drop-hint', '인원을 여기에 놓으세요'));
         card.append(assignments); column.append(card);
       }); return column;
     });
-    const emptyDrop = element('button', 'session-empty-drop', '＋ 고객을 놓아 새 시간 만들기'); emptyDrop.type = 'button'; emptyDrop.dataset.sessionEmptyDrop = 'true'; emptyDrop.title = '고객을 끌어 놓으면 새 날짜와 시간을 입력합니다.';
+    const emptyDrop = element('button', 'session-empty-drop'); emptyDrop.type = 'button'; emptyDrop.dataset.sessionEmptyDrop = 'true'; emptyDrop.title = '고객을 끌어 놓거나 클릭하면 새 날짜와 시간을 입력합니다.'; emptyDrop.append(element('strong', '', '＋ 새 시간 만들기'), element('small', '', '끌어 놓기 또는 클릭'));
     board.replaceChildren(...columns, emptyDrop);
     $('#sessionBoardStatus').textContent = selectedPerson ? `${selectedPerson.name || '선택한 고객'} · 현재 일정 ${selectedAssignments.length}개 · ${visibleDate ? `${formatDate(visibleDate)} 보기` : '전체 날짜 보기'}` : `${people.length}명 · 고객을 선택하면 현재 일정과 이동 후보가 표시됩니다.`;
     renderSessionChangePreview(project);
@@ -1681,7 +1938,11 @@
       상태: 'status', status: 'status', 잠금: 'locked', lock: 'locked', locked: 'locked'
     };
     if (aliases[normalized]) return aliases[normalized];
-    const role = project.data.roles.find((item) => item.name.toLowerCase().replace(/[\s_.·-]/g, '') === normalized); return role ? `role:${role.id}` : '';
+    const role = project.data.roles.find((item) => item.name.toLowerCase().replace(/[\s_.·-]/g, '') === normalized);
+    if (role) return `role:${role.id}`;
+    const activeRoles = project.data.roles.filter((item) => item.active !== false);
+    const genericAssignmentHeaders = new Set(['참여자', '참가자', '배정자', '배정인원', '배정대상', '고객', '고객명', '대상자', '수강생', '이름', 'participant', 'participants', 'attendee', 'attendees', 'member', 'members']);
+    return activeRoles.length === 1 && genericAssignmentHeaders.has(normalized) ? `role:${activeRoles[0].id}` : '';
   }
 
   function applyScheduleColumnName(project, column, value) {
@@ -1727,13 +1988,13 @@
   async function importScheduleMatrix(matrix, mode = 'replace') {
     let project = activeProject(); if (!project || !matrix?.length) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project);
     const hasHeader = looksLikeScheduleHeader(matrix); const importedColumns = inferredScheduleColumns(matrix, project, hasHeader);
-    if (mode === 'replace' && project.data.slots.some((slot) => slot.locked)) { showToast('잠긴 세션이 있습니다. 잠금을 해제한 뒤 일정표를 교체해주세요.', 'error'); return; }
+    if (mode === 'replace' && hasLockedSchedule(project)) { showToast('잠긴 세션 또는 배정이 있습니다. 잠금을 해제한 뒤 일정표를 교체해주세요.', 'error'); return; }
     if (mode === 'replace' && project.data.slots.length) {
       if (!await showConfirm('현재 일정표를 Excel 시트 내용으로 교체할까요? 기존 상태는 실행 취소로 되돌릴 수 있습니다.', { title: '일정표 교체', action: '교체' })) return;
       const currentProject = activeProject();
       if (!currentProject || currentProject.id !== projectId || scheduleSnapshot(currentProject) !== confirmationSnapshot) { showToast('확인하는 동안 일정이 바뀌었습니다. 최신 일정을 확인한 뒤 다시 가져와주세요.', 'error'); renderSchedulePage(); return; }
       project = currentProject;
-      if (project.data.slots.some((slot) => slot.locked)) { showToast('새로 잠긴 세션이 있어 일정표 교체를 중단했습니다.', 'error'); return; }
+      if (hasLockedSchedule(project)) { showToast('새로 잠긴 세션 또는 배정이 있어 일정표 교체를 중단했습니다.', 'error'); return; }
     }
     const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
     pushScheduleHistory(project);
@@ -1753,19 +2014,22 @@
   }
 
   async function addScheduleColumn() {
-    const project = activeProject(); if (!project) return; const name = await requestName('추가할 일정표 컬럼 이름', `새 컬럼 ${scheduleSheetColumns(project).length + 1}`); if (!name?.trim()) return;
+    let project = activeProject(); if (!project) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project); const name = await requestName('추가할 일정표 컬럼 이름', `새 컬럼 ${scheduleSheetColumns(project).length + 1}`); if (!name?.trim()) return;
+    project = projectById(projectId); if (!project || scheduleSnapshot(project) !== confirmationSnapshot) { showToast('다른 창의 일정표 변경을 반영했습니다. 컬럼 추가를 다시 시도해주세요.'); renderSchedulePage(); return; }
     pushScheduleHistory(project); const id = `schedule-column-${Date.now().toString(36)}`; const cleanName = name.trim().replace(/[{}]/g, ''); let key = scheduleHeaderKey(cleanName, project); if (project.data.scheduleSheetColumns.some((column) => column.key === key)) key = ''; const roleId = key.startsWith('role:') ? key.slice(5) : null; project.data.scheduleSheetColumns.push({ id, key: key || `custom:${id}`, name: cleanName, kind: roleId ? 'role' : key ? 'system' : 'custom', roleId }); refreshScheduleConflicts(project);
     syncScheduleProjectState(project, `일정 컬럼 추가 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 추가됨'); renderSchedulePage();
   }
 
   async function renameScheduleColumn(columnId) {
-    const project = activeProject(); const column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const name = await requestName('일정표 컬럼 이름 변경', column.name); if (!name?.trim()) return;
+    let project = activeProject(); let column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project); const name = await requestName('일정표 컬럼 이름 변경', column.name); if (!name?.trim()) return;
+    project = projectById(projectId); column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column || scheduleSnapshot(project) !== confirmationSnapshot) { showToast('다른 창의 일정표 변경을 반영했습니다. 컬럼 이름 변경을 다시 시도해주세요.'); renderSchedulePage(); return; }
     pushScheduleHistory(project); applyScheduleColumnName(project, column, name); refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 컬럼 이름 변경 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 이름 변경됨'); renderSchedulePage();
   }
 
   async function removeScheduleColumn(columnId) {
-    const project = activeProject(); const column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return;
+    let project = activeProject(); let column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project);
     if (!await showConfirm(`“${column.name}” 컬럼을 표에서 삭제할까요?${column.kind === 'custom' ? ' 이 컬럼의 셀 값도 삭제됩니다.' : ' 연결된 원본 일정 데이터는 유지됩니다.'}`, { title: '일정표 컬럼 삭제', action: '삭제' })) return;
+    project = projectById(projectId); column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column || scheduleSnapshot(project) !== confirmationSnapshot) { showToast('다른 창의 일정표 변경을 반영했습니다. 컬럼 삭제를 다시 시도해주세요.'); renderSchedulePage(); return; }
     pushScheduleHistory(project); project.data.scheduleSheetColumns = project.data.scheduleSheetColumns.filter((item) => item.id !== columnId);
     if (column.kind === 'custom') Object.values(project.data.scheduleCustomValues || {}).forEach((values) => { delete values[column.id]; });
     refreshScheduleConflicts(project); scheduleSelection = null; syncScheduleProjectState(project, `일정 컬럼 삭제 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 삭제됨'); renderSchedulePage();
@@ -1782,7 +2046,7 @@
     const columnMap = new Map(); (roster.columns || []).forEach((sourceColumn) => { let target = project.data.columns.find((column) => column.name.trim().toLowerCase() === sourceColumn.name.trim().toLowerCase()); if (!target) { target = { ...JSON.parse(JSON.stringify(sourceColumn)), id: `column-${Date.now().toString(36)}-${project.data.columns.length}` }; project.data.columns.push(target); project.data.people.forEach((person) => { person.values[target.id] = ''; }); } columnMap.set(sourceColumn.id, target.id); });
     const existing = new Set(project.data.people.map((person) => String(person.email || person.phone || person.name || '').trim().toLowerCase()).filter(Boolean)); let added = 0;
     (roster.people || []).forEach((source) => { const key = String(source.email || source.phone || source.name || '').trim().toLowerCase(); if (key && existing.has(key)) return; const person = JSON.parse(JSON.stringify(source)); person.id = `person-${Date.now().toString(36)}-${added}`; person.sourceOrder = project.data.people.length; person.values = Object.fromEntries(project.data.columns.map((column) => [column.id, ''])); Object.entries(source.values || {}).forEach(([sourceId, value]) => { const targetId = columnMap.get(sourceId); if (targetId) person.values[targetId] = value; }); if (!person.roleIds?.length || !person.roleIds.some((id) => project.data.roles.some((role) => role.id === id))) person.roleIds = [project.data.roles[0]?.id || 'participant']; project.data.people.push(person); if (key) existing.add(key); added += 1; }); syncPersonDerivedFields(project);
-    state = Core.updateProject(state, project.id, { data: project.data }); await persist('전역 명단 배정 후보 추가됨'); renderAll(); navigate('schedule'); showToast(`${roster.name}에서 중복을 제외한 ${added}명을 배정 후보에 추가했습니다.`, 'success');
+    markRosterDependenciesStale(project, '저장 명단 추가 후 일정 재검토 필요'); await persist('전역 명단 배정 후보 추가됨'); renderAll(); navigate('schedule'); showToast(`${roster.name}에서 중복을 제외한 ${added}명을 배정 후보에 추가했습니다.`, 'success');
   }
 
   async function deleteSelectedScheduleRows() {
@@ -1790,7 +2054,7 @@
     if (['column', 'all'].includes(scheduleSelection.mode)) { showToast('행 번호를 선택한 뒤 행 삭제를 눌러주세요. 컬럼은 제목 오른쪽 ×로 삭제합니다.', 'error'); return; }
     const min = Math.max(0, Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row)); const max = Math.max(scheduleSelection.anchor.row, scheduleSelection.focus.row);
     const targets = project.data.slots.slice(min, max + 1);
-    if (!targets.length) return; if (targets.some((slot) => slot.locked)) { showToast('잠긴 행이 포함되어 있습니다. 잠금 셀을 지운 뒤 삭제해주세요.', 'error'); return; }
+    if (!targets.length) return; if (targets.some((slot) => scheduleRowLocked(project, slot.id))) { showToast('잠긴 행 또는 배정이 포함되어 있습니다. 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; }
     const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const ids = new Set(targets.map((slot) => slot.id)); project.data.slots = project.data.slots.filter((slot) => !ids.has(slot.id)); project.data.assignments = project.data.assignments.filter((item) => !ids.has(item.slotId));
     Object.keys(project.data.availability).forEach((personId) => { project.data.availability[personId] = project.data.availability[personId].filter((id) => !ids.has(id)); });
     refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); scheduleSelection = null; syncScheduleProjectState(project, `일정 행 삭제 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('일정 행 삭제됨');
@@ -1880,9 +2144,17 @@
       zoomConnections.forEach((connection) => { const option = element('option', '', `${connection.label}${connection.status !== 'connected' ? ' · 로그인 필요' : ''}`); option.value = connection.id; option.selected = slot.zoomConnectionId === connection.id; select.append(option); }); accountCell.append(select); row.append(accountCell);
       const artifact = project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created')
         || project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id);
-      row.append(element('td', '', artifact?.status === 'created' ? '만들기 완료' : artifact?.status === 'stale' ? '일정 변경 확인 필요' : '아직 만들지 않음'), element('td', '', artifact?.joinUrl || ''));
+      const needsCleanup = Boolean(artifact && artifact.status !== 'superseded' && (artifact.status === 'stale' || slot.status === 'cancelled')); const status = element('td', '', needsCleanup ? '기존 회의 정리 필요' : artifact?.status === 'created' ? '만들기 완료' : '아직 만들지 않음');
+      if (needsCleanup && artifact.externalId) { const resolved = element('button', 'text-button', '정리 완료 표시'); resolved.type = 'button'; resolved.dataset.zoomArtifactResolved = artifact.externalId; status.append(document.createTextNode(' '), resolved); }
+      row.append(status, element('td', '', artifact?.joinUrl || ''));
       return row;
-    }); table.tBodies[0].replaceChildren(...rows);
+    });
+    const liveSlotIds = new Set(project.data.slots.map((slot) => slot.id));
+    project.data.externalArtifacts.filter((artifact) => artifact.kind === 'zoom' && artifact.status === 'stale' && !liveSlotIds.has(artifact.slotId)).forEach((artifact) => {
+      const row = element('tr', 'zoom-orphan-row'); row.append(element('td', '', '삭제된 일정'), element('td', '', '—'), element('td', '', '이전 Zoom 회의'), element('td', '', '—'));
+      const status = element('td', '', '기존 회의 정리 필요'); if (artifact.externalId) { const resolved = element('button', 'text-button', '정리 완료 표시'); resolved.type = 'button'; resolved.dataset.zoomArtifactResolved = artifact.externalId; status.append(document.createTextNode(' '), resolved); } row.append(status, element('td', '', artifact.joinUrl || '')); rows.push(row);
+    });
+    table.tBodies[0].replaceChildren(...rows);
   }
 
   const RICH_TAGS = new Set(['A', 'B', 'BLOCKQUOTE', 'BR', 'COL', 'COLGROUP', 'DIV', 'EM', 'FONT', 'H1', 'H2', 'H3', 'H4', 'HR', 'I', 'LI', 'OL', 'P', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TABLE', 'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'U', 'UL']);
@@ -2075,6 +2347,7 @@
       : workspaceGmail ? 'Workspace Gmail 연결됨 · Gmail Flow에서 계정을 확인하세요' : 'Gmail Flow를 열어 Google 계정에 로그인하세요';
     renderMailRosterResource(project);
     if (!mailEditorDirty) {
+      mailEditorProjectId = project.id;
       $('#mailSubjectTemplate').value = project.data.communication.subjectTemplate;
       $('#mailBodyTemplate').value = project.data.communication.bodyTemplate;
       $('#mailBodyEditor').innerHTML = sanitizeRichHtml(project.data.communication.bodyHtmlTemplate || plainToHtml(project.data.communication.bodyTemplate));
@@ -2094,7 +2367,7 @@
     const table = $('#mailPreviewTable'); const head = element('tr'); ['이름', '이메일', '제목', '일정 수', '본문 미리보기', '상태', '수정'].forEach((label) => head.append(element('th', '', label))); table.tHead.replaceChildren(head);
     const rows = pkg.entries.map((entry) => {
       const row = element('tr'); [entry.name, entry.email, entry.subject, String(entry.assignments.length), entry.body.slice(0, 180)].forEach((value) => row.append(element('td', '', value)));
-      const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === entry.personId);
+      const artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId);
       row.append(element('td', '', artifact?.status === 'created' ? (entry.edited ? '개별 수정 반영됨' : 'Gmail 임시보관함에 저장됨') : artifact?.status === 'stale' ? 'Gmail 내용 다시 저장 필요' : entry.edited ? '이 사람만 수정됨' : '확인 가능'));
       const actionCell = element('td'); const edit = element('button', 'secondary-button compact', '이 사람 메일 수정'); edit.type = 'button'; edit.dataset.mailEdit = entry.personId; actionCell.append(edit); row.append(actionCell); return row;
     });
@@ -2151,7 +2424,7 @@
           project.data.people.push({ ...incoming, id: `person-${crypto.randomUUID()}`, sourceOrder: project.data.people.length, values });
         }
       });
-      return { changed: imported.people.length, message: `${imported.people.length}명의 신청자 정보를 병합했습니다.` };
+      return { changed: imported.people.length, unmatched: 0, type: 'registration', message: `${imported.people.length}명의 신청자 정보를 병합했습니다.` };
     }
     const nameId = linked.questionIds?.name || questions.get('성함');
     const participantId = linked.questionIds?.participantId || questions.get('참여자 고유번호');
@@ -2166,7 +2439,7 @@
       project.data.availability[person.id] = formAnswerValues(response, slotsId).map((value) => value.match(/^\[([^\]]+)\]/)?.[1]).filter((slotId) => project.data.slots.some((slot) => slot.id === slotId));
       changed += 1;
     });
-    return { changed, message: `${changed}명의 가능 시간을 반영했습니다.${unmatched ? ` 일치하지 않은 응답 ${unmatched}건은 확인이 필요합니다.` : ''}` };
+    return { changed, unmatched, type: 'availability', message: `${changed}명의 가능 시간을 반영했습니다.${unmatched ? ` 일치하지 않은 응답 ${unmatched}건은 확인이 필요합니다.` : ''}` };
   }
 
   function downloadText(filename, text, type) {
@@ -2246,11 +2519,13 @@
   async function switchProject(projectId) {
     try {
       if (schedulePersistTimer) await flushSchedulePersist();
+      if (mailEditorDirty) await saveMailEditorDraft(mailEditorProjectId);
+      const navigationAtStart = navigationGeneration;
       state = Core.setActiveProject(state, projectId);
       scheduleSelection = null; scheduleHistory = []; scheduleFuture = []; selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null;
       await persist('프로젝트 전환됨');
       renderAll();
-      navigate('dashboard');
+      if (navigationGeneration === navigationAtStart) navigate('dashboard');
     } catch (error) { showToast(error.message, 'error'); }
   }
 
@@ -2292,12 +2567,13 @@
         endDate: form.get('endDate'),
         templateId: form.get('templateId')
       });
+      const navigationAtStart = navigationGeneration;
       state = result.state;
       await persist('프로젝트 생성됨');
       closeDialog('newProjectDialog');
       resetNewProjectForm();
       renderAll();
-      navigate('dashboard');
+      if (navigationGeneration === navigationAtStart) navigate('dashboard');
       showToast(`“${result.project.name}” 프로젝트를 만들었습니다.`, 'success');
     } catch (error) { showToast(error.message, 'error'); }
   }
@@ -2315,6 +2591,7 @@
     const defaultConnectionIds = {};
     $$('[data-default-connection-type]').forEach((select) => { defaultConnectionIds[select.dataset.defaultConnectionType] = select.value || null; });
     try {
+      const previousName = project.name;
       const participantRole = project.data.roles.find((role) => role.id === 'participant');
       if (participantRole) { participantRole.minPerSession = participantMin; participantRole.maxPerSession = participantMax; }
       const coachRole = project.data.roles.find((role) => role.id === 'coach');
@@ -2334,6 +2611,22 @@
           defaultConnectionIds
         }
       });
+      const updatedProject = projectById(project.id);
+      refreshScheduleConflicts(updatedProject);
+      const projectNameChanged = previousName !== updatedProject.name;
+      let gmailStale = false; let zoomStale = false;
+      if (projectNameChanged) {
+        updatedProject.data.externalArtifacts.forEach((artifact) => {
+          if (artifact.status === 'superseded') return;
+          if (artifact.kind === 'gmailDraft') { artifact.status = 'stale'; gmailStale = true; }
+          if (artifact.kind === 'zoom') { artifact.status = 'stale'; zoomStale = true; }
+        });
+      }
+      state = Core.updateProject(state, updatedProject.id, { data: updatedProject.data });
+      if (updatedProject.data.slots.length) state = Core.setModuleStatus(state, updatedProject.id, 'schedule', updatedProject.data.conflicts.length ? 'needsReview' : 'stale', updatedProject.data.conflicts.length ? `설정 변경 후 일정 문제 ${updatedProject.data.conflicts.length}건` : '프로젝트 설정 변경 후 일정 재검토 필요');
+      if (gmailStale && updatedProject.installedModules.includes('gmailFlow')) state = Core.setModuleStatus(state, updatedProject.id, 'gmailFlow', 'stale', '프로젝트 이름 변경 후 Gmail 확인 필요');
+      if (zoomStale && updatedProject.installedModules.includes('zoom')) state = Core.setModuleStatus(state, updatedProject.id, 'zoom', 'stale', '프로젝트 이름 변경 후 Zoom 확인 필요');
+      recordScheduleMergeImpact(updatedProject.id, null, { scheduleOnly: false });
       await persist();
       closeDialog('projectSettingsDialog');
       renderAll();
@@ -2352,14 +2645,16 @@
       });
       state = result.state;
       const type = $('#connectionType').value;
-      await globalThis.workspaceDesktop.configureConnection(result.connection.id, {
-        provider: type === 'zoom' ? 'zoom' : 'google',
-        type,
-        clientId: $('#connectionClientId').value,
-        clientSecret: $('#connectionClientSecret').value,
-        redirectUri: $('#connectionRedirectUri').value
-      });
-      await persist();
+      const config = { provider: type === 'zoom' ? 'zoom' : 'google', type, clientId: $('#connectionClientId').value, clientSecret: $('#connectionClientSecret').value, redirectUri: $('#connectionRedirectUri').value };
+      await persist('계정 설정 저장됨');
+      let reservation = null; let externalStarted = false;
+      try {
+        reservation = await reserveExternalArtifacts('workspace-connections', 'connection', [result.connection.id]);
+        if (!reservation.ok) throw new Error('다른 창에서 같은 계정 설정을 처리하고 있습니다.');
+        if (!state.connections.some((item) => item.id === result.connection.id)) throw new Error('다른 창에서 계정 설정이 삭제되었습니다.');
+        beginExternalOperation(); externalStarted = true;
+        await globalThis.workspaceDesktop.configureConnection(result.connection.id, config);
+      } finally { if (reservation?.ok) await releaseExternalArtifacts(reservation.token); if (externalStarted) endExternalOperation(); }
       closeDialog('connectionDialog');
       event.currentTarget.reset();
       renderAll();
@@ -2369,19 +2664,21 @@
   }
 
   async function applyRosterMatrix(matrix) {
-    const project = activeProject();
+    let project = activeProject();
     if (!project) return;
+    const projectId = project.id; const confirmationSignature = scheduleChangeSignature(project);
+    if (hasLockedSchedule(project)) { showToast('잠긴 일정 또는 배정이 있어 명단 전체 교체를 중단했습니다. 잠금을 해제한 뒤 다시 시도해주세요.', 'error'); return; }
     if (project.data.people.length && !await showConfirm('현재 명단을 새 데이터로 교체할까요? 기존 일정 배정에서 연결이 끊길 수 있습니다.', { title: '명단 교체', action: '교체' })) return;
+    project = projectById(projectId);
+    if (!project || scheduleChangeSignature(project) !== confirmationSignature || hasLockedSchedule(project)) { showToast('확인하는 동안 다른 창의 명단 또는 일정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+    const beforeSnapshot = scheduleSnapshot(project);
     const result = Ops.matrixToRoster(matrix);
-    state = Core.updateProject(state, project.id, {
-      data: {
-        columns: result.columns,
-        people: result.people,
-        availability: {},
-        assignments: [],
-        conflicts: []
-      }
-    });
+    project.data.columns = result.columns; project.data.people = result.people; project.data.availability = {}; project.data.assignments = [];
+    project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => artifact.kind === 'gmailDraft' ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString() } : artifact);
+    refreshScheduleConflicts(project);
+    const impact = applyScheduleMutationImpact(project, beforeSnapshot);
+    syncScheduleProjectState(project, `명단 교체 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact);
+    recordScheduleMergeImpact(project.id, impact, { scheduleOnly: false });
     state = Core.setModuleStatus(state, project.id, 'people', result.warnings.length ? 'needsReview' : 'inProgress', `${result.people.length}명 가져옴`);
     await persist();
     renderAll();
@@ -2394,9 +2691,8 @@
     const project = activeProject(); if (!project) return;
     syncPersonDerivedFields(project);
     const warnings = rosterWarnings(project);
-    state = Core.updateProject(state, project.id, { data: { columns: project.data.columns, people: project.data.people } });
+    markRosterDependenciesStale(project);
     state = Core.setModuleStatus(state, project.id, 'people', warnings.length ? 'needsReview' : 'complete', `${project.data.people.filter((person) => person.active !== false).length}명`);
-    if (project.data.slots.length) state = Core.setModuleStatus(state, project.id, 'schedule', 'stale', '명단 변경 후 일정 재검토 필요');
     await persist(); renderAll();
     showToast(warnings.length ? `명단을 저장했습니다. 확인할 항목이 ${warnings.length}건 있습니다.` : '명단을 저장했습니다.', warnings.length ? 'normal' : 'success');
   }
@@ -2450,6 +2746,7 @@
       slots: project.data.slots,
       availability: project.data.availability,
       existingAssignments: project.data.assignments,
+      historyPairs: scheduleHistoryPairs(project),
       rules: project.data.scheduleRules
     });
     project.data.assignments = result.assignments;
@@ -2471,6 +2768,7 @@
       createdAt: new Date().toISOString(),
       slots: JSON.parse(JSON.stringify(project.data.slots)),
       assignments: JSON.parse(JSON.stringify(project.data.assignments)),
+      availability: JSON.parse(JSON.stringify(project.data.availability)),
       conflicts: JSON.parse(JSON.stringify(project.data.conflicts))
     };
   }
@@ -2487,16 +2785,40 @@
   function openPersonalMailEditor(personId) {
     const project = activeProject(); if (!project) return;
     const entry = Ops.buildMailPackage(project).entries.find((item) => item.personId === personId); if (!entry) return;
-    const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === personId);
+    const artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === personId);
     $('#mailEditPersonId').value = personId; $('#mailEditRecipient').value = entry.email; $('#mailEditSubject').value = entry.subject;
     $('#mailEditBody').innerHTML = sanitizeRichHtml(entry.bodyHtml || plainToHtml(entry.body));
     $('#mailEditStatus').textContent = artifact ? `Gmail 임시보관함의 메일과 연결되어 있습니다. 저장하면 Gmail 내용도 함께 바뀝니다.` : '아직 Gmail 임시보관함에 만들지 않았습니다. 수정 내용은 현재 프로젝트에 저장됩니다.';
+    $('#mailEditDialog').dataset.projectId = project.id;
     renderTemplateVariables(project, { paletteId: 'mailEditVariablePalette', statusId: 'mailEditTokenStatus', subjectId: 'mailEditSubject', bodyId: 'mailEditBody' });
     openDialog('mailEditDialog');
   }
 
+  function captureOpenPersonalMailDraft({ markArtifactStale = true } = {}) {
+    const dialog = $('#mailEditDialog');
+    const project = projectById(dialog.dataset.projectId || '');
+    const personId = $('#mailEditPersonId').value;
+    if (!dialog.open || !project || !project.data.people.some((person) => person.id === personId)) return null;
+    const html = sanitizeRichHtml($('#mailEditBody').innerHTML);
+    project.data.communication.mailEdits[personId] = { subject: $('#mailEditSubject').value.trim(), bodyHtml: html, body: richText(html), updatedAt: new Date().toISOString() };
+    const artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === personId);
+    if (artifact && markArtifactStale) artifact.status = 'stale';
+    state = Core.updateProject(state, project.id, { data: project.data });
+    persistDirty = true;
+    return { projectId: project.id, personId };
+  }
+
   function bindEvents() {
     bindRichEditor($('#mailBodyEditor')); bindRichEditor($('#mailEditBody'));
+    document.addEventListener('input', (event) => {
+      if (!event.target.matches('[data-person-row]')) return;
+      const project = activeProject(); if (!project) return;
+      const rowIndex = Number(event.target.dataset.personRow);
+      const person = project.data.people[rowIndex] || (event.target.value.length ? ensureRosterPerson(project, rowIndex + 1) : null);
+      if (person) person.values[event.target.dataset.columnId] = event.target.value;
+      syncPersonDerivedFields(project);
+    });
+    document.addEventListener('focusout', () => setTimeout(() => applyDeferredWorkspaceState(), 0));
     const markMailEditorDirty = () => { mailEditorDirty = true; $('#mailPackageStatus').textContent = '메일 편집 내용을 자동 저장하는 중입니다.'; const project = activeProject(); if (project) renderTemplateVariables(project); clearTimeout(mailDraftTimer); mailDraftTimer = setTimeout(() => void saveMailEditorDraft(), 700); };
     $('#mailSubjectTemplate').addEventListener('input', (event) => { markMailEditorDirty(); renderTemplateAutocomplete(event.currentTarget); });
     $('#mailBodyEditor').addEventListener('input', (event) => { markMailEditorDirty(); renderTemplateAutocomplete(event.currentTarget); });
@@ -2553,7 +2875,7 @@
       const start = rosterSelection.focus;
       matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => { if (start.col + colOffset < project.data.columns.length) setSheetCellValue(project, start.row + rowOffset, start.col + colOffset, value); }));
       updateRosterSelection(start, { row: start.row + matrix.length - 1, col: Math.min(project.data.columns.length - 1, start.col + Math.max(...matrix.map((row) => row.length)) - 1) });
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist('셀 붙여넣기 저장됨'); renderPeoplePage();
+      markRosterDependenciesStale(project); await persist('셀 붙여넣기 저장됨'); renderPeoplePage();
     });
     $('#rosterCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !rosterSelection) return; const point = rosterSelection.focus;
@@ -2562,7 +2884,7 @@
     });
     $('#rosterCellValue').addEventListener('change', async () => {
       const project = activeProject(); if (!project || !rosterSelection) return;
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist('셀 편집 저장됨'); renderPeoplePage();
+      markRosterDependenciesStale(project); await persist('셀 편집 저장됨'); renderPeoplePage();
     });
     rosterTable.addEventListener('click', (event) => {
       const project = activeProject(); if (!project) return;
@@ -2634,7 +2956,7 @@
       if (!scheduleSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text) return;
       const project = activeProject(); if (!project) return; const matrix = /[\t\r\n]/.test(text) ? Ops.parseDelimited(text) : [[text]]; if (!matrix.length) return; const start = scheduleSelection.focus; const structured = matrix.length > 1 || matrix.some((row) => row.length > 1); if (!structured && shouldUseNativeScheduleClipboard(event)) return; event.preventDefault();
       if (structured && start.row <= 0 && start.col === 0 && (looksLikeScheduleHeader(matrix) || !project.data.slots.length)) { await importScheduleMatrix(matrix, 'replace'); return; }
-      const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length)); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id));
+      const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length)); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => scheduleRowLocked(project, slot.id)).map((slot) => slot.id));
       while (scheduleSheetColumns(project).length < start.col + width) { const index = project.data.scheduleSheetColumns.length; const id = `schedule-column-${Date.now().toString(36)}-${index}`; project.data.scheduleSheetColumns.push({ id, key: `custom:${id}`, name: `컬럼${index + 1}`, kind: 'custom', roleId: null }); }
       matrix.forEach((row, rowOffset) => row.map((value, colOffset) => ({ value, targetColumn: start.col + colOffset })).sort((left, right) => Number(scheduleSheetColumns(project)[left.targetColumn]?.key === 'locked') - Number(scheduleSheetColumns(project)[right.targetColumn]?.key === 'locked')).forEach(({ value, targetColumn }) => { const targetRow = start.row + rowOffset; if (targetRow === -1) applyScheduleColumnName(project, project.data.scheduleSheetColumns[targetColumn], value); else if (!setScheduleCellValue(project, targetRow, targetColumn, value, { lockedSlotIds })) lockedCells += 1; }));
       const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `셀 붙여넣기 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage();
@@ -2655,7 +2977,7 @@
       }
       const rangeSelected = scheduleSelection.anchor.row !== scheduleSelection.focus.row || scheduleSelection.anchor.col !== scheduleSelection.focus.col || scheduleSelection.mode !== 'cells';
       if ((event.key === 'Delete' || event.key === 'Backspace') && (!event.target.matches('input:focus') || rangeSelected)) {
-        event.preventDefault(); const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const matrix = selectedScheduleMatrix(project); const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id));
+        event.preventDefault(); const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const matrix = selectedScheduleMatrix(project); const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => scheduleRowLocked(project, slot.id)).map((slot) => slot.id));
         matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0 && !setScheduleCellValue(project, minRow + r, minCol + c, '', { lockedSlotIds })) lockedCells += 1; })); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `선택 셀 지움 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage(); if (lockedCells) showToast(`잠긴 셀 ${lockedCells}개는 유지했습니다.`, 'normal'); await persist('선택 셀 지움');
       }
     });
@@ -2666,7 +2988,7 @@
     document.addEventListener('cut', (event) => {
       if (currentPage !== 'schedule' || !scheduleSelection || shouldUseNativeScheduleClipboard(event)) return; const project = activeProject(); if (!project) return; const matrix = selectedScheduleMatrix(project); if (!matrix.length) return;
       event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', scheduleClipboardHtml(matrix)); event.preventDefault(); const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project);
-      const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id)); matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0 && !setScheduleCellValue(project, minRow + r, minCol + c, '', { lockedSlotIds })) lockedCells += 1; })); queueSchedulePersist(project, '잘라내기 저장됨', beforeSnapshot); renderSchedulePage(); if (lockedCells) showToast(`잠긴 셀 ${lockedCells}개는 복사만 하고 원본은 유지했습니다.`, 'normal');
+      const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => scheduleRowLocked(project, slot.id)).map((slot) => slot.id)); matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0 && !setScheduleCellValue(project, minRow + r, minCol + c, '', { lockedSlotIds })) lockedCells += 1; })); queueSchedulePersist(project, '잘라내기 저장됨', beforeSnapshot); renderSchedulePage(); if (lockedCells) showToast(`잠긴 셀 ${lockedCells}개는 복사만 하고 원본은 유지했습니다.`, 'normal');
     });
     $('#scheduleCellValue').addEventListener('focus', (event) => {
       const project = activeProject(); const point = scheduleSelection?.focus; if (!project || !point) return;
@@ -2675,7 +2997,7 @@
     $('#scheduleCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !scheduleSelection) return;
       const rowIndex = Number(event.target.dataset.scheduleEditRow ?? scheduleSelection.focus.row); const columnIndex = Number(event.target.dataset.scheduleEditCol ?? scheduleSelection.focus.col); const column = scheduleSheetColumns(project)[columnIndex]; const slot = rowIndex >= 0 ? project.data.slots[rowIndex] : null; event.target.dataset.scheduleEditValue = event.target.value;
-      if (slot?.locked && column?.key !== 'locked') { event.target.value = scheduleCellValue(project, rowIndex, columnIndex); showToast('잠긴 일정은 잠금 셀을 먼저 해제한 뒤 편집해주세요.', 'error'); return; }
+      if (slot && scheduleRowLocked(project, slot.id) && column?.key !== 'locked') { event.target.value = scheduleCellValue(project, rowIndex, columnIndex); showToast('잠긴 일정은 잠금 셀을 먼저 해제한 뒤 편집해주세요.', 'error'); return; }
       const beforeSnapshot = event.target.dataset.scheduleImpactBefore || scheduleSnapshot(project); event.target.dataset.scheduleImpactBefore = beforeSnapshot;
       if (!event.target.dataset.scheduleEditing) { pushScheduleHistorySnapshot(beforeSnapshot); event.target.dataset.scheduleEditing = 'true'; }
       if (rowIndex === -1) { const editColumn = project.data.scheduleSheetColumns[columnIndex]; if (editColumn) { editColumn.name = event.target.value.trim() || editColumn.name; scheduleEditGeneration += 1; } }
@@ -2709,8 +3031,8 @@
       if (event.target.closest('[data-session-empty-drop]')) { await addSessionFromText(); return; }
       const unassign = event.target.closest('[data-session-unassign]'); if (unassign) { const assignment = project.data.assignments.find((item) => item.id === unassign.dataset.sessionUnassign); if (assignment) { selectedSessionPersonId = assignment.personId; selectedSessionAssignmentId = assignment.id; previewSessionChange(project, { personId: assignment.personId, assignmentId: assignment.id, action: 'remove' }); } return; }
       const assignmentChip = event.target.closest('[data-session-assignment]'); if (assignmentChip) { selectedSessionPersonId = assignmentChip.dataset.sessionPerson; selectedSessionAssignmentId = assignmentChip.dataset.sessionAssignment; pendingSessionChange = null; renderSessionPlanner(project); return; }
-      const edit = event.target.closest('[data-session-edit]'); if (edit) { const projectId = project.id; const slotId = edit.dataset.sessionEdit; let currentProject = project; let slot = currentProject.data.slots.find((item) => item.id === slotId); if (!slot) return; if (slot.locked) { showToast('잠긴 세션은 잠금을 해제한 뒤 시간을 변경해주세요.', 'error'); return; } const value = await requestName('세션 시간 변경', `${slot.date} ${slot.startTime}-${slot.endTime} ${slot.label || ''}`); if (!value) return; const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '날짜와 시간을 확인해주세요.', 'error'); return; } currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot) { showToast('다른 창에서 해당 세션이 삭제되었습니다.', 'error'); renderSchedulePage(); return; } if (slot.locked) { showToast('다른 창에서 세션이 잠겼습니다.', 'error'); renderSchedulePage(); return; } const personIds = currentProject.data.assignments.filter((item) => item.slotId === slot.id).map((item) => item.personId); const confirmSignature = scheduleChangeSignature(currentProject); if (!await showConfirm(`${personIds.length}명의 일정과 연결된 Zoom·메일을 다시 확인해야 합니다. 시간을 변경할까요?`, { title: '세션 시간 변경', action: '변경', danger: false })) return; currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot || slot.locked || scheduleChangeSignature(currentProject) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 시도해주세요.'); renderSchedulePage(); return; } pushScheduleHistory(currentProject); const next = parsed.slots[0]; Object.assign(slot, { date: next.date, startTime: next.startTime, endTime: next.endTime, label: next.label, status: 'changed' }); const impact = { changedSlotIds: [slot.id], zoomReviewSlotIds: [slot.id], affectedPersonIds: personIds }; markScheduleChangeStale(currentProject, impact); refreshScheduleConflicts(currentProject); syncScheduleProjectState(currentProject, `세션 시간 변경 · 문제 ${currentProject.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('세션 시간 변경됨'); return; }
-      const remove = event.target.closest('[data-session-remove]'); if (remove) { const projectId = project.id; const slotId = remove.dataset.sessionRemove; let currentProject = project; let slot = currentProject.data.slots.find((item) => item.id === slotId); let assignments = currentProject.data.assignments.filter((item) => item.slotId === slotId); if (slot?.locked) { showToast('잠긴 세션은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; } if (!slot) return; const confirmSignature = scheduleChangeSignature(currentProject); if (!await showConfirm(`${slot.date} ${slot.startTime} 세션을 삭제할까요? 배정 인원 ${assignments.length}명의 Zoom·메일도 다시 확인해야 합니다.`, { title: '세션 삭제', action: '삭제' })) return; currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot || slot.locked || scheduleChangeSignature(currentProject) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 시도해주세요.'); renderSchedulePage(); return; } assignments = currentProject.data.assignments.filter((item) => item.slotId === slot.id); pushScheduleHistory(currentProject); const impact = { changedSlotIds: [slot.id], zoomReviewSlotIds: [slot.id], affectedPersonIds: assignments.map((item) => item.personId) }; markScheduleChangeStale(currentProject, impact); currentProject.data.slots = currentProject.data.slots.filter((item) => item.id !== slot.id); currentProject.data.assignments = currentProject.data.assignments.filter((item) => item.slotId !== slot.id); refreshScheduleConflicts(currentProject); syncScheduleProjectState(currentProject, `세션 삭제 · 문제 ${currentProject.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('세션 삭제됨'); return; }
+      const edit = event.target.closest('[data-session-edit]'); if (edit) { const projectId = project.id; const slotId = edit.dataset.sessionEdit; let currentProject = project; let slot = currentProject.data.slots.find((item) => item.id === slotId); if (!slot) return; if (scheduleRowLocked(currentProject, slot.id)) { showToast('잠긴 세션은 잠금을 해제한 뒤 시간을 변경해주세요.', 'error'); return; } const value = await requestName('세션 시간 변경', `${slot.date} ${slot.startTime}-${slot.endTime} ${slot.label || ''}`); if (!value) return; const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '날짜와 시간을 확인해주세요.', 'error'); return; } currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot) { showToast('다른 창에서 해당 세션이 삭제되었습니다.', 'error'); renderSchedulePage(); return; } if (scheduleRowLocked(currentProject, slot.id)) { showToast('다른 창에서 세션이 잠겼습니다.', 'error'); renderSchedulePage(); return; } const personIds = currentProject.data.assignments.filter((item) => item.slotId === slot.id).map((item) => item.personId); const confirmSignature = scheduleChangeSignature(currentProject); if (!await showConfirm(`${personIds.length}명의 일정과 연결된 Zoom·메일을 다시 확인해야 합니다. 시간을 변경할까요?`, { title: '세션 시간 변경', action: '변경', danger: false })) return; currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot || scheduleRowLocked(currentProject, slot.id) || scheduleChangeSignature(currentProject) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 시도해주세요.'); renderSchedulePage(); return; } pushScheduleHistory(currentProject); const next = parsed.slots[0]; Object.assign(slot, { date: next.date, startTime: next.startTime, endTime: next.endTime, label: next.label, status: 'changed' }); const impact = { changedSlotIds: [slot.id], zoomReviewSlotIds: [slot.id], affectedPersonIds: personIds }; markScheduleChangeStale(currentProject, impact); refreshScheduleConflicts(currentProject); syncScheduleProjectState(currentProject, `세션 시간 변경 · 문제 ${currentProject.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('세션 시간 변경됨'); return; }
+      const remove = event.target.closest('[data-session-remove]'); if (remove) { const projectId = project.id; const slotId = remove.dataset.sessionRemove; let currentProject = project; let slot = currentProject.data.slots.find((item) => item.id === slotId); let assignments = currentProject.data.assignments.filter((item) => item.slotId === slotId); if (slot && scheduleRowLocked(currentProject, slot.id)) { showToast('잠긴 세션은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; } if (!slot) return; const confirmSignature = scheduleChangeSignature(currentProject); if (!await showConfirm(`${slot.date} ${slot.startTime} 세션을 삭제할까요? 배정 인원 ${assignments.length}명의 Zoom·메일도 다시 확인해야 합니다.`, { title: '세션 삭제', action: '삭제' })) return; currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot || scheduleRowLocked(currentProject, slot.id) || scheduleChangeSignature(currentProject) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 시도해주세요.'); renderSchedulePage(); return; } assignments = currentProject.data.assignments.filter((item) => item.slotId === slot.id); pushScheduleHistory(currentProject); const impact = { changedSlotIds: [slot.id], zoomReviewSlotIds: [slot.id], affectedPersonIds: assignments.map((item) => item.personId) }; markScheduleChangeStale(currentProject, impact); currentProject.data.slots = currentProject.data.slots.filter((item) => item.id !== slot.id); currentProject.data.assignments = currentProject.data.assignments.filter((item) => item.slotId !== slot.id); Object.keys(currentProject.data.availability).forEach((personId) => { currentProject.data.availability[personId] = currentProject.data.availability[personId].filter((id) => id !== slot.id); }); refreshScheduleConflicts(currentProject); syncScheduleProjectState(currentProject, `세션 삭제 · 문제 ${currentProject.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('세션 삭제됨'); return; }
       const card = event.target.closest('[data-session-slot]'); if (card && selectedSessionPersonId) { if (!selectedSessionAssignmentId) { showToast('변경할 현재 일정을 먼저 선택해주세요.'); return; } previewSessionChange(project, { personId: selectedSessionPersonId, assignmentId: selectedSessionAssignmentId, toSlotId: card.dataset.sessionSlot }); }
     });
     $('#sessionSelectedPersonPanel').addEventListener('click', (event) => { const project = activeProject(); if (!project) return; if (event.target.closest('[data-session-clear-person]')) { selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null; renderSessionPlanner(project); return; } const origin = event.target.closest('[data-session-origin-assignment]'); if (origin) { selectedSessionAssignmentId = origin.dataset.sessionOriginAssignment; pendingSessionChange = null; renderSessionPlanner(project); return; } if (event.target.closest('[data-session-origin-new]')) { selectedSessionAssignmentId = 'new'; pendingSessionChange = null; renderSessionPlanner(project); } });
@@ -2809,25 +3131,67 @@
     $('#projectSettingsForm').addEventListener('submit', saveProjectSettings);
     $('#connectionForm').addEventListener('submit', addConnectionFromForm);
     $('#mailEditForm').addEventListener('submit', async (event) => {
-      event.preventDefault(); const project = activeProject(); if (!project) return;
-      const personId = $('#mailEditPersonId').value; const html = sanitizeRichHtml($('#mailEditBody').innerHTML); const subject = $('#mailEditSubject').value.trim();
-      project.data.communication.mailEdits[personId] = { subject, bodyHtml: html, body: richText(html), updatedAt: new Date().toISOString() };
-      let message = '개인 메일 수정 내용을 프로젝트에 저장했습니다.';
-      const entry = Ops.buildMailPackage(project).entries.find((item) => item.personId === personId);
-      const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === personId);
-      if (artifact && entry) {
-        const connection = state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected');
-        if (connection) {
-          try { const updated = await globalThis.workspaceDesktop.updateGmailDraft(connection.id, artifact.externalId, entry); artifact.messageId = updated.message?.id || artifact.messageId; artifact.status = 'created'; artifact.updatedAt = new Date().toISOString(); message = '수정 내용을 저장하고 Gmail 임시보관함의 메일도 변경했습니다.'; }
-          catch (error) { artifact.status = 'stale'; message = `수정 내용은 프로젝트에 저장했지만 Gmail 메일은 변경하지 못했습니다: ${error.message}`; }
-        } else { artifact.status = 'stale'; message = '수정 내용은 저장했습니다. Gmail 계정에 다시 로그인하면 임시보관함의 메일도 변경할 수 있습니다.'; }
-      }
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist(); closeDialog('mailEditDialog'); renderAll(); showToast(message, artifact?.status === 'stale' ? 'error' : 'success');
+      event.preventDefault();
+      const submitButton = $('#mailEditForm button[type="submit"]');
+      if (submitButton.disabled) return;
+      const captured = captureOpenPersonalMailDraft();
+      if (!captured) { showToast('수정 내용을 저장할 프로젝트 또는 받는 사람을 찾지 못했습니다.', 'error'); return; }
+      const { projectId, personId } = captured;
+      let reservation = null; let externalStarted = false; let message = '개인 메일 수정 내용을 프로젝트에 저장했습니다.'; let tone = 'success';
+      submitButton.disabled = true;
+      try {
+        await persist('개인 메일 수정 저장됨');
+        let project = projectById(projectId);
+        let artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === personId);
+        let entry = project ? Ops.buildMailPackage(project).entries.find((item) => item.personId === personId) : null;
+        if (artifact && entry) {
+          let connection = state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected');
+          if (!connection) { message = '수정 내용은 저장했습니다. Gmail 계정에 다시 로그인하면 임시보관함의 메일도 변경할 수 있습니다.'; tone = 'error'; }
+          else {
+            try { reservation = await reserveExternalArtifacts(projectId, 'gmailDraft', [personId]); }
+            catch (error) { message = `수정 내용은 저장했지만 Gmail 변경 작업을 시작하지 못했습니다: ${error.message}`; tone = 'error'; }
+            if (reservation && !reservation.ok) { message = '수정 내용은 저장했습니다. 다른 창에서 같은 Gmail 메일을 처리 중이므로 완료 후 다시 확인해주세요.'; tone = 'normal'; }
+            if (reservation?.ok) {
+              beginExternalOperation(); externalStarted = true;
+              project = projectById(projectId); artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === personId); entry = project ? Ops.buildMailPackage(project).entries.find((item) => item.personId === personId) : null;
+              connection = artifact ? state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected') : null;
+              if (!project || !artifact || !entry || !connection) { message = '수정 내용은 저장했지만 최신 Gmail 메일과 로그인 계정 연결을 찾지 못했습니다.'; tone = 'error'; }
+              else {
+                const baseSignature = externalOperationSignature(project, 'gmailDraft'); const expectedConnectionIdentity = Core.connectionIdentity(connection);
+                let updated = null; let updateError = null;
+                try {
+                  if (externalOperationStateChanged(projectId, 'gmailDraft', baseSignature)) throw new Error('연결 준비 중 Gmail 계정 또는 메일 내용이 바뀌었습니다.');
+                  updated = await globalThis.workspaceDesktop.updateGmailDraft(connection.id, artifact.externalId, entry, expectedConnectionIdentity);
+                }
+                catch (error) { updateError = error; }
+                const latestProject = latestKnownProject(projectId);
+                if (latestProject) {
+                  const changedDuringUpdate = externalOperationStateChanged(projectId, 'gmailDraft', baseSignature);
+                  const artifactUpdate = { ...artifact, messageId: updated?.message?.id || artifact.messageId, status: updateError || changedDuringUpdate ? 'stale' : 'created', updatedAt: new Date().toISOString() };
+                  const artifacts = mergeExternalArtifactUpdates(latestProject.data.externalArtifacts, [artifactUpdate]);
+                  state = Core.updateProject(state, projectId, { data: { externalArtifacts: artifacts } });
+                  const commitReason = 'Gmail 수정 결과를 저장하는 동안 프로젝트 또는 계정이 바뀌어 메일 확인 필요';
+                  const conflictState = markExternalArtifactsForCommitConflict(state, projectId, 'gmailDraft', [artifactUpdate], commitReason);
+                  const commitResult = await persist(updateError || changedDuringUpdate ? 'Gmail 메일 재확인 필요' : 'Gmail 메일 수정됨', {
+                    externalCommit: externalCommitGuard({ reservation, project: latestProject, kind: 'gmailDraft', expectedConnections: [expectedConnectionIdentity], conflictState })
+                  });
+                  if (commitResult?.externalConflict) { message = updated ? 'Gmail의 메일은 수정됐지만 그 사이 프로젝트 또는 계정이 바뀌어 프로젝트에는 확인 필요 상태로 남겼습니다.' : 'Gmail 수정은 완료되지 않았고 그 사이 프로젝트 또는 계정도 바뀌어 프로젝트에는 확인 필요 상태로 남겼습니다.'; tone = 'error'; }
+                  else if (updateError) { message = `수정 내용은 프로젝트에 저장했지만 Gmail 메일은 변경하지 못했습니다: ${updateError.message}`; tone = 'error'; }
+                  else if (changedDuringUpdate) { message = 'Gmail을 수정하는 동안 관련 내용이 바뀌어 확인 대상으로 표시했습니다.'; tone = 'normal'; }
+                  else message = '수정 내용을 저장하고 Gmail 임시보관함의 메일도 변경했습니다.';
+                } else if (latestProject) { message = updateError ? `수정 내용은 저장했지만 Gmail 메일은 변경하지 못했습니다: ${updateError.message}` : 'Gmail 계정이 바뀌어 이전 계정의 메일은 종료 상태로 유지했습니다.'; tone = updateError ? 'error' : 'normal'; }
+              }
+            }
+          }
+        }
+        closeDialog('mailEditDialog'); renderAll(); showToast(message, tone);
+      } catch (error) { showToast(`개인 메일 수정 내용을 저장하지 못했습니다: ${error.message}`, 'error'); }
+      finally { if (reservation?.ok) await releaseExternalArtifacts(reservation.token); if (externalStarted) endExternalOperation(); submitButton.disabled = false; }
     });
     $('#resetPersonalMail').addEventListener('click', async () => {
-      const project = activeProject(); if (!project) return; const personId = $('#mailEditPersonId').value;
+      const project = projectById($('#mailEditDialog').dataset.projectId || ''); if (!project) return; const personId = $('#mailEditPersonId').value;
       delete project.data.communication.mailEdits[personId];
-      const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === personId); if (artifact) artifact.status = 'stale';
+      const artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === personId); if (artifact) artifact.status = 'stale';
       state = Core.updateProject(state, project.id, { data: project.data }); await persist(); closeDialog('mailEditDialog'); renderAll(); showToast('이 사람만 수정한 내용을 지우고 공통 메일 내용으로 되돌렸습니다.');
     });
     $('#connectionType').addEventListener('change', (event) => {
@@ -2945,19 +3309,37 @@
       }
       state.preferences.storageMode = event.target.value;
       await persist();
-      if (event.target.value === 'drive') await pushStateToDrive(true);
+      if (event.target.value === 'drive') await flushDriveStateSync(true, { force: true });
     });
-    $('#pushDriveState').addEventListener('click', () => void pushStateToDrive(true));
+    $('#pushDriveState').addEventListener('click', () => void flushDriveStateSync(true, { force: true }));
     $('#pullDriveState').addEventListener('click', async () => {
-      const connection = connectedDrive();
+      let connection = connectedDrive();
       if (!connection) { showToast('Google Drive에서 자료를 가져올 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
+      const connectionId = connection.id;
+      let reservation = null; let externalStarted = false;
       try {
-        const result = await globalThis.workspaceDesktop.pullDriveState(connection.id);
+        reservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]);
+        if (!reservation.ok) { showToast('다른 창에서 같은 Drive 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+        await waitForPersistIdle();
+        applyDeferredWorkspaceState();
+        connection = state.connections.find((item) => item.id === connectionId && item.type === 'drive' && item.status === 'connected');
+        if (!connection) throw new Error('Drive 계정 연결 상태가 변경되었습니다.');
+        const expectedConnectionIdentity = Core.connectionIdentity(connection);
+        const expectedWorkspaceIdentity = workspaceStateIdentity(latestKnownWorkspaceState());
+        beginExternalOperation(); externalStarted = true;
+        const result = await globalThis.workspaceDesktop.pullDriveState(connection.id, expectedConnectionIdentity);
         if (!result.exists) { showToast('Drive에 저장된 Workspace 데이터가 없습니다.'); return; }
         if (!await showConfirm(`Drive에 ${formatUpdatedAt(result.modifiedTime)} 저장된 데이터로 이 PC의 Workspace를 바꿀까요? 현재 로컬 상태는 덮어씁니다.`, { title: 'Drive 데이터 불러오기', action: '불러오기' })) return;
-        state = Core.normalizeState(result.state); state.preferences.storageMode = 'drive'; state.preferences.lastDriveSyncAt = result.modifiedTime;
-        await storage.save(state); renderAll(); showToast('Drive 데이터를 불러왔습니다.', 'success');
+        if (!Core.connectionIdentityMatches(latestKnownConnection(connection.id), expectedConnectionIdentity)
+          || !workspaceStateIdentityMatches(latestKnownWorkspaceState(), expectedWorkspaceIdentity)) {
+          throw new Error('확인하는 동안 계정 또는 이 PC의 Workspace가 변경되었습니다. 변경 내용을 보호하기 위해 불러오기를 중단했습니다.');
+        }
+        const saved = await globalThis.workspaceDesktop.applyPulledDriveState(connection.id, result.state, result.fileId, result.modifiedTime, expectedConnectionIdentity, expectedWorkspaceIdentity, result.etag, result.version);
+        if (!saved?.state) throw new Error('Drive 데이터 적용 결과를 확인하지 못했습니다.');
+        state = Core.normalizeState(saved.state); acceptPersistedBaseline(state); deferredWorkspaceState = null; driveSyncDirty = false;
+        renderAll(); showToast('Drive 데이터를 불러왔습니다.', 'success');
       } catch (error) { showToast(`Drive 불러오기 실패: ${error.message}`, 'error'); }
+      finally { if (reservation?.ok) await releaseExternalArtifacts(reservation.token); if (externalStarted) endExternalOperation(); }
     });
     $('#showArchivedSetting').addEventListener('change', async (event) => {
       state.preferences.showArchivedProjects = event.target.checked;
@@ -3038,7 +3420,7 @@
     });
     $('#clearSlotsButton').addEventListener('click', async () => {
       await flushSchedulePersist(); let project = activeProject(); if (!project || !project.data.slots.length) return; const projectId = project.id;
-      if (project.data.slots.some((slot) => slot.locked)) { showToast('잠긴 세션이 있습니다. 잠금을 해제한 뒤 전체 삭제해주세요.', 'error'); return; }
+      if (hasLockedSchedule(project)) { showToast('잠긴 세션 또는 배정이 있습니다. 잠금을 해제한 뒤 전체 삭제해주세요.', 'error'); return; }
       const confirmSignature = scheduleChangeSignature(project);
       if (!await showConfirm('모든 시간대와 현재 배정을 지울까요?', { title: '시간대 전체 삭제', action: '삭제' })) return;
       project = projectById(projectId); if (!project || scheduleChangeSignature(project) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 전체 삭제를 다시 눌러주세요.'); renderSchedulePage(); return; }
@@ -3074,19 +3456,52 @@
       await persist(); renderAll(); showToast('Google 설문에 들어갈 질문과 선택지를 준비했습니다.', 'success');
     });
     $('#createGoogleForm').addEventListener('click', async () => {
-      const project = activeProject(); if (!project) return;
-      const definition = project.data.forms.definitions.at(-1);
-      const connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.status === 'connected');
+      let project = activeProject(); if (!project) return;
+      let definition = project.data.forms.definitions.at(-1);
+      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.status === 'connected');
       if (!definition) { showToast('먼저 “설문 내용 미리 만들기”를 눌러 질문을 확인해주세요.', 'error'); return; }
       if (!connection) { showToast('설문을 만들 Google 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
+      const projectId = project.id; const definitionId = definition.id; const confirmationSignature = externalOperationSignature(project, 'googleForm');
       if (!await showConfirm(`“${definition.title}” 설문을 ${connection.account || connection.label} 계정에 만들까요?`, { title: 'Google 설문 만들기', action: '설문 만들기' })) return;
+      project = projectById(projectId); definition = project?.data.forms.definitions.find((item) => item.id === definitionId); connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.status === 'connected');
+      if (!project || !definition || !connection || externalOperationSignature(project, 'googleForm') !== confirmationSignature) { showToast('확인하는 동안 설문 내용이나 프로젝트 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+      let reservation; let connectionReservation;
+      try { reservation = await reserveExternalArtifacts(projectId, 'googleForm', ['forms']); }
+      catch (error) { showToast(`Google 설문 작업을 시작하지 못했습니다: ${error.message}`, 'error'); return; }
+      if (!reservation.ok) { showToast('다른 창에서 이 프로젝트의 Google 설문을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+      try { connectionReservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connection.id]); }
+      catch (error) { await releaseExternalArtifacts(reservation.token); showToast(`Google 계정을 사용할 수 없습니다: ${error.message}`, 'error'); return; }
+      if (!connectionReservation.ok) { await releaseExternalArtifacts(reservation.token); showToast('다른 창에서 같은 Google 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+      project = projectById(projectId); definition = project?.data.forms.definitions.find((item) => item.id === definitionId); connection = state.connections.find((item) => item.id === connection.id && item.status === 'connected');
+      if (!project || !definition || !connection || externalOperationStateChanged(projectId, 'googleForm', confirmationSignature)) { await releaseExternalArtifacts(connectionReservation.token); await releaseExternalArtifacts(reservation.token); showToast('설문 생성 준비 중 관련 내용이나 계정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+      beginExternalOperation(); let created = null;
       try {
-        const created = await globalThis.workspaceDesktop.createGoogleForm(connection.id, definition, Ops.googleFormsApiRequests(definition));
-        project.data.forms.linkedForms.push({ ...created, definitionId: definition.id, type: definition.type, title: definition.title, source: 'created', connectedAt: new Date().toISOString() });
-        state = Core.updateProject(state, project.id, { data: project.data });
-        state = Core.setModuleStatus(state, project.id, 'forms', 'inProgress', `${definition.title} 생성됨`);
-        await persist(); renderAll(); showToast('Google 설문을 만들고 이 프로젝트에 연결했습니다.', 'success');
-      } catch (error) { showToast(`Google 설문을 만들지 못했습니다: ${error.message}`, 'error'); }
+        const baseSignature = externalOperationSignature(project, 'googleForm'); const expectedConnectionIdentity = Core.connectionIdentity(connection);
+        created = await globalThis.workspaceDesktop.createGoogleForm(connection.id, definition, Ops.googleFormsApiRequests(definition), expectedConnectionIdentity);
+        const connectionChanged = !Core.connectionIdentityMatches(latestKnownConnection(connection.id), expectedConnectionIdentity);
+        const changedDuringCreate = externalOperationStateChanged(projectId, 'googleForm', baseSignature) || connectionChanged;
+        const latestProject = latestKnownProject(projectId); if (!latestProject) throw new Error('생성한 설문을 연결할 프로젝트를 찾지 못했습니다.');
+        const forms = cloneState(latestProject.data.forms);
+        if (!forms.linkedForms.some((item) => item.formId === created.formId)) forms.linkedForms.push({ ...created, definitionId: definition.id, type: definition.type, title: definition.title, source: 'created', connectionId: connection.id, connectedAt: new Date().toISOString(), expectedConnectionIdentity, needsReview: changedDuringCreate });
+        state = Core.updateProject(state, projectId, { data: { forms } });
+        state = Core.setModuleStatus(state, projectId, 'forms', changedDuringCreate ? 'needsReview' : 'inProgress', changedDuringCreate ? `${definition.title} 생성됨 · 도중 변경사항 확인 필요` : `${definition.title} 생성됨`);
+        recordScheduleMergeImpact(projectId, null, { scheduleOnly: false });
+        let conflictState = cloneState(state);
+        const conflictProject = conflictState.projects.find((item) => item.id === projectId) || Object.values(conflictState.quickWorkspaces || {}).find((item) => item?.id === projectId);
+        const conflictReason = 'Google 설문 생성 후 프로젝트 또는 계정이 바뀌어 연결 확인 필요';
+        if (conflictProject) {
+          conflictProject.data.forms.linkedForms = conflictProject.data.forms.linkedForms.map((item) => item.formId === created.formId ? { ...item, needsReview: true, reviewReason: conflictReason } : item);
+          conflictState = Core.updateProject(conflictState, projectId, { data: { forms: conflictProject.data.forms } });
+          conflictState = Core.setModuleStatus(conflictState, projectId, 'forms', 'needsReview', conflictReason);
+        }
+        const commitResult = await persist('Google 설문 연결 저장됨', {
+          externalCommit: externalCommitGuard({ reservation, project: latestProject, kind: 'googleForm', expectedConnections: [expectedConnectionIdentity], conflictState })
+        });
+        renderAll();
+        if (commitResult?.externalConflict) showToast('Google 설문은 생성됐지만 그 사이 프로젝트 또는 계정이 바뀌어 연결을 확인 필요 상태로 저장했습니다.', 'error');
+        else showToast(changedDuringCreate ? '설문은 생성했지만 도중 프로젝트가 바뀌어 연결 내용을 확인 대상으로 표시했습니다.' : 'Google 설문을 만들고 이 프로젝트에 연결했습니다.', changedDuringCreate ? 'normal' : 'success');
+      } catch (error) { showToast(created ? `Google 설문은 생성됐지만 프로젝트 연결을 저장하지 못했습니다: ${error.message}` : `Google 설문을 만들지 못했습니다: ${error.message}`, 'error'); }
+      finally { await releaseExternalArtifacts(connectionReservation.token); await releaseExternalArtifacts(reservation.token); endExternalOperation(); }
     });
     $('#downloadFormDefinition').addEventListener('click', () => {
       const project = activeProject(); if (!project) return; const definition = project.data.forms.definitions.at(-1);
@@ -3098,23 +3513,49 @@
       const project = activeProject(); if (!project) return; const raw = $('#linkedFormId').value.trim(); if (!raw) { showToast('Google Form ID 또는 URL을 입력해주세요.', 'error'); return; }
       const match = raw.match(/\/forms\/d\/([a-zA-Z0-9_-]+)/); const formId = match?.[1] || raw;
       if (!/^[a-zA-Z0-9_-]{10,}$/.test(formId)) { showToast('Google Form ID 형식을 확인해주세요.', 'error'); return; }
-      if (!project.data.forms.linkedForms.some((item) => item.formId === formId)) project.data.forms.linkedForms.push({ formId, type: $('#formDefinitionType').value, source: 'manual', connectedAt: new Date().toISOString() });
+      if (!project.data.forms.linkedForms.some((item) => item.formId === formId)) project.data.forms.linkedForms.push({ formId, type: $('#formDefinitionType').value, source: 'manual', connectionId: defaultConnectionId(project, 'forms') || '', connectedAt: new Date().toISOString() });
       state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast('기존 Google Form을 프로젝트에 연결했습니다.', 'success');
     });
     $('#syncFormResponses').addEventListener('click', async () => {
-      const project = activeProject(); if (!project) return;
-      const connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms'));
+      let project = activeProject(); if (!project) return;
+      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms'));
       if (!connection || connection.status !== 'connected') { showToast('응답을 가져올 Google 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
-      const linked = project.data.forms.linkedForms.at(-1);
+      const connectionId = connection.id;
+      let linked = project.data.forms.linkedForms.at(-1);
       if (!linked) { showToast('응답을 가져올 Google 설문을 먼저 이 프로젝트에 연결해주세요.', 'error'); return; }
+      const projectId = project.id; const formId = linked.formId; const baseSignature = externalOperationSignature(project, 'googleForm');
+      let reservation; let connectionReservation;
+      try { reservation = await reserveExternalArtifacts(projectId, 'googleForm', ['forms']); }
+      catch (error) { showToast(`Google 설문 응답 작업을 시작하지 못했습니다: ${error.message}`, 'error'); return; }
+      if (!reservation.ok) { showToast('다른 창에서 이 프로젝트의 Google 설문을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+      try { connectionReservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]); }
+      catch (error) { await releaseExternalArtifacts(reservation.token); showToast(`Google 계정을 사용할 수 없습니다: ${error.message}`, 'error'); return; }
+      if (!connectionReservation.ok) { await releaseExternalArtifacts(reservation.token); showToast('다른 창에서 같은 Google 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+      project = projectById(projectId); linked = project?.data.forms.linkedForms.find((item) => item.formId === formId); connection = state.connections.find((item) => item.id === connectionId && item.status === 'connected' && defaultConnectionId(project, 'forms') === connectionId);
+      if (!project || !linked || !connection || externalOperationStateChanged(projectId, 'googleForm', baseSignature)) { await releaseExternalArtifacts(connectionReservation.token); await releaseExternalArtifacts(reservation.token); showToast('응답을 가져오기 전에 설문·프로젝트 또는 계정 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+      beginExternalOperation();
       try {
-        const payload = await globalThis.workspaceDesktop.fetchGoogleFormResponses(connection.id, linked.formId);
-        const result = applyFormResponses(project, linked, payload);
-        project.data.forms.lastResponseSyncAt = new Date().toISOString(); linked.lastSyncedAt = project.data.forms.lastResponseSyncAt; linked.responseCount = payload.responses.length;
-        state = Core.updateProject(state, project.id, { data: project.data });
-        state = Core.setModuleStatus(state, project.id, 'forms', 'inProgress', `${payload.responses.length}건 동기화`);
-        await persist(); renderAll(); showToast(result.message, 'success');
+        const expectedConnectionIdentity = Core.connectionIdentity(connection);
+        const payload = await globalThis.workspaceDesktop.fetchGoogleFormResponses(connection.id, linked.formId, expectedConnectionIdentity);
+        if (externalOperationStateChanged(projectId, 'googleForm', baseSignature) || !Core.connectionIdentityMatches(latestKnownConnection(connection.id), expectedConnectionIdentity)) { showToast('응답을 가져오는 동안 명단·일정·설문 연결 또는 Google 계정이 바뀌었습니다. 변경 내용을 보호하기 위해 응답을 적용하지 않았으니 다시 동기화해주세요.', 'error'); renderAll(); return; }
+        const latestProject = latestKnownProject(projectId); if (!latestProject) throw new Error('응답을 반영할 프로젝트를 찾지 못했습니다.');
+        let conflictState = cloneState(latestKnownWorkspaceState());
+        conflictState = Core.setModuleStatus(conflictState, projectId, 'forms', 'needsReview', 'Google 설문 응답을 가져온 뒤 프로젝트 또는 계정이 바뀌어 응답을 적용하지 않음');
+        const workingProject = cloneState(latestProject); const workingLinked = workingProject.data.forms.linkedForms.find((item) => item.formId === formId); if (!workingLinked) throw new Error('연결된 Google 설문을 찾지 못했습니다.');
+        const result = applyFormResponses(workingProject, workingLinked, payload);
+        workingProject.data.forms.lastResponseSyncAt = new Date().toISOString(); workingLinked.lastSyncedAt = workingProject.data.forms.lastResponseSyncAt; workingLinked.responseCount = payload.responses.length; workingLinked.needsReview = Boolean(result.unmatched);
+        if (result.changed) markRosterDependenciesStale(workingProject, result.type === 'availability' ? '가능 시간 응답 반영 후 일정 재검토 필요' : '설문 신청 명단 반영 후 일정 재검토 필요');
+        else state = Core.updateProject(state, projectId, { data: workingProject.data });
+        state = Core.setModuleStatus(state, projectId, 'forms', result.unmatched ? 'needsReview' : 'inProgress', result.unmatched ? `${payload.responses.length}건 동기화 · ${result.unmatched}건 확인 필요` : `${payload.responses.length}건 동기화`);
+        recordScheduleMergeImpact(projectId, null, { scheduleOnly: false });
+        const commitResult = await persist('설문 응답 동기화됨', {
+          externalCommit: externalCommitGuard({ reservation, project: latestProject, kind: 'googleForm', expectedConnections: [expectedConnectionIdentity], conflictState })
+        });
+        renderAll();
+        if (commitResult?.externalConflict) showToast('설문 응답은 가져왔지만 그 사이 프로젝트 또는 계정이 바뀌어 응답을 적용하지 않고 확인 필요 상태로 남겼습니다.', 'error');
+        else showToast(result.message, result.unmatched ? 'normal' : 'success');
       } catch (error) { showToast(`최신 설문 응답을 가져오지 못했습니다: ${error.message}`, 'error'); }
+      finally { await releaseExternalArtifacts(connectionReservation.token); await releaseExternalArtifacts(reservation.token); endExternalOperation(); }
     });
     $('#prepareZoomMeetings').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
@@ -3137,39 +3578,64 @@
       showToast(reviewCount ? `Zoom 회의를 만들거나 정리하기 전에 확인할 항목이 ${reviewCount}건 있습니다.` : '모든 일정에 Zoom 회의를 만들 준비가 되었습니다.', reviewCount ? 'normal' : 'success');
     });
     $('#createZoomMeetings').addEventListener('click', async () => {
-      const project = activeProject(); if (!project) return;
-      const pending = project.data.slots.filter((slot) => slot.status !== 'cancelled' && project.data.assignments.some((assignment) => assignment.slotId === slot.id) && !project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created'));
-      const invalid = pending.filter((slot) => !state.connections.some((item) => item.id === (slot.zoomConnectionId || defaultConnectionId(project, 'zoom')) && item.type === 'zoom' && item.status === 'connected'));
+      let project = activeProject(); if (!project) return;
+      let pending = pendingZoomSlots(project);
+      let invalid = pending.filter((slot) => Ops.validateScheduleSlot(slot).length || !state.connections.some((item) => item.id === (slot.zoomConnectionId || defaultConnectionId(project, 'zoom')) && item.type === 'zoom' && item.status === 'connected'));
       if (!pending.length) { showToast('새로 생성할 Zoom 회의가 없습니다.'); return; }
-      if (invalid.length) { showToast(`로그인이 필요한 Zoom 계정이 사용된 일정 ${invalid.length}건을 먼저 확인해주세요.`, 'error'); return; }
+      if (invalid.length) { showToast(`날짜·시간 또는 Zoom 로그인을 확인해야 하는 일정 ${invalid.length}건을 먼저 수정해주세요.`, 'error'); return; }
       const replacementCount = pending.filter((slot) => project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id)).length;
       const replacementNotice = replacementCount ? ` 이 중 ${replacementCount}건은 일정이 바뀌어 새 회의를 만들며, 이전 회의는 Zoom에서 직접 정리해야 합니다.` : ' 이미 정상 참가 링크가 있는 일정은 건너뜁니다.';
+      const projectId = project.id; const confirmationSignature = externalOperationSignature(project, 'zoom');
       if (!await showConfirm(`${pending.length}개의 Zoom 회의를 만들까요?${replacementNotice}`, { title: 'Zoom 회의 만들기', action: '회의 만들기' })) return;
+      project = projectById(projectId); pending = project ? pendingZoomSlots(project) : [];
+      if (!project || externalOperationSignature(project, 'zoom') !== confirmationSignature) { showToast('확인하는 동안 다른 창의 일정 또는 회의 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+      invalid = pending.filter((slot) => Ops.validateScheduleSlot(slot).length || !state.connections.some((item) => item.id === (slot.zoomConnectionId || defaultConnectionId(project, 'zoom')) && item.type === 'zoom' && item.status === 'connected'));
+      if (!pending.length || invalid.length) { showToast(invalid.length ? '최신 일정의 날짜·시간 또는 Zoom 로그인을 다시 확인해주세요.' : '다른 창에서 회의 생성이 완료되어 새로 만들 회의가 없습니다.', invalid.length ? 'error' : 'normal'); renderZoomPage(); return; }
+      let reservation;
+      try { reservation = await reserveExternalArtifacts(projectId, 'zoom', pending.map((slot) => slot.id)); }
+      catch (error) { showToast(`회의 생성 작업을 시작하지 못했습니다: ${error.message}`, 'error'); return; }
+      if (!reservation.ok) { showToast('다른 창에서 같은 Zoom 회의를 만들고 있습니다. 완료된 뒤 다시 확인해주세요.'); return; }
+      project = projectById(projectId); pending = project ? pendingZoomSlots(project) : [];
+      if (!project || externalOperationStateChanged(projectId, 'zoom', confirmationSignature)) { await releaseExternalArtifacts(reservation.token); showToast('회의 생성 준비 중 일정 또는 프로젝트 정보가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       beginExternalOperation();
       try {
-        const projectId = project.id; const baseSignature = scheduleChangeSignature(project); const createdArtifacts = []; let createdCount = 0; const failures = [];
+        const baseSignature = externalOperationSignature(project, 'zoom'); const createdArtifacts = []; let createdCount = 0; const failures = [];
         for (const slot of pending) {
+          const latestBeforeCreate = projectById(projectId);
+          if (!latestBeforeCreate || externalOperationStateChanged(projectId, 'zoom', baseSignature)) break;
           const connectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
-          const start = new Date(`${slot.date}T${slot.startTime}:00`); const end = new Date(`${slot.date}T${slot.endTime}:00`);
+          const zoomConnection = state.connections.find((item) => item.id === connectionId && item.status === 'connected');
+          const duration = Ops.timeToMinutes(slot.endTime) - Ops.timeToMinutes(slot.startTime);
           try {
-            const meeting = await globalThis.workspaceDesktop.createZoomMeeting(connectionId, { topic: `${project.name}${slot.label ? ` · ${slot.label}` : ''}`, date: slot.date, startTime: slot.startTime, duration: Math.max(1, Math.round((end - start) / 60000)), timezone: 'Asia/Seoul', agenda: `${project.name} 일정` });
-            createdArtifacts.push({ kind: 'zoom', slotId: slot.id, connectionId, status: 'created', externalId: String(meeting.id), joinUrl: meeting.join_url || '', startUrl: meeting.start_url || '', password: meeting.password || '', createdAt: new Date().toISOString() });
+            if (!zoomConnection) throw new Error('Zoom 계정의 최신 로그인 상태를 확인해주세요.');
+            const meeting = await globalThis.workspaceDesktop.createZoomMeeting(connectionId, { topic: `${project.name}${slot.label ? ` · ${slot.label}` : ''}`, date: slot.date, startTime: slot.startTime, duration, timezone: 'Asia/Seoul', agenda: `${project.name} 일정` }, Core.connectionIdentity(zoomConnection));
+            createdArtifacts.push({ kind: 'zoom', slotId: slot.id, connectionId, status: 'created', externalId: String(meeting.id), joinUrl: meeting.join_url || '', startUrl: meeting.start_url || '', password: meeting.password || '', createdAt: new Date().toISOString(), expectedConnectionIdentity: Core.connectionIdentity(zoomConnection) });
             createdCount += 1; $('#zoomReadiness').textContent = `${createdCount}/${pending.length} 생성 완료`;
           } catch (error) { failures.push(`${Ops.slotKey(slot)}: ${error.message}`); }
         }
-        const currentProject = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId);
+        const currentProject = latestKnownProject(projectId);
         if (!currentProject) throw new Error('회의 생성 결과를 반영할 프로젝트를 찾지 못했습니다.');
-        const scheduleChanged = scheduleChangeSignature(currentProject) !== baseSignature;
+        const scheduleChanged = externalOperationStateChanged(projectId, 'zoom', baseSignature);
         const artifacts = currentProject.data.externalArtifacts.map((item) => ({ ...item }));
-        createdArtifacts.forEach((artifact) => {
-          if (!scheduleChanged) artifacts.filter((item) => item.kind === 'zoom' && item.slotId === artifact.slotId && !['created', 'superseded'].includes(item.status)).forEach((item) => { item.status = 'superseded'; item.replacedAt ||= new Date().toISOString(); });
-          artifacts.push({ ...artifact, status: scheduleChanged ? 'stale' : 'created' });
+        createdArtifacts.forEach(({ expectedConnectionIdentity, ...artifact }) => {
+          const connectionChanged = !Core.connectionIdentityMatches(latestKnownConnection(artifact.connectionId), expectedConnectionIdentity);
+          if (!scheduleChanged && !connectionChanged) artifacts.filter((item) => item.kind === 'zoom' && item.slotId === artifact.slotId && !['created', 'superseded'].includes(item.status)).forEach((item) => { item.status = 'superseded'; item.replacedAt ||= new Date().toISOString(); });
+          artifacts.push(connectionChanged
+            ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString(), replacementReason: 'Zoom 계정 변경 후 이전 계정에 생성된 회의' }
+            : { ...artifact, status: scheduleChanged ? 'stale' : 'created' });
         });
         const unresolved = artifacts.some((item) => item.kind === 'zoom' && item.status === 'stale') || currentProject.data.slots.some((slot) => slot.status === 'cancelled' && artifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status !== 'superseded'));
         state = Core.updateProject(state, projectId, { data: { externalArtifacts: artifacts } });
         state = Core.setModuleStatus(state, projectId, 'zoom', failures.length || scheduleChanged || unresolved ? 'needsReview' : 'complete', scheduleChanged ? `${createdCount}개 생성 · 도중 일정 변경으로 재확인 필요` : failures.length ? `${createdCount}개 생성, ${failures.length}개 실패` : unresolved ? `${createdCount}개 생성 · 기존 회의 정리 필요` : `${createdCount}개 생성 완료`);
-        renderAll(); await persist(); showToast(scheduleChanged ? '회의 생성 중 일정이 바뀌어 새 회의를 확인 대상으로 표시했습니다.' : failures.length ? `Zoom ${createdCount}개 생성, ${failures.length}개 실패` : `Zoom 회의 ${createdCount}개를 생성했습니다.`, scheduleChanged || failures.length ? 'error' : unresolved ? 'normal' : 'success');
-      } finally { endExternalOperation(); }
+        const conflictReason = 'Zoom 생성 결과를 저장하는 동안 프로젝트 또는 계정이 바뀌어 회의 확인 필요';
+        const conflictState = markExternalArtifactsForCommitConflict(state, projectId, 'zoom', createdArtifacts, conflictReason);
+        const commitResult = await persist('Zoom 생성 결과 저장됨', {
+          externalCommit: externalCommitGuard({ reservation, project: currentProject, kind: 'zoom', expectedConnections: createdArtifacts.map((item) => item.expectedConnectionIdentity), conflictState })
+        });
+        renderAll();
+        if (commitResult?.externalConflict) showToast(createdCount ? 'Zoom 회의는 생성됐지만 그 사이 프로젝트 또는 계정이 바뀌어 프로젝트에는 확인 필요 상태로 남겼습니다.' : 'Zoom 생성 결과를 저장하는 사이 프로젝트 또는 계정이 바뀌어 프로젝트를 확인 필요 상태로 남겼습니다.', 'error');
+        else showToast(scheduleChanged ? '회의 생성 중 일정이 바뀌어 새 회의를 확인 대상으로 표시했습니다.' : failures.length ? `Zoom ${createdCount}개 생성, ${failures.length}개 실패` : `Zoom 회의 ${createdCount}개를 생성했습니다.`, scheduleChanged || failures.length ? 'error' : unresolved ? 'normal' : 'success');
+      } finally { await releaseExternalArtifacts(reservation.token); endExternalOperation(); }
     });
     $('#prepareMailPackage').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
@@ -3177,7 +3643,7 @@
       project.data.communication.subjectTemplate = $('#mailSubjectTemplate').value;
       project.data.communication.bodyHtmlTemplate = sanitizeRichHtml($('#mailBodyEditor').innerHTML);
       project.data.communication.bodyTemplate = richText(project.data.communication.bodyHtmlTemplate);
-      if (previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate) project.data.externalArtifacts.filter((item) => item.kind === 'gmailDraft').forEach((item) => { item.status = 'stale'; });
+      if (previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate) project.data.externalArtifacts.filter((item) => item.kind === 'gmailDraft' && item.status !== 'superseded').forEach((item) => { item.status = 'stale'; });
       project.data.communication.lastPreparedAt = new Date().toISOString();
       mailEditorDirty = false;
       const pkg = Ops.buildMailPackage(project);
@@ -3186,48 +3652,75 @@
       await persist(); renderAll(); showToast(`${pkg.entries.length}명의 메일 데이터를 준비했습니다.`, 'success');
     });
     $('#createGmailDrafts').addEventListener('click', async () => {
-      const project = activeProject(); if (!project) return;
+      let project = activeProject(); if (!project) return;
       const previousSubject = project.data.communication.subjectTemplate; const previousHtml = project.data.communication.bodyHtmlTemplate;
       project.data.communication.subjectTemplate = $('#mailSubjectTemplate').value;
       project.data.communication.bodyHtmlTemplate = sanitizeRichHtml($('#mailBodyEditor').innerHTML); project.data.communication.bodyTemplate = richText(project.data.communication.bodyHtmlTemplate);
-      if (previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate) project.data.externalArtifacts.filter((item) => item.kind === 'gmailDraft').forEach((item) => { item.status = 'stale'; });
-      mailEditorDirty = false;
-      const connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.status === 'connected');
-      const pending = Ops.buildMailPackage(project).entries.filter((entry) => !project.data.externalArtifacts.some((item) => item.kind === 'gmailDraft' && item.personId === entry.personId && item.status === 'created'));
+      if (previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate) project.data.externalArtifacts.filter((item) => item.kind === 'gmailDraft' && item.status !== 'superseded').forEach((item) => { item.status = 'stale'; });
+      mailEditorDirty = false; mailEditorProjectId = project.id;
+      state = Core.updateProject(state, project.id, { data: project.data }); await persist('메일 편집 저장됨');
+      project = projectById(project.id); if (!project) return;
+      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.status === 'connected');
+      let pending = pendingGmailEntries(project);
       if (!pending.length) { showToast('새로 Gmail 임시보관함에 만들 메일이 없습니다.'); return; }
-      const needsNewDraft = pending.some((entry) => !project.data.externalArtifacts.some((item) => item.kind === 'gmailDraft' && item.personId === entry.personId));
+      let needsNewDraft = pending.some((entry) => !latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId));
       if (needsNewDraft && !connection) { showToast('메일을 만들 Gmail 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
+      const projectId = project.id; const confirmationSignature = externalOperationSignature(project, 'gmailDraft');
       if (!await showConfirm(`${pending.length}명의 메일을 Gmail 임시보관함에 만들거나 기존 내용을 수정할까요? 아직 실제 발송은 하지 않습니다.`, { title: 'Gmail 임시보관함에 저장', action: '저장하기' })) return;
+      project = projectById(projectId); pending = project ? pendingGmailEntries(project) : [];
+      if (!project || externalOperationSignature(project, 'gmailDraft') !== confirmationSignature) { showToast('확인하는 동안 다른 창의 명단·일정 또는 메일 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+      connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.status === 'connected');
+      needsNewDraft = pending.some((entry) => !latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId));
+      if (!pending.length || (needsNewDraft && !connection)) { showToast(needsNewDraft ? '최신 Gmail 로그인 상태를 다시 확인해주세요.' : '다른 창에서 메일 저장이 완료되어 새로 처리할 메일이 없습니다.', needsNewDraft ? 'error' : 'normal'); return; }
+      let reservation;
+      try { reservation = await reserveExternalArtifacts(projectId, 'gmailDraft', pending.map((entry) => entry.personId)); }
+      catch (error) { showToast(`Gmail 저장 작업을 시작하지 못했습니다: ${error.message}`, 'error'); return; }
+      if (!reservation.ok) { showToast('다른 창에서 같은 Gmail 임시보관함 메일을 저장하고 있습니다. 완료된 뒤 다시 확인해주세요.'); return; }
+      project = projectById(projectId); pending = project ? pendingGmailEntries(project) : [];
+      if (!project || externalOperationStateChanged(projectId, 'gmailDraft', confirmationSignature)) { await releaseExternalArtifacts(reservation.token); showToast('Gmail 저장 준비 중 명단·일정 또는 메일 내용이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       beginExternalOperation();
       try {
-        const projectId = project.id; const baseSignature = scheduleChangeSignature(project); const artifactUpdates = []; let createdCount = 0; let updatedCount = 0; const failures = [];
-        for (const entry of pending) {
+        const baseSignature = externalOperationSignature(project, 'gmailDraft'); const artifactUpdates = []; let createdCount = 0; let updatedCount = 0; const failures = [];
+        for (const initialEntry of pending) {
+          const latestBeforeSave = projectById(projectId);
+          if (!latestBeforeSave || externalOperationStateChanged(projectId, 'gmailDraft', baseSignature)) break;
+          const entry = Ops.buildMailPackage(latestBeforeSave).entries.find((item) => item.personId === initialEntry.personId);
+          if (!entry) break;
           try {
-            const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === entry.personId);
+            const artifact = latestActiveExternalArtifact(latestBeforeSave, 'gmailDraft', (item) => item.personId === entry.personId);
             if (artifact) {
               const artifactConnection = state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected');
               if (!artifactConnection) throw new Error('기존 메일을 만든 Gmail 계정에 다시 로그인해야 합니다.');
-              const draft = await globalThis.workspaceDesktop.updateGmailDraft(artifactConnection.id, artifact.externalId, entry);
-              artifactUpdates.push({ ...artifact, messageId: draft.message?.id || artifact.messageId, status: 'created', updatedAt: new Date().toISOString() }); updatedCount += 1;
+              const draft = await globalThis.workspaceDesktop.updateGmailDraft(artifactConnection.id, artifact.externalId, entry, Core.connectionIdentity(artifactConnection));
+              artifactUpdates.push({ ...artifact, messageId: draft.message?.id || artifact.messageId, status: 'created', updatedAt: new Date().toISOString(), expectedConnectionIdentity: Core.connectionIdentity(artifactConnection) }); updatedCount += 1;
             } else {
-              const draft = await globalThis.workspaceDesktop.createGmailDraft(connection.id, entry);
-              artifactUpdates.push({ kind: 'gmailDraft', personId: entry.personId, connectionId: connection.id, status: 'created', externalId: draft.id, messageId: draft.message?.id || '', createdAt: new Date().toISOString() }); createdCount += 1;
+              const draft = await globalThis.workspaceDesktop.createGmailDraft(connection.id, entry, Core.connectionIdentity(connection));
+              artifactUpdates.push({ kind: 'gmailDraft', personId: entry.personId, connectionId: connection.id, status: 'created', externalId: draft.id, messageId: draft.message?.id || '', createdAt: new Date().toISOString(), expectedConnectionIdentity: Core.connectionIdentity(connection) }); createdCount += 1;
             }
             $('#mailPackageStatus').textContent = `${createdCount + updatedCount}/${pending.length} Gmail 저장 완료`;
           } catch (error) { failures.push(`${entry.email}: ${error.message}`); }
         }
-        const currentProject = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId);
+        const currentProject = latestKnownProject(projectId);
         if (!currentProject) throw new Error('메일 생성 결과를 반영할 프로젝트를 찾지 못했습니다.');
-        const scheduleChanged = scheduleChangeSignature(currentProject) !== baseSignature;
+        const scheduleChanged = externalOperationStateChanged(projectId, 'gmailDraft', baseSignature);
         let artifacts = currentProject.data.externalArtifacts.map((item) => ({ ...item }));
-        if (previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate) artifacts = artifacts.map((item) => item.kind === 'gmailDraft' ? { ...item, status: 'stale' } : item);
-        artifacts = mergeExternalArtifactUpdates(artifacts, artifactUpdates.map((item) => scheduleChanged ? { ...item, status: 'stale' } : item));
-        const communication = { ...currentProject.data.communication, subjectTemplate: project.data.communication.subjectTemplate, bodyHtmlTemplate: project.data.communication.bodyHtmlTemplate, bodyTemplate: project.data.communication.bodyTemplate, lastPreparedAt: new Date().toISOString() };
+        artifacts = mergeExternalArtifactUpdates(artifacts, artifactUpdates.map(({ expectedConnectionIdentity, ...item }) => {
+          if (!Core.connectionIdentityMatches(latestKnownConnection(item.connectionId), expectedConnectionIdentity)) return { ...item, status: 'superseded', replacedAt: new Date().toISOString(), replacementReason: 'Gmail 계정 변경 후 이전 계정에 저장된 메일' };
+          return scheduleChanged ? { ...item, status: 'stale' } : item;
+        }));
+        const communication = { ...currentProject.data.communication, lastPreparedAt: new Date().toISOString() };
         const unresolved = artifacts.some((item) => item.kind === 'gmailDraft' && item.status === 'stale');
         state = Core.updateProject(state, projectId, { data: { communication, externalArtifacts: artifacts } });
         state = Core.setModuleStatus(state, projectId, 'gmailFlow', failures.length || scheduleChanged || unresolved ? 'needsReview' : 'complete', scheduleChanged ? `${createdCount}개 생성, ${updatedCount}개 수정 · 도중 일정 변경으로 재확인 필요` : failures.length ? `${createdCount}개 생성, ${updatedCount}개 수정, ${failures.length}개 실패` : unresolved ? `${createdCount}개 생성, ${updatedCount}개 수정 · 남은 메일 확인 필요` : `${createdCount}개 생성, ${updatedCount}개 수정`);
-        renderAll(); await persist(); showToast(scheduleChanged ? '메일 저장 중 일정이 바뀌어 해당 초안을 확인 대상으로 표시했습니다.' : failures.length ? `Gmail 임시보관함: 새 메일 ${createdCount}개, 수정 ${updatedCount}개, 실패 ${failures.length}개` : `Gmail 임시보관함에 새 메일 ${createdCount}개를 만들고 기존 메일 ${updatedCount}개를 수정했습니다.`, scheduleChanged || failures.length ? 'error' : unresolved ? 'normal' : 'success');
-      } finally { endExternalOperation(); }
+        const conflictReason = 'Gmail 저장 결과를 반영하는 동안 프로젝트 또는 계정이 바뀌어 메일 확인 필요';
+        const conflictState = markExternalArtifactsForCommitConflict(state, projectId, 'gmailDraft', artifactUpdates, conflictReason);
+        const commitResult = await persist('Gmail 저장 결과 반영됨', {
+          externalCommit: externalCommitGuard({ reservation, project: currentProject, kind: 'gmailDraft', expectedConnections: artifactUpdates.map((item) => item.expectedConnectionIdentity), conflictState })
+        });
+        renderAll();
+        if (commitResult?.externalConflict) showToast(createdCount + updatedCount ? 'Gmail 임시보관함에는 저장됐지만 그 사이 프로젝트 또는 계정이 바뀌어 프로젝트에는 확인 필요 상태로 남겼습니다.' : 'Gmail 저장 결과를 반영하는 사이 프로젝트 또는 계정이 바뀌어 프로젝트를 확인 필요 상태로 남겼습니다.', 'error');
+        else showToast(scheduleChanged ? '메일 저장 중 일정이 바뀌어 해당 초안을 확인 대상으로 표시했습니다.' : failures.length ? `Gmail 임시보관함: 새 메일 ${createdCount}개, 수정 ${updatedCount}개, 실패 ${failures.length}개` : `Gmail 임시보관함에 새 메일 ${createdCount}개를 만들고 기존 메일 ${updatedCount}개를 수정했습니다.`, scheduleChanged || failures.length ? 'error' : unresolved ? 'normal' : 'success');
+      } finally { await releaseExternalArtifacts(reservation.token); endExternalOperation(); }
     });
     $('#downloadMailPackage').addEventListener('click', () => {
       const project = activeProject(); if (!project) return; const pkg = Ops.buildMailPackage(project);
@@ -3245,13 +3738,17 @@
         const column = project.data.columns.find((item) => item.id === event.target.dataset.columnType); if (column) column.type = event.target.value;
         syncPersonDerivedFields(project);
       }
+      if (event.target.matches('[data-column-name], [data-column-type]')) {
+        markRosterDependenciesStale(project, '명단 컬럼 변경 후 일정 재검토 필요');
+        await persist('명단 컬럼 변경됨'); renderPeoplePage(); return;
+      }
       if (event.target.matches('[data-person-row]')) {
         const rowIndex = Number(event.target.dataset.personRow);
         const person = project.data.people[rowIndex] || (event.target.value.length ? ensureRosterPerson(project, rowIndex + 1) : null);
         if (person) person.values[event.target.dataset.columnId] = event.target.value;
         syncPersonDerivedFields(project);
         if (rosterSelection) updateRosterSelection(rosterSelection.anchor, rosterSelection.focus);
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist('명단 셀 편집됨'); renderPeoplePage();
+        markRosterDependenciesStale(project); await persist('명단 셀 편집됨'); renderPeoplePage();
         return;
       }
       if (event.target.matches('[data-person-role-check]')) {
@@ -3265,7 +3762,7 @@
         const person = project.data.people.find((item) => item.id === event.target.dataset.personActive); if (person) person.active = event.target.checked;
       }
       if (event.target.matches('[data-person-role-check], [data-person-active]')) {
-        refreshScheduleConflicts(project); syncScheduleProjectState(project, `명단 배정 조건 변경 · 문제 ${project.data.conflicts.length}건`); await persist('명단 배정 조건 변경됨'); renderPeoplePage(); return;
+        markRosterDependenciesStale(project, '명단 배정 조건 변경 후 일정 재검토 필요'); await persist('명단 배정 조건 변경됨'); renderPeoplePage(); return;
       }
       if (event.target.matches('[data-availability-all]')) {
         pushScheduleHistory(project);
@@ -3282,7 +3779,7 @@
         const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project);
         const slotId = event.target.dataset.assignmentSlot; const roleId = event.target.dataset.assignmentRole; const position = Number(event.target.dataset.assignmentPosition);
         const matches = project.data.assignments.filter((assignment) => assignment.slotId === slotId && assignment.roleId === roleId);
-        const existing = matches[position]; if (existing) project.data.assignments = project.data.assignments.filter((assignment) => assignment.id !== existing.id);
+        const existing = matches[position]; if (scheduleRowLocked(project, slotId) || existing?.locked) { showToast('잠긴 배정은 잠금을 해제한 뒤 변경해주세요.', 'error'); renderSchedulePage(); return; } if (existing) project.data.assignments = project.data.assignments.filter((assignment) => assignment.id !== existing.id);
         if (event.target.value) project.data.assignments.push({ id: `assignment-${Date.now().toString(36)}-${position}`, slotId, roleId, personId: event.target.value, locked: false, source: 'manual' });
         refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 배정 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderSchedulePage(); return;
       }
@@ -3290,10 +3787,10 @@
         pushScheduleHistory(project); const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLock); if (slot) slot.locked = event.target.checked; project.data.assignments.filter((assignment) => assignment.slotId === slot?.id).forEach((assignment) => { assignment.locked = event.target.checked; }); refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 잠금 변경 · 문제 ${project.data.conflicts.length}건`); await persist(); return;
       }
       if (event.target.matches('[data-slot-status]')) {
-        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotStatus); if (slot) slot.status = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 상태 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
+        const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotStatus); if (slot && scheduleRowLocked(project, slot.id)) { showToast('잠긴 일정은 잠금을 해제한 뒤 상태를 변경해주세요.', 'error'); renderSchedulePage(); return; } const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); if (slot) slot.status = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 상태 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
       }
       if (event.target.matches('[data-slot-label]')) {
-        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLabel); if (slot) slot.label = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `세션명 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
+        const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLabel); if (slot && scheduleRowLocked(project, slot.id)) { showToast('잠긴 일정은 잠금을 해제한 뒤 세션명을 변경해주세요.', 'error'); renderSchedulePage(); return; } const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); if (slot) slot.label = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `세션명 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
       }
       if (event.target.matches('[data-zoom-slot-connection]')) {
         const slot = project.data.slots.find((item) => item.id === event.target.dataset.zoomSlotConnection); if (slot) slot.zoomConnectionId = event.target.value || null;
@@ -3305,17 +3802,29 @@
     });
 
     document.addEventListener('click', async (event) => {
+      const zoomResolved = event.target.closest('[data-zoom-artifact-resolved]');
+      if (zoomResolved) {
+        const project = activeProject(); const artifact = project?.data.externalArtifacts.find((item) => item.kind === 'zoom' && item.externalId === zoomResolved.dataset.zoomArtifactResolved); if (!project || !artifact) return;
+        artifact.status = 'superseded'; artifact.replacedAt = new Date().toISOString();
+        const unresolved = project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.status === 'stale') || project.data.slots.some((slot) => slot.status === 'cancelled' && project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status !== 'superseded'));
+        state = Core.updateProject(state, project.id, { data: project.data }); state = Core.setModuleStatus(state, project.id, 'zoom', unresolved ? 'needsReview' : 'complete', unresolved ? '기존 회의 정리 필요' : 'Zoom 회의 확인 완료'); await persist('Zoom 정리 상태 저장됨'); renderZoomPage(); renderDashboard(); showToast('Zoom에서 정리한 회의로 표시했습니다.', 'success'); return;
+      }
       const personRemove = event.target.closest('[data-person-remove]');
       if (personRemove) {
-        const project = activeProject(); if (!project) return;
-        const person = project.data.people.find((item) => item.id === personRemove.dataset.personRemove);
+        let project = activeProject(); if (!project) return;
+        const personId = personRemove.dataset.personRemove; const projectId = project.id; const confirmSignature = scheduleChangeSignature(project);
+        const person = project.data.people.find((item) => item.id === personId);
+        if (project.data.assignments.some((assignment) => assignment.personId === personId && scheduleRowLocked(project, assignment.slotId))) { showToast('잠긴 일정에 배정된 사람은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; }
         if (await showConfirm(`“${person?.name || '이름 없는 사람'}”을 명단에서 삭제할까요? 연결된 가능 시간과 일정 배정도 삭제됩니다.`, { title: '명단 삭제', action: '삭제' })) {
+          project = projectById(projectId);
+          if (!project || scheduleChangeSignature(project) !== confirmSignature || project.data.assignments.some((assignment) => assignment.personId === personId && scheduleRowLocked(project, assignment.slotId))) { showToast('확인하는 동안 다른 창의 명단 또는 일정이 바뀌었습니다. 다시 시도해주세요.'); renderAll(); return; }
           const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
           clearScheduleHistory();
-          project.data.people = project.data.people.filter((item) => item.id !== personRemove.dataset.personRemove);
-          delete project.data.availability[personRemove.dataset.personRemove];
-          project.data.assignments = project.data.assignments.filter((assignment) => assignment.personId !== personRemove.dataset.personRemove);
-          refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `명단 삭제 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderAll();
+          project.data.people = project.data.people.filter((item) => item.id !== personId);
+          delete project.data.availability[personId];
+          project.data.assignments = project.data.assignments.filter((assignment) => assignment.personId !== personId);
+          project.data.externalArtifacts.forEach((artifact) => { if (artifact.kind === 'gmailDraft' && artifact.personId === personId) { artifact.status = 'superseded'; artifact.replacedAt = new Date().toISOString(); } });
+          refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `명단 삭제 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact); recordScheduleMergeImpact(project.id, impact, { scheduleOnly: false }); await persist(); renderAll();
         }
         return;
       }
@@ -3331,7 +3840,7 @@
       if (slotRemove) {
         const project = activeProject(); if (!project) return;
         const slot = project.data.slots.find((item) => item.id === slotRemove.dataset.slotRemove);
-        if (slot?.locked) { showToast('잠긴 세션은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; }
+        if (slot && scheduleRowLocked(project, slot.id)) { showToast('잠긴 세션 또는 배정은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; }
         const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
         pushScheduleHistory(project);
         project.data.slots = project.data.slots.filter((item) => item.id !== slotRemove.dataset.slotRemove);
@@ -3341,10 +3850,17 @@
       }
       const versionRestore = event.target.closest('[data-version-restore]');
       if (versionRestore) {
-        const project = activeProject(); if (!project) return;
-        const version = project.data.versions[Number(versionRestore.dataset.versionRestore)]; if (!version) return;
+        let project = activeProject(); if (!project) return;
+        let version = project.data.versions[Number(versionRestore.dataset.versionRestore)]; if (!version) return;
+        const projectId = project.id; const versionKey = version.id || `${version.createdAt || ''}|${version.name || ''}`; const confirmSignature = scheduleChangeSignature(project);
+        if (lockedScheduleWouldChange(project, version)) { showToast('이 버전은 현재 잠긴 일정 또는 배정을 변경합니다. 잠금을 해제한 뒤 복원해주세요.', 'error'); return; }
         if (!await showConfirm(`“${version.name}” 상태로 일정을 복원할까요? 현재 상태는 먼저 별도 버전으로 저장하는 것을 권장합니다.`, { title: '일정 버전 복원', action: '복원', danger: false })) return;
-        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); project.data.slots = JSON.parse(JSON.stringify(version.slots)); project.data.assignments = JSON.parse(JSON.stringify(version.assignments)); refreshScheduleConflicts(project);
+        project = projectById(projectId); version = project?.data.versions.find((item) => (item.id || `${item.createdAt || ''}|${item.name || ''}`) === versionKey);
+        if (!project || !version || scheduleChangeSignature(project) !== confirmSignature || lockedScheduleWouldChange(project, version)) { showToast('확인하는 동안 다른 창의 일정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 복원해주세요.'); renderSchedulePage(); return; }
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); const currentSlots = project.data.slots; const currentAvailability = project.data.availability; pushScheduleHistory(project); project.data.slots = JSON.parse(JSON.stringify(version.slots)); project.data.assignments = JSON.parse(JSON.stringify(version.assignments));
+        if (version.availability && typeof version.availability === 'object') project.data.availability = JSON.parse(JSON.stringify(version.availability));
+        else project.data.availability = Object.fromEntries(Object.entries(currentAvailability || {}).map(([personId, slotIds]) => { const selectedKeys = new Set((slotIds || []).map((slotId) => currentSlots.find((slot) => slot.id === slotId)).filter(Boolean).map(Ops.slotKey)); return [personId, project.data.slots.filter((slot) => selectedKeys.has(Ops.slotKey(slot))).map((slot) => slot.id)]; }));
+        refreshScheduleConflicts(project);
         const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 버전 복원 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderAll(); showToast('일정 버전을 복원했습니다.', 'success'); return;
       }
       const navLink = event.target.closest('[data-nav-link]');
@@ -3359,7 +3875,7 @@
         event.preventDefault(); const project = activeProject(); const step = project?.workflow.find((item) => item.id === activeWorkflowStepId); if (!project || !step) return;
         step.checklist = step.checklist.filter((item) => item.id !== workflowCheckRemove.dataset.workflowCheckRemove); state = Core.updateProject(state, project.id, { workflow: project.workflow }); await persist(); renderWorkflowTaskPage(); return;
       }
-      const sidebarProject = event.target.closest('[data-project-id]');
+      const sidebarProject = event.target.closest('.sidebar-project[data-project-id]');
       if (sidebarProject) { await switchProject(sidebarProject.dataset.projectId); return; }
       const workflowStepOpen = event.target.closest('[data-workflow-step-open]');
       if (workflowStepOpen) { openWorkflowStep(workflowStepOpen.dataset.workflowStepOpen); return; }
@@ -3428,30 +3944,94 @@
       }
       const authorizeConnection = event.target.closest('[data-connection-authorize]');
       if (authorizeConnection) {
-        const connection = state.connections.find((item) => item.id === authorizeConnection.dataset.connectionAuthorize); if (!connection) return;
+        const connectionId = authorizeConnection.dataset.connectionAuthorize;
+        let connection = state.connections.find((item) => item.id === connectionId); if (!connection) return;
+        let reservation = null; let externalStarted = false; let authorizationCompleted = false;
         authorizeConnection.disabled = true; authorizeConnection.textContent = '브라우저 로그인 기다리는 중';
         try {
-          const status = await globalThis.workspaceDesktop.authorizeConnection(connection.id, { loginHint: connection.account || '', selectAccount: true });
-          connection.status = status.connected ? 'connected' : 'needsAuth'; connection.account = status.account || connection.account; connection.updatedAt = new Date().toISOString();
-          await persist(); renderAll(); renderConnectionsPage(); showToast(`${connection.account || connection.label} 계정을 연결했습니다.`, 'success');
-        } catch (error) { connection.status = 'error'; await persist(); renderConnectionsPage(); showToast(`계정에 로그인하지 못했습니다: ${error.message}`, 'error'); }
+          reservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]);
+          if (!reservation.ok) { showToast('다른 창에서 같은 계정을 연결하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+          connection = state.connections.find((item) => item.id === connectionId);
+          if (!connection) { showToast('다른 창에서 계정 설정이 삭제되었습니다.', 'error'); return; }
+          beginExternalOperation(); externalStarted = true;
+          const status = await globalThis.workspaceDesktop.authorizeConnection(connectionId, { loginHint: connection.account || '', selectAccount: true });
+          authorizationCompleted = true;
+          if (status?.state) {
+            mergePersistedWorkspaceState(status.state);
+          } else {
+            const applied = Core.applyConnectionAuthorization(state, connectionId, status);
+            state = applied.state;
+            if (!applied.connection) throw new Error('로그인 중 계정 설정이 삭제되었습니다.');
+            await persist();
+          }
+          connection = state.connections.find((item) => item.id === connectionId);
+          if (!connection || status.connectionMissing) { if (!mailEditorDirty && !hasFocusedWorkspaceDraft()) renderAll(); showToast('로그인은 완료됐지만 다른 창에서 계정 설정이 삭제되어 연결하지 않았습니다.', 'error'); return; }
+          if (state.preferences.storageMode === 'drive') scheduleDriveStateSync();
+          if (!mailEditorDirty && !hasFocusedWorkspaceDraft()) renderAll();
+          if (currentPage === 'connections') renderConnectionsPage();
+          showToast(`${connection.account || connection.label} 계정을 연결했습니다.`, 'success');
+        } catch (error) {
+          connection = state.connections.find((item) => item.id === connectionId);
+          if (!authorizationCompleted && connection) { connection.status = 'error'; connection.updatedAt = new Date().toISOString(); await persist(); }
+          if (!mailEditorDirty && !hasFocusedWorkspaceDraft()) renderAll();
+          if (currentPage === 'connections') renderConnectionsPage();
+          showToast(`계정에 로그인하지 못했습니다: ${error.message}`, 'error');
+        } finally {
+          if (reservation?.ok) await releaseExternalArtifacts(reservation.token);
+          if (externalStarted) endExternalOperation();
+          authorizeConnection.disabled = false;
+        }
         return;
       }
       const disconnectConnection = event.target.closest('[data-connection-disconnect]');
       if (disconnectConnection) {
-        const connection = state.connections.find((item) => item.id === disconnectConnection.dataset.connectionDisconnect); if (!connection) return;
+        const connectionId = disconnectConnection.dataset.connectionDisconnect;
+        let connection = state.connections.find((item) => item.id === connectionId); if (!connection) return;
         if (!await showConfirm(`“${connection.label}” 계정의 로그인을 해제할까요? 다시 연결할 수 있도록 계정 설정은 남겨둡니다.`, { title: '계정 연결 해제', action: '연결 해제' })) return;
-        await globalThis.workspaceDesktop.disconnectConnection(connection.id); connection.status = 'needsAuth'; connection.account = '';
-        await persist(); renderAll(); renderConnectionsPage(); showToast('계정 연결을 해제했습니다.'); return;
+        let reservation = null; let externalStarted = false;
+        try {
+          reservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]);
+          if (!reservation.ok) { showToast('다른 창에서 같은 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+          connection = state.connections.find((item) => item.id === connectionId);
+          if (!connection) { showToast('다른 창에서 계정 설정이 삭제되었습니다.', 'error'); return; }
+          beginExternalOperation(); externalStarted = true;
+          const status = await globalThis.workspaceDesktop.disconnectConnection(connectionId);
+          if (status?.state) mergePersistedWorkspaceState(status.state);
+          else {
+            connection = state.connections.find((item) => item.id === connectionId);
+            if (!connection) throw new Error('연결 해제 중 계정 설정이 삭제되었습니다.');
+            connection.status = 'needsAuth'; connection.updatedAt = new Date().toISOString(); await persist();
+          }
+          if (state.preferences.storageMode === 'drive') scheduleDriveStateSync();
+          if (!mailEditorDirty && !hasFocusedWorkspaceDraft()) renderAll();
+          if (currentPage === 'connections') renderConnectionsPage();
+          showToast('계정 연결을 해제했습니다.');
+        } catch (error) { showToast(`계정 연결을 해제하지 못했습니다: ${error.message}`, 'error'); }
+        finally { if (reservation?.ok) await releaseExternalArtifacts(reservation.token); if (externalStarted) endExternalOperation(); }
+        return;
       }
       const removeConnection = event.target.closest('[data-connection-remove]');
       if (removeConnection) {
-        const connection = state.connections.find((item) => item.id === removeConnection.dataset.connectionRemove);
-        if (await showConfirm(`“${connection?.label || '계정'}” 설정을 완전히 삭제할까요? 이 계정을 기본으로 사용하던 프로젝트에서도 선택이 해제됩니다.`, { title: '계정 설정 삭제', action: '삭제' })) {
-          await globalThis.workspaceDesktop.removeConnection(removeConnection.dataset.connectionRemove);
-          state = Core.removeConnection(state, removeConnection.dataset.connectionRemove);
-          await persist(); renderAll(); renderConnectionsPage(); showToast('계정 설정을 삭제했습니다.');
-        }
+        const connectionId = removeConnection.dataset.connectionRemove;
+        let connection = state.connections.find((item) => item.id === connectionId);
+        if (!await showConfirm(`“${connection?.label || '계정'}” 설정을 완전히 삭제할까요? 이 계정을 기본으로 사용하던 프로젝트에서도 선택이 해제됩니다.`, { title: '계정 설정 삭제', action: '삭제' })) return;
+        let reservation = null; let externalStarted = false;
+        try {
+          reservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]);
+          if (!reservation.ok) { showToast('다른 창에서 같은 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
+          connection = state.connections.find((item) => item.id === connectionId);
+          if (!connection) { showToast('다른 창에서 이미 계정 설정을 삭제했습니다.'); return; }
+          beginExternalOperation(); externalStarted = true;
+          await globalThis.workspaceDesktop.removeConnection(connectionId);
+          connection = state.connections.find((item) => item.id === connectionId) || connection;
+          retireArtifactsForConnection(connection, '계정 설정 삭제 후 기존 외부 항목 재확인 필요');
+          state = Core.removeConnection(state, connectionId);
+          await persist();
+          if (!mailEditorDirty && !hasFocusedWorkspaceDraft()) renderAll();
+          if (currentPage === 'connections') renderConnectionsPage();
+          showToast('계정 설정을 삭제했습니다.');
+        } catch (error) { showToast(`계정 설정을 삭제하지 못했습니다: ${error.message}`, 'error'); }
+        finally { if (reservation?.ok) await releaseExternalArtifacts(reservation.token); if (externalStarted) endExternalOperation(); }
       }
     });
 
@@ -3478,6 +4058,7 @@
     extensionManifests = manifests;
     if (manifests.length) Core.configureExtensionCatalog(manifests);
     state = Core.normalizeState(savedState);
+    persistedStateBaseline = cloneState(state);
     if (standaloneProgram) {
       document.body.classList.add('standalone'); $('#standaloneBar').hidden = false;
       const module = Core.MODULE_CATALOG.find((item) => item.id === standaloneProgram); $('#standaloneTitle').textContent = module?.name || 'CMOE 프로그램'; document.title = `${module?.name || 'CMOE'} · CMOE Workspace`;
@@ -3500,8 +4081,10 @@
       $('#appVersion').textContent = `CMOE Workspace ${info.version}`;
       globalThis.workspaceDesktop.onStateChanged((nextState) => {
         const normalized = Core.normalizeState(nextState);
-        if (normalized.updatedAt !== state.updatedAt) {
-          if (schedulePersistBaseline || persistSaving) {
+        const incomingRevision = Number(normalized._revision || 0); const currentRevision = Number(state._revision || 0);
+        const newer = incomingRevision > currentRevision || (incomingRevision === currentRevision && String(normalized.updatedAt || '') > String(state.updatedAt || ''));
+        if (newer) {
+          if (schedulePersistBaseline || persistSaving || persistDirty || externalOperationCount || mailEditorDirty || hasFocusedWorkspaceDraft()) {
             deferredWorkspaceState = normalized;
             if (schedulePersistBaseline && !persistSaving) void flushSchedulePersist();
             return;
@@ -3518,8 +4101,16 @@
     }
   }
 
+  async function commitFocusedWorkspaceDraft() {
+    const target = document.activeElement;
+    if (hasFocusedWorkspaceDraft()) target.blur();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if ($('#mailEditDialog').open) captureOpenPersonalMailDraft();
+  }
+
   globalThis.flushWorkspaceEdits = async () => {
     clearTimeout(mailDraftTimer);
+    await commitFocusedWorkspaceDraft();
     await waitForExternalOperations();
     try { await flushSchedulePersist(); } catch (_) {}
     if (mailEditorDirty) await saveMailEditorDraft();
@@ -3528,6 +4119,7 @@
     if (persistDirty || pendingScheduleMergeHints.size) await persist('종료 전 변경사항 저장됨');
     await waitForPersistIdle();
     if (persistDirty || schedulePersistBaseline || pendingScheduleMergeHints.size) throw new Error('변경사항을 저장하지 못했습니다.');
+    if (state.preferences.storageMode === 'drive' && !await flushDriveStateSync(false)) throw new Error(lastDriveSyncError?.message || 'Google Drive에 마지막 변경사항을 저장하지 못했습니다.');
     return true;
   };
 

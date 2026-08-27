@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { mergeWorkspaceState, mergeScheduleArtifacts, overlayScheduleProjects } = require('../desktop/state-merge');
+const { driveSnapshotIdentityMatches, mergeWorkspaceState, mergeScheduleArtifacts, overlayScheduleProjects, preserveLocalConnectionContext } = require('../desktop/state-merge');
 const { JsonStorage } = require('../desktop/storage');
 
 async function run() {
@@ -128,6 +128,116 @@ const hintedPeopleMerge = overlayScheduleProjects(
 assert.equal(hintedPeopleMerge.data.people.find((person) => person.id === 'person-1').name, '로컬 수정 이름');
 assert.equal(hintedPeopleMerge.data.communication.subjectTemplate, '다른 창 제목');
 assert.equal(hintedPeopleMerge.data.slots[0].startTime, '09:00');
+
+const currentScheduleEdit = structuredClone(ancestorState);
+currentScheduleEdit.updatedAt = '2026-01-01T00:00:12Z';
+currentScheduleEdit.projects[0].updatedAt = currentScheduleEdit.updatedAt;
+currentScheduleEdit.projects[0].data.slots[0].startTime = '10:00';
+const incomingRosterEdit = structuredClone(ancestorState);
+incomingRosterEdit.updatedAt = '2026-01-01T00:00:13Z';
+incomingRosterEdit.projects[0].updatedAt = incomingRosterEdit.updatedAt;
+incomingRosterEdit.projects[0].data.people[0].name = '명단 수정 이름';
+const rosterAndScheduleMerged = mergeWorkspaceState(currentScheduleEdit, incomingRosterEdit, ancestorState);
+const rosterAndScheduleOverlaid = overlayScheduleProjects(
+  rosterAndScheduleMerged,
+  incomingRosterEdit,
+  [{ projectId: 'concurrent-project', changedSlotIds: [], scheduleOnly: false }],
+  currentScheduleEdit
+).projects[0];
+assert.equal(rosterAndScheduleOverlaid.data.people[0].name, '명단 수정 이름');
+assert.equal(rosterAndScheduleOverlaid.data.slots[0].startTime, '10:00');
+
+const currentArtifactCleanup = structuredClone(ancestorState);
+currentArtifactCleanup.updatedAt = '2026-01-01T00:00:14Z';
+currentArtifactCleanup.projects[0].updatedAt = currentArtifactCleanup.updatedAt;
+currentArtifactCleanup.projects[0].data.externalArtifacts[0].status = 'superseded';
+currentArtifactCleanup.projects[0].data.externalArtifacts[0].replacedAt = currentArtifactCleanup.updatedAt;
+const incomingArtifactStale = structuredClone(ancestorState);
+incomingArtifactStale.updatedAt = '2026-01-01T00:00:15Z';
+incomingArtifactStale.projects[0].updatedAt = incomingArtifactStale.updatedAt;
+incomingArtifactStale.projects[0].data.slots[0].startTime = '10:30';
+incomingArtifactStale.projects[0].data.externalArtifacts[0].status = 'stale';
+const artifactPipelineMerged = mergeWorkspaceState(currentArtifactCleanup, incomingArtifactStale, ancestorState);
+const artifactPipelineOverlaid = overlayScheduleProjects(
+  artifactPipelineMerged,
+  incomingArtifactStale,
+  [{ projectId: 'concurrent-project', changedSlotIds: ['slot-1'], zoomReviewSlotIds: ['slot-1'], scheduleOnly: true }],
+  currentArtifactCleanup
+).projects[0];
+assert.equal(artifactPipelineOverlaid.data.externalArtifacts[0].status, 'superseded');
+assert.equal(artifactPipelineOverlaid.data.externalArtifacts[0].replacedAt, '2026-01-01T00:00:14Z');
+
+const pulledFromOtherComputer = {
+  connections: [
+    { id: 'remote-drive', type: 'drive', status: 'connected', account: 'remote@example.com' },
+    { id: 'remote-gmail', type: 'gmail', status: 'connected', account: 'local@example.com' },
+    { id: 'remote-gmail-other', type: 'gmail', status: 'connected', account: 'other@example.com' },
+    { id: 'remote-zoom', type: 'zoom', status: 'connected', account: 'remote-zoom@example.com' },
+    { id: 'remote-forms', type: 'forms', status: 'connected', account: 'remote-forms@example.com' }
+  ],
+  deletedConnectionIds: ['local-drive'],
+  projects: [{
+    id: 'shared-project',
+    settings: { defaultConnectionIds: { drive: 'remote-drive', gmail: 'remote-gmail', zoom: 'remote-zoom', forms: 'remote-forms' } },
+    moduleState: { gmailFlow: { status: 'complete' }, zoom: { status: 'complete' }, forms: { status: 'complete' } },
+    workflow: [{ id: 'mail', moduleId: 'gmailFlow', status: 'complete' }, { id: 'zoom', moduleId: 'zoom', status: 'complete' }, { id: 'forms', moduleId: 'forms', status: 'complete' }],
+    data: {
+      externalArtifacts: [
+        { kind: 'gmailDraft', personId: 'person-1', connectionId: 'remote-gmail', externalId: 'draft-1', status: 'created' },
+        { kind: 'gmailDraft', personId: 'person-2', connectionId: 'remote-gmail-other', externalId: 'draft-2', status: 'created' },
+        { kind: 'zoom', slotId: 'slot-1', connectionId: 'remote-zoom', externalId: 'meeting-1', status: 'created' }
+      ],
+      slots: [{ id: 'slot-1', zoomConnectionId: 'remote-zoom' }],
+      forms: { linkedForms: [{ formId: 'form-1', connectionId: 'remote-forms', needsReview: false }] }
+    }
+  }],
+  quickWorkspaces: { gmailFlow: { id: 'quick-gmailFlow', settings: { defaultConnectionIds: { gmail: 'remote-gmail' } } } }
+};
+const localConnectionContext = {
+  connections: [
+    { id: 'local-drive', type: 'drive', status: 'connected', account: 'local@example.com' },
+    { id: 'local-gmail', type: 'gmail', status: 'connected', account: 'local@example.com' },
+    { id: 'local-gmail-default', type: 'gmail', status: 'connected', account: 'previous-default@example.com' }
+  ],
+  deletedConnectionIds: ['previously-deleted-local'],
+  projects: [{ id: 'shared-project', settings: { defaultConnectionIds: { drive: 'local-drive', gmail: 'local-gmail-default' } } }],
+  quickWorkspaces: { gmailFlow: { id: 'quick-gmailFlow', settings: { defaultConnectionIds: { gmail: 'local-gmail-default' } } } }
+};
+const pulledWithLocalConnections = preserveLocalConnectionContext(pulledFromOtherComputer, localConnectionContext);
+assert.deepEqual(pulledWithLocalConnections.connections, localConnectionContext.connections, 'Drive pull must keep this computer\'s authenticated connection records');
+assert.deepEqual(pulledWithLocalConnections.deletedConnectionIds, localConnectionContext.deletedConnectionIds, 'remote connection tombstones must not remove this computer\'s accounts');
+assert.equal(pulledWithLocalConnections.projects[0].settings.defaultConnectionIds.drive, null, 'an unmatched pulled default must require explicit account selection instead of silently using another local account');
+assert.equal(pulledWithLocalConnections.projects[0].settings.defaultConnectionIds.gmail, 'local-gmail', 'a pulled default account must win when the same account is available under this computer\'s id');
+assert.equal(pulledWithLocalConnections.quickWorkspaces.gmailFlow.settings.defaultConnectionIds.gmail, 'local-gmail');
+assert.equal(pulledWithLocalConnections.projects[0].data.externalArtifacts[0].connectionId, 'local-gmail', 'same-account Gmail artifacts must route through this computer\'s connection id');
+assert.equal(pulledWithLocalConnections.projects[0].data.externalArtifacts[0].status, 'created');
+assert.equal(pulledWithLocalConnections.projects[0].data.externalArtifacts[1].connectionId, null);
+assert.equal(pulledWithLocalConnections.projects[0].data.externalArtifacts[1].status, 'superseded', 'an unmatched Gmail draft must not block creation through this computer\'s account');
+assert.equal(pulledWithLocalConnections.projects[0].data.externalArtifacts[2].connectionId, null);
+assert.equal(pulledWithLocalConnections.projects[0].data.externalArtifacts[2].status, 'stale', 'an unmatched Zoom meeting must no longer block replacement creation');
+assert.equal(pulledWithLocalConnections.projects[0].data.slots[0].zoomConnectionId, null);
+assert.equal(pulledWithLocalConnections.projects[0].data.forms.linkedForms[0].connectionId, null);
+assert.equal(pulledWithLocalConnections.projects[0].data.forms.linkedForms[0].needsReview, true);
+assert.equal(pulledWithLocalConnections.projects[0].moduleState.zoom.status, 'needsReview');
+assert.equal(pulledWithLocalConnections.projects[0].moduleState.forms.status, 'needsReview');
+assert.equal(pulledWithLocalConnections.projects[0].moduleState.gmailFlow.status, 'needsReview');
+assert.equal(pulledFromOtherComputer.connections[0].id, 'remote-drive', 'preserving local context must not mutate the downloaded snapshot');
+assert.equal(driveSnapshotIdentityMatches(
+  { fileId: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z' },
+  { id: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z', trashed: false }
+), true);
+assert.equal(driveSnapshotIdentityMatches(
+  { fileId: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z' },
+  { id: 'drive-file-1', modifiedTime: '2026-08-27T08:01:00.000Z', trashed: false }
+), false, 'a newer upload during pull confirmation must abort applying the stale snapshot');
+assert.equal(driveSnapshotIdentityMatches(
+  { fileId: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z' },
+  { id: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z', trashed: true }
+), false, 'a Drive file deleted during confirmation must not be applied');
+assert.equal(driveSnapshotIdentityMatches(
+  { fileId: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z', etag: '"etag-1"', version: '4' },
+  { id: 'drive-file-1', modifiedTime: '2026-08-27T08:00:00.000Z', etag: '"etag-2"', version: '5', trashed: false }
+), false, 'an ETag/version change must abort even if Drive reports the same modified timestamp');
 
 const storageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmoe-storage-recovery-'));
 const blockingParent = path.join(storageRoot, 'blocked');

@@ -21,6 +21,7 @@ class AuthManager {
     this.unprotect = unprotect;
     this.entries = {};
     this.pending = new Map();
+    this.saveTail = Promise.resolve();
     this.load();
   }
 
@@ -35,16 +36,20 @@ class AuthManager {
   }
 
   async save() {
-    await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
-    const envelope = { format: 'cmoe-workspace-credentials-v1', data: this.protect(JSON.stringify(this.entries)) };
-    const temporaryPath = `${this.filePath}.tmp`;
-    await fs.promises.writeFile(temporaryPath, JSON.stringify(envelope), 'utf8');
-    try { await fs.promises.rename(temporaryPath, this.filePath); }
-    catch (error) {
-      if (!['EEXIST', 'EPERM'].includes(error.code)) throw error;
-      try { await fs.promises.unlink(this.filePath); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
-      await fs.promises.rename(temporaryPath, this.filePath);
-    }
+    const operation = this.saveTail.then(async () => {
+      await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
+      const envelope = { format: 'cmoe-workspace-credentials-v1', data: this.protect(JSON.stringify(this.entries)) };
+      const temporaryPath = `${this.filePath}.tmp`;
+      await fs.promises.writeFile(temporaryPath, JSON.stringify(envelope), 'utf8');
+      try { await fs.promises.rename(temporaryPath, this.filePath); }
+      catch (error) {
+        if (!['EEXIST', 'EPERM'].includes(error.code)) throw error;
+        try { await fs.promises.unlink(this.filePath); } catch (unlinkError) { if (unlinkError.code !== 'ENOENT') throw unlinkError; }
+        await fs.promises.rename(temporaryPath, this.filePath);
+      }
+    });
+    this.saveTail = operation.catch(() => {});
+    return operation;
   }
 
   async setConfig(connectionId, config) {
@@ -188,17 +193,30 @@ class AuthManager {
     return this.refresh(connectionId);
   }
 
-  async fetchJson(url, token, options = {}) {
+  async fetchJsonWithMetadata(url, token, options = {}) {
     const response = await fetch(url, { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` } });
     const text = await response.text();
     let data; try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { message: text }; }
-    if (!response.ok) throw new Error(data?.error?.message || data.message || data.reason || `API 요청 실패 (${response.status})`);
-    return data;
+    if (!response.ok) {
+      const error = new Error(data?.error?.message || data.message || data.reason || `API 요청 실패 (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return { data, etag: response.headers?.get?.('etag') || '' };
+  }
+
+  async fetchJson(url, token, options = {}) {
+    return (await this.fetchJsonWithMetadata(url, token, options)).data;
   }
 
   async request(connectionId, url, options = {}) {
     const token = await this.getToken(connectionId);
     return this.fetchJson(url, token, options);
+  }
+
+  async requestWithMetadata(connectionId, url, options = {}) {
+    const token = await this.getToken(connectionId);
+    return this.fetchJsonWithMetadata(url, token, options);
   }
 
   async disconnect(connectionId) {

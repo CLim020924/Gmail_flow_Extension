@@ -61,6 +61,19 @@ assert.equal(generatedWithoutCancelled.assignments.length, 1);
 assert.equal(generatedWithoutCancelled.assignments[0].slotId, 'slot-active');
 assert(!generatedWithoutCancelled.assignments.some((assignment) => assignment.slotId === 'slot-cancelled'), 'cancelled slots must not retain or receive generated assignments');
 
+const lockedActiveSlot = { id: 'slot-locked-active', date: '2026-07-06', startTime: '11:00', endTime: '12:00', label: '잠긴 진행 일정', status: 'draft', locked: true };
+const lockedActiveAssignment = { id: 'locked-active-person', slotId: lockedActiveSlot.id, personId: 'p1', roleId: 'participant', locked: true };
+const generatedWithLockedRow = Ops.generateSchedule({
+  people,
+  roles: [{ ...roles[0], minPerSession: 2, maxPerSession: 2 }],
+  slots: [lockedActiveSlot],
+  availability: { p1: [lockedActiveSlot.id], p2: [lockedActiveSlot.id] },
+  existingAssignments: [lockedActiveAssignment],
+  rules: {}
+});
+assert.deepEqual(generatedWithLockedRow.assignments, [lockedActiveAssignment], 'an active locked row must remain byte-for-byte unchanged during regeneration');
+assert(generatedWithLockedRow.conflicts.some((item) => item.type === 'slotMinimum'), 'an incomplete locked row is reported instead of silently modified');
+
 const rescheduleSlots = [
   { id: 'slot-a', date: '2026-07-06', startTime: '09:30', endTime: '10:30', label: '오전', status: 'confirmed', locked: false },
   { id: 'slot-b', date: '2026-07-06', startTime: '10:30', endTime: '11:30', label: '오후', status: 'confirmed', locked: false }
@@ -269,5 +282,29 @@ assert.equal(mail.variables.전화번호, '010-1234-5678');
 assert.equal(mail.assignments.length, 1);
 assert.match(mail.variables.개인일정, /진행 일정/);
 assert.doesNotMatch(mail.variables.개인일정, /취소 일정/);
+
+const zoomFingerprint = Ops.externalOperationFingerprint(mailProject, 'zoom');
+const renamedProject = JSON.parse(JSON.stringify(mailProject));
+renamedProject.name = '이름이 바뀐 프로젝트';
+assert.notEqual(Ops.externalOperationFingerprint(renamedProject, 'zoom'), zoomFingerprint, 'a project name change must invalidate a pending Zoom operation');
+
+const gmailFingerprint = Ops.externalOperationFingerprint(mailProject, 'gmailDraft');
+const personallyEditedProject = JSON.parse(JSON.stringify(mailProject));
+personallyEditedProject.data.communication.mailEdits.p1 = { subject: '개인 제목', body: '개인 본문', bodyHtml: '<p>개인 본문</p>', updatedAt: new Date().toISOString() };
+assert.notEqual(Ops.externalOperationFingerprint(personallyEditedProject, 'gmailDraft'), gmailFingerprint, 'a personal mail edit must invalidate a pending Gmail operation');
+
+const gmailConnections = [{ id: 'gmail-main', type: 'gmail', status: 'connected', account: 'first@example.com', updatedAt: '2026-01-01T00:00:00.000Z' }];
+const routedMailProject = JSON.parse(JSON.stringify(mailProject));
+routedMailProject.settings = { defaultConnectionIds: { gmail: 'gmail-main', forms: 'forms-main' } };
+const routedGmailFingerprint = Ops.externalOperationFingerprint(routedMailProject, 'gmailDraft', gmailConnections);
+const reauthenticatedConnections = [{ ...gmailConnections[0], account: 'second@example.com', updatedAt: '2026-01-02T00:00:00.000Z' }];
+assert.notEqual(Ops.externalOperationFingerprint(routedMailProject, 'gmailDraft', reauthenticatedConnections), routedGmailFingerprint, 'changing the authenticated Gmail account must invalidate a pending Gmail operation');
+
+const formsProject = JSON.parse(JSON.stringify(routedMailProject));
+formsProject.data.forms = { definitions: [{ id: 'definition-1', type: 'registration', title: '신청' }], linkedForms: [] };
+const formsConnections = [{ id: 'forms-main', type: 'forms', status: 'connected', account: 'forms@example.com', updatedAt: '2026-01-01T00:00:00.000Z' }];
+const formsFingerprint = Ops.externalOperationFingerprint(formsProject, 'googleForm', formsConnections);
+formsProject.data.forms.definitions[0].title = '수정된 신청';
+assert.notEqual(Ops.externalOperationFingerprint(formsProject, 'googleForm', formsConnections), formsFingerprint, 'editing a form definition must invalidate a pending Google Forms operation');
 
 console.log('operations-core tests passed');

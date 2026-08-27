@@ -1,4 +1,5 @@
 const BATCHES_KEY = 'mailBatches';
+const BATCH_CANCEL_REQUESTS_KEY = 'mailBatchCancelRequests';
 const QUEUE_ALARM = 'gmail-flow-queue';
 const MAX_ATTEMPTS = 3;
 const BATCH_SIZE = 40;
@@ -7,11 +8,81 @@ const OAUTH_PLACEHOLDER = 'replace-with-google-oauth-client';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const CLOUD_SYNC_FILE = 'gmail-flow-sync-v1.json';
+const MAIL_MUTATION_MESSAGES = new Set([
+  'resume-after-auth',
+  'enqueue-mail-batch',
+  'update-draft-batch',
+  'check-draft-batch-status',
+  'cancel-mail-batch',
+  'delete-mail-batch'
+]);
 let queueRunning = false;
+let queueRunPromise = null;
+let queuePausedForQuit = false;
+let mailBatchOperationTail = Promise.resolve();
+let cancelStorageTail = Promise.resolve();
+let cancelOperationTail = Promise.resolve();
+const activeMailBatchOperations = new Set();
+const activeCancelStorageOperations = new Set();
+const activeCancelOperations = new Set();
 const cancelRequestedBatches = new Set();
 
 const nowIso = () => new Date().toISOString();
 const isTerminal = (status) => ['completed', 'failed', 'canceled'].includes(status);
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+
+function mailQueueShutdownError() {
+  const error = new Error('앱 종료 준비 중에는 메일 작업을 변경할 수 없습니다. 종료를 취소한 뒤 다시 시도해주세요.');
+  error.code = 'APP_SHUTTING_DOWN';
+  return error;
+}
+
+function trackOperation(activeOperations, operation) {
+  activeOperations.add(operation);
+  const remove = () => activeOperations.delete(operation);
+  operation.then(remove, remove);
+  return operation;
+}
+
+function runMailBatchOperation(operation) {
+  const result = mailBatchOperationTail.then(() => operation());
+  mailBatchOperationTail = result.catch(() => {});
+  return trackOperation(activeMailBatchOperations, result);
+}
+
+async function waitForMailBatchOperations() {
+  let failure = null;
+  while (true) {
+    const observedTail = mailBatchOperationTail;
+    const observedQueueRun = queueRunPromise;
+    const observedCancelOperation = cancelOperationTail;
+    const observedCancelStorage = cancelStorageTail;
+    const activeOperations = [
+      ...activeMailBatchOperations,
+      ...activeCancelOperations,
+      ...activeCancelStorageOperations
+    ];
+    if (observedQueueRun && !activeOperations.includes(observedQueueRun)) activeOperations.push(observedQueueRun);
+    const results = await Promise.allSettled([observedTail, observedCancelOperation, observedCancelStorage, ...activeOperations]);
+    const rejected = results.find((result) => result.status === 'rejected');
+    if (!failure && rejected) failure = rejected.reason;
+    if (observedTail === mailBatchOperationTail
+      && observedCancelOperation === cancelOperationTail
+      && observedCancelStorage === cancelStorageTail
+      && !queueRunPromise
+      && !activeMailBatchOperations.size
+      && !activeCancelOperations.size
+      && !activeCancelStorageOperations.size) {
+      if (failure) throw failure;
+      return { idle: true };
+    }
+  }
+}
+
+function runAccountOperation(operation) {
+  const runner = chrome.identity?.runAccountOperation;
+  return typeof runner === 'function' ? runner(operation) : operation();
+}
 
 async function getBatches() {
   const result = await chrome.storage.local.get(BATCHES_KEY);
@@ -20,6 +91,28 @@ async function getBatches() {
 
 async function saveBatches(batches) {
   await chrome.storage.local.set({ [BATCHES_KEY]: batches });
+}
+
+async function getCancelRequests() {
+  const result = await chrome.storage.local.get(BATCH_CANCEL_REQUESTS_KEY);
+  return Array.isArray(result[BATCH_CANCEL_REQUESTS_KEY]) ? result[BATCH_CANCEL_REQUESTS_KEY].map(String) : [];
+}
+
+function updateCancelRequests(mutator) {
+  const result = cancelStorageTail.then(async () => {
+    const requests = new Set(await getCancelRequests());
+    await mutator(requests);
+    await chrome.storage.local.set({ [BATCH_CANCEL_REQUESTS_KEY]: [...requests] });
+    return requests;
+  });
+  cancelStorageTail = result.catch(() => {});
+  return trackOperation(activeCancelStorageOperations, result);
+}
+
+function runCancelOperation(operation) {
+  const result = cancelOperationTail.then(() => operation());
+  cancelOperationTail = result.catch(() => {});
+  return trackOperation(activeCancelOperations, result);
 }
 
 function getOAuthClientId() {
@@ -49,8 +142,13 @@ async function getToken(interactive = false, scopes = [GMAIL_SCOPE]) {
   }
 }
 
-async function gmailFetch(path, options = {}, retry = true) {
-  const token = await getToken(false, [GMAIL_SCOPE]);
+function accountMismatchError(expectedEmail, actualEmail) {
+  const error = new Error(`이 작업은 ${expectedEmail} 계정으로 만든 작업입니다. 현재 연결된 ${actualEmail || '다른'} 계정에서는 실행할 수 없습니다.`);
+  error.code = 'ACCOUNT_MISMATCH';
+  return error;
+}
+
+async function gmailFetchWithToken(token, path, options = {}) {
   const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
     ...options,
     headers: {
@@ -59,9 +157,8 @@ async function gmailFetch(path, options = {}, retry = true) {
       ...(options.headers || {})
     }
   });
-  if (response.status === 401 && retry) {
+  if (response.status === 401) {
     await chrome.identity.removeCachedAuthToken({ token });
-    return gmailFetch(path, options, false);
   }
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
@@ -74,15 +171,35 @@ async function gmailFetch(path, options = {}, retry = true) {
   return data;
 }
 
-async function driveFetch(path, options = {}, retry = true) {
-  const token = await getToken(false, [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE]);
+async function verifiedGmailContext(expectedEmail = '') {
+  const token = await getToken(false, [GMAIL_SCOPE]);
+  const profile = await gmailFetchWithToken(token, '/profile');
+  const actualEmail = normalizeEmail(profile?.emailAddress);
+  if (!actualEmail) {
+    const error = new Error('현재 Gmail 계정 정보를 확인하지 못했습니다. 계정을 다시 연결해주세요.');
+    error.code = 'AUTH_REQUIRED';
+    throw error;
+  }
+  const normalizedExpected = normalizeEmail(expectedEmail);
+  if (normalizedExpected && normalizedExpected !== actualEmail) throw accountMismatchError(normalizedExpected, actualEmail);
+  return {
+    email: actualEmail,
+    request: (path, options = {}) => gmailFetchWithToken(token, path, options)
+  };
+}
+
+async function gmailFetch(path, options = {}) {
+  const context = await verifiedGmailContext();
+  return context.request(path, options);
+}
+
+async function driveFetchDetailedWithToken(token, path, options = {}) {
   const response = await fetch(`https://www.googleapis.com${path}`, {
     ...options,
     headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) }
   });
-  if (response.status === 401 && retry) {
+  if (response.status === 401) {
     await chrome.identity.removeCachedAuthToken({ token });
-    return driveFetch(path, options, false);
   }
   const contentType = response.headers?.get?.('content-type') || '';
   const data = contentType.includes('application/json') ? await response.json() : await response.text();
@@ -92,35 +209,153 @@ async function driveFetch(path, options = {}, retry = true) {
       ? 'Google Cloud 프로젝트에서 Google Drive API를 활성화해야 합니다.'
       : message);
     error.status = response.status;
-    error.code = response.status === 401 || response.status === 403 && /insufficient/i.test(JSON.stringify(data)) ? 'DRIVE_AUTH_REQUIRED' : 'DRIVE_API_ERROR';
+    error.code = response.status === 401 || response.status === 403 && /insufficient/i.test(JSON.stringify(data))
+      ? 'DRIVE_AUTH_REQUIRED'
+      : [404, 409, 412].includes(response.status) ? 'DRIVE_PRECONDITION_FAILED' : 'DRIVE_API_ERROR';
     throw error;
   }
-  return data;
+  return { data, etag: response.headers?.get?.('etag') || '' };
 }
 
-async function findCloudSyncFile() {
+async function verifiedDriveContext(expectedEmail, interactive = false) {
+  const normalizedExpected = normalizeEmail(expectedEmail);
+  if (!normalizedExpected) {
+    const error = new Error('Google Drive 작업을 실행할 계정 정보를 확인하지 못했습니다. 계정을 다시 연결해주세요.');
+    error.code = 'ACCOUNT_IDENTITY_REQUIRED';
+    throw error;
+  }
+  const token = await getToken(interactive, [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE]);
+  const profile = await gmailFetchWithToken(token, '/profile');
+  const actualEmail = normalizeEmail(profile?.emailAddress);
+  if (!actualEmail) {
+    const error = new Error('Google Drive 권한을 받은 계정 정보를 확인하지 못했습니다. 계정을 다시 연결해주세요.');
+    error.code = 'AUTH_REQUIRED';
+    throw error;
+  }
+  if (actualEmail !== normalizedExpected) throw accountMismatchError(normalizedExpected, actualEmail);
+  return {
+    email: actualEmail,
+    requestDetailed: (path, options = {}) => driveFetchDetailedWithToken(token, path, options),
+    request: async (path, options = {}) => (await driveFetchDetailedWithToken(token, path, options)).data
+  };
+}
+
+function normalizeCloudFileIdentity(file) {
+  if (!file?.id && !file?.fileId) return null;
+  return {
+    id: String(file.id || file.fileId),
+    modifiedTime: String(file.modifiedTime || ''),
+    version: String(file.version || ''),
+    etag: String(file.etag || '')
+  };
+}
+
+function cloudFileIdentityMatches(expectedFile, actualFile) {
+  if (!expectedFile || typeof expectedFile !== 'object') return false;
+  const expected = normalizeCloudFileIdentity(expectedFile);
+  const actual = normalizeCloudFileIdentity(actualFile);
+  if (expectedFile.exists === false || !expected) return !actual;
+  if (!actual || expected.id !== actual.id) return false;
+  if (expected.etag && (!actual.etag || expected.etag !== actual.etag)) return false;
+  if (expected.version && (!actual.version || expected.version !== actual.version)) return false;
+  if (expected.modifiedTime && expected.modifiedTime !== actual.modifiedTime) return false;
+  return Boolean(expected.etag || expected.version || expected.modifiedTime);
+}
+
+function cloudSyncConflictError(message, expectedFile, actualFile) {
+  const error = new Error(message || '다른 PC에서 Google Drive 데이터가 변경되었습니다. 최신 데이터를 다시 확인해주세요.');
+  error.code = 'CLOUD_SYNC_CONFLICT';
+  error.expectedFile = normalizeCloudFileIdentity(expectedFile);
+  error.actualFile = normalizeCloudFileIdentity(actualFile);
+  return error;
+}
+
+async function readCloudSyncFileIdentity(drive, fileId) {
+  const fields = encodeURIComponent('id,name,modifiedTime,size,version');
+  const result = await drive.requestDetailed(`/drive/v3/files/${encodeURIComponent(fileId)}?fields=${fields}`);
+  return normalizeCloudFileIdentity({ ...result.data, etag: result.etag });
+}
+
+async function findCloudSyncFile(drive) {
   const query = encodeURIComponent(`name='${CLOUD_SYNC_FILE}' and trashed=false`);
-  const fields = encodeURIComponent('files(id,name,modifiedTime,size)');
-  const result = await driveFetch(`/drive/v3/files?spaces=appDataFolder&q=${query}&orderBy=modifiedTime%20desc&pageSize=10&fields=${fields}`);
-  return result.files?.[0] || null;
+  const fields = encodeURIComponent('files(id,name,modifiedTime,size,version)');
+  const result = await drive.request(`/drive/v3/files?spaces=appDataFolder&q=${query}&orderBy=modifiedTime%20desc&pageSize=10&fields=${fields}`);
+  const candidates = Array.isArray(result.files) ? result.files : [];
+  if (candidates.length > 1) throw cloudSyncConflictError('Google Drive에 동기화 파일이 여러 개 있어 자동으로 하나를 선택할 수 없습니다.', null, candidates[0]);
+  const candidate = candidates[0];
+  if (!candidate?.id) return null;
+  try {
+    return await readCloudSyncFileIdentity(drive, candidate.id);
+  } catch (error) {
+    if (error?.code === 'DRIVE_PRECONDITION_FAILED') throw cloudSyncConflictError('', candidate, null);
+    throw error;
+  }
 }
 
-async function downloadCloudSnapshot() {
-  const file = await findCloudSyncFile();
+async function downloadCloudSnapshot(drive) {
+  const file = await findCloudSyncFile(drive);
   if (!file) return { file: null, snapshot: null };
-  const snapshot = await driveFetch(`/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`);
-  return { file, snapshot: typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot };
+  let snapshot;
+  try {
+    snapshot = await drive.request(`/drive/v3/files/${encodeURIComponent(file.id)}?alt=media`, file.etag ? { headers: { 'If-Match': file.etag } } : {});
+  } catch (error) {
+    if (error?.code === 'DRIVE_PRECONDITION_FAILED') throw cloudSyncConflictError('', file, await findCloudSyncFile(drive));
+    throw error;
+  }
+  let verifiedFile;
+  try {
+    verifiedFile = await readCloudSyncFileIdentity(drive, file.id);
+  } catch (error) {
+    if (error?.code === 'DRIVE_PRECONDITION_FAILED') throw cloudSyncConflictError('', file, null);
+    throw error;
+  }
+  if (!cloudFileIdentityMatches(file, verifiedFile)) throw cloudSyncConflictError('', file, verifiedFile);
+  return { file: verifiedFile, snapshot: typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot };
 }
 
-async function uploadCloudSnapshot(snapshot) {
+async function verifyCloudSyncFile(drive, expectedFile) {
+  const actualFile = await findCloudSyncFile(drive);
+  if (!cloudFileIdentityMatches(expectedFile, actualFile)) throw cloudSyncConflictError('', expectedFile, actualFile);
+  return { file: actualFile };
+}
+
+async function uploadCloudSnapshot(drive, snapshot, expectedFile) {
+  const snapshotAccount = normalizeEmail(snapshot?.accountEmail);
+  if (!snapshotAccount || snapshotAccount !== drive.email) {
+    const error = new Error(snapshotAccount
+      ? `Google Drive 동기화 데이터의 계정(${snapshot.accountEmail})이 현재 연결된 계정(${drive.email})과 다릅니다.`
+      : 'Google Drive 동기화 데이터의 계정 정보를 확인할 수 없습니다.');
+    error.code = 'ACCOUNT_MISMATCH';
+    throw error;
+  }
   const serialized = JSON.stringify(snapshot);
   if (new TextEncoder().encode(serialized).length > 10 * 1024 * 1024) throw new Error('동기화 데이터가 10MB를 초과했습니다. 명단 크기를 줄여주세요.');
-  const existing = await findCloudSyncFile();
+  if (!expectedFile || typeof expectedFile !== 'object') {
+    const error = new Error('마지막으로 확인한 Google Drive 파일 정보가 없어 안전하게 저장할 수 없습니다. 최신 데이터를 다시 불러와주세요.');
+    error.code = 'CLOUD_SYNC_BASELINE_REQUIRED';
+    throw error;
+  }
+  const existing = await findCloudSyncFile(drive);
+  if (!cloudFileIdentityMatches(expectedFile, existing)) throw cloudSyncConflictError('', expectedFile, existing);
   if (existing) {
-    const file = await driveFetch(`/upload/drive/v3/files/${encodeURIComponent(existing.id)}?uploadType=media&fields=id%2CmodifiedTime`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json; charset=UTF-8' }, body: serialized
-    });
-    return { file };
+    if (!existing.etag) {
+      const error = new Error('Google Drive 파일의 안전한 저장 조건(ETag)을 확인하지 못했습니다. 최신 데이터를 다시 불러와주세요.');
+      error.code = 'CLOUD_SYNC_BASELINE_REQUIRED';
+      throw error;
+    }
+    try {
+      const result = await drive.requestDetailed(`/upload/drive/v3/files/${encodeURIComponent(existing.id)}?uploadType=media&fields=id%2CmodifiedTime%2Cversion`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json; charset=UTF-8', 'If-Match': existing.etag },
+        body: serialized
+      });
+      let file = normalizeCloudFileIdentity({ ...result.data, etag: result.etag });
+      if (!file?.etag && !file?.version && !file?.modifiedTime) file = await readCloudSyncFileIdentity(drive, existing.id);
+      return { file };
+    } catch (error) {
+      if (error?.code === 'DRIVE_PRECONDITION_FAILED') throw cloudSyncConflictError('', expectedFile, await findCloudSyncFile(drive));
+      throw error;
+    }
   }
   const boundary = `gmail-flow-${crypto.randomUUID()}`;
   const body = [
@@ -128,9 +363,12 @@ async function uploadCloudSnapshot(snapshot) {
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${serialized}`,
     `--${boundary}--`
   ].join('\r\n');
-  const file = await driveFetch('/upload/drive/v3/files?uploadType=multipart&fields=id%2CmodifiedTime', {
+  const result = await drive.requestDetailed('/upload/drive/v3/files?uploadType=multipart&fields=id%2CmodifiedTime%2Cversion', {
     method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body
   });
+  const created = normalizeCloudFileIdentity({ ...result.data, etag: result.etag });
+  const file = await findCloudSyncFile(drive);
+  if (!file || created?.id && created.id !== file.id) throw cloudSyncConflictError('동기화 파일을 만드는 동안 다른 PC에서도 파일이 생성되었습니다.', { exists: false }, file);
   return { file };
 }
 
@@ -190,17 +428,17 @@ function renderTemplate(template, variables = {}) {
   return String(template || '').replace(/{{\s*([^{}]+?)\s*}}/g, (_match, name) => String(variables[String(name).trim()] ?? ''));
 }
 
-async function getOrCreateLabelId(name, cache) {
+async function getOrCreateLabelId(name, cache, request = gmailFetch) {
   const normalized = String(name || '').replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
   if (cache.has(normalized)) return cache.get(normalized);
-  const list = await gmailFetch('/labels');
+  const list = await request('/labels');
   const existing = (list.labels || []).find((label) => label.name === normalized);
   if (existing) {
     cache.set(normalized, existing.id);
     return existing.id;
   }
-  const created = await gmailFetch('/labels', {
+  const created = await request('/labels', {
     method: 'POST',
     body: JSON.stringify({ name: normalized, labelListVisibility: 'labelShow', messageListVisibility: 'show' })
   });
@@ -208,32 +446,32 @@ async function getOrCreateLabelId(name, cache) {
   return created.id;
 }
 
-async function applyLabel(messageId, labelName, cache) {
+async function applyLabel(messageId, labelName, cache, request = gmailFetch) {
   if (!messageId || !labelName) return;
-  const labelId = await getOrCreateLabelId(labelName, cache);
+  const labelId = await getOrCreateLabelId(labelName, cache, request);
   if (!labelId) return;
-  await gmailFetch(`/messages/${encodeURIComponent(messageId)}/modify`, {
+  await request(`/messages/${encodeURIComponent(messageId)}/modify`, {
     method: 'POST',
     body: JSON.stringify({ addLabelIds: [labelId], removeLabelIds: [] })
   });
 }
 
-async function removeLabel(messageId, labelName, cache) {
+async function removeLabel(messageId, labelName, cache, request = gmailFetch) {
   if (!messageId || !labelName) return;
-  const labelId = await getOrCreateLabelId(labelName, cache);
+  const labelId = await getOrCreateLabelId(labelName, cache, request);
   if (!labelId) return;
-  await gmailFetch(`/messages/${encodeURIComponent(messageId)}/modify`, {
+  await request(`/messages/${encodeURIComponent(messageId)}/modify`, {
     method: 'POST',
     body: JSON.stringify({ addLabelIds: [], removeLabelIds: [labelId] })
   });
 }
 
-async function createDraft(item, labelNames, labelCache, attachments) {
-  const draft = await gmailFetch('/drafts', {
+async function createDraft(item, labelNames, labelCache, attachments, request = gmailFetch) {
+  const draft = await request('/drafts', {
     method: 'POST',
     body: JSON.stringify({ message: { raw: createRawMessage(item, attachments) } })
   });
-  for (const labelName of labelNames.filter(Boolean)) await applyLabel(draft.message?.id, labelName, labelCache);
+  for (const labelName of labelNames.filter(Boolean)) await applyLabel(draft.message?.id, labelName, labelCache, request);
   return {
     draftId: draft.id,
     messageId: draft.message?.id || '',
@@ -258,6 +496,9 @@ async function updateDraftBatch(batchId, payload = {}) {
   const candidates = batch.items.filter((item) => item.draftId);
   if (!candidates.length) throw new Error('수정할 수 있는 Gmail 초안이 없습니다.');
 
+  const account = await verifiedGmailContext(batch.senderEmail);
+  if (!batch.senderEmail) batch.senderEmail = account.email;
+
   batch.draftEdit = {
     status: 'processing', total: candidates.length, processed: 0,
     updated: 0, skipped: 0, failed: 0, startedAt: nowIso(), completedAt: ''
@@ -272,7 +513,7 @@ async function updateDraftBatch(batchId, payload = {}) {
       body: [renderTemplate(bodyTemplate, item.variables).trim(), renderTemplate(postscriptTemplate, item.variables).trim()].filter(Boolean).join('\n\n')
     };
     try {
-      const draft = await gmailFetch(`/drafts/${encodeURIComponent(item.draftId)}`, {
+      const draft = await account.request(`/drafts/${encodeURIComponent(item.draftId)}`, {
         method: 'PUT',
         body: JSON.stringify({ message: { raw: createRawMessage(nextItem, attachments) } })
       });
@@ -287,7 +528,7 @@ async function updateDraftBatch(batchId, payload = {}) {
       item.draftEditError = '';
       item.updatedAt = nowIso();
       if (batch.label && item.messageId) {
-        try { await applyLabel(item.messageId, batch.label, labelCache); } catch (_) {}
+        try { await applyLabel(item.messageId, batch.label, labelCache, account.request); } catch (_) {}
       }
       batch.draftEdit.updated += 1;
     } catch (error) {
@@ -297,7 +538,7 @@ async function updateDraftBatch(batchId, payload = {}) {
         : (error?.message || '초안을 수정하지 못했습니다.');
       if (error?.status === 404) batch.draftEdit.skipped += 1;
       else batch.draftEdit.failed += 1;
-      if (error?.code === 'AUTH_REQUIRED') {
+      if (error?.code === 'AUTH_REQUIRED' || error?.code === 'ACCOUNT_MISMATCH') {
         batch.draftEdit.status = 'waiting-auth';
         batch.draftEdit.processed += 1;
         await saveBatches(batches);
@@ -325,12 +566,15 @@ async function checkDraftBatchStatus(batchId) {
   if (!batch) throw new Error('확인할 작업 기록을 찾을 수 없습니다.');
   if (batch.method !== '임시 저장') throw new Error('임시메일 작업만 Gmail 상태를 확인할 수 있습니다.');
 
+  const account = await verifiedGmailContext(batch.senderEmail);
+  if (!batch.senderEmail) batch.senderEmail = account.email;
+
   const draftIndex = new Map();
   let pageToken = '';
   do {
     const query = new URLSearchParams({ maxResults: '500' });
     if (pageToken) query.set('pageToken', pageToken);
-    const page = await gmailFetch(`/drafts?${query.toString()}`);
+    const page = await account.request(`/drafts?${query.toString()}`);
     (page.drafts || []).forEach((draft) => draftIndex.set(draft.id, draft));
     pageToken = page.nextPageToken || '';
   } while (pageToken);
@@ -353,16 +597,16 @@ async function checkDraftBatchStatus(batchId) {
   return { batchId, ...result };
 }
 
-async function sendMessage(item, attachments) {
-  const message = await gmailFetch('/messages/send', {
+async function sendMessage(item, attachments, request = gmailFetch) {
+  const message = await request('/messages/send', {
     method: 'POST',
     body: JSON.stringify({ raw: createRawMessage(item, attachments) })
   });
   return { messageId: message.id || '', threadId: message.threadId || '' };
 }
 
-async function sendDraft(item) {
-  const message = await gmailFetch('/drafts/send', {
+async function sendDraft(item, request = gmailFetch) {
+  const message = await request('/drafts/send', {
     method: 'POST',
     body: JSON.stringify({ id: item.draftId })
   });
@@ -376,21 +620,21 @@ function canProcess(item, now) {
   return item.status === 'queued';
 }
 
-async function processItem(batch, item, labelCache) {
+async function processItem(batch, item, labelCache, request) {
   const previousStatus = item.status;
   try {
     if (batch.method === '임시 저장') {
-      Object.assign(item, await createDraft(item, [batch.label], labelCache, batch.attachments));
+      Object.assign(item, await createDraft(item, [batch.label], labelCache, batch.attachments, request));
       item.status = 'completed';
     } else if (batch.method === '즉시 발송') {
-      Object.assign(item, await sendMessage(item, batch.attachments));
+      Object.assign(item, await sendMessage(item, batch.attachments, request));
       item.status = 'completed';
     } else if (previousStatus === 'queued') {
-      Object.assign(item, await createDraft(item, [batch.label, batch.scheduleLabel], labelCache, batch.attachments));
+      Object.assign(item, await createDraft(item, [batch.label, batch.scheduleLabel], labelCache, batch.attachments, request));
       item.status = 'scheduled';
     } else if (previousStatus === 'scheduled') {
-      Object.assign(item, await sendDraft(item));
-      await removeLabel(item.messageId, batch.scheduleLabel, labelCache);
+      Object.assign(item, await sendDraft(item, request));
+      await removeLabel(item.messageId, batch.scheduleLabel, labelCache, request);
       item.status = 'completed';
     }
     item.error = '';
@@ -399,7 +643,7 @@ async function processItem(batch, item, labelCache) {
   } catch (error) {
     item.error = error?.message || '알 수 없는 오류';
     item.updatedAt = nowIso();
-    if (error?.code === 'AUTH_REQUIRED' || error?.code === 'OAUTH_NOT_CONFIGURED') {
+    if (error?.code === 'AUTH_REQUIRED' || error?.code === 'OAUTH_NOT_CONFIGURED' || error?.code === 'ACCOUNT_MISMATCH') {
       item.status = 'waiting-auth';
       return;
     }
@@ -408,8 +652,8 @@ async function processItem(batch, item, labelCache) {
       item.status = 'failed';
       if (batch.method === '예약 발송' && item.messageId) {
         try {
-          await removeLabel(item.messageId, batch.scheduleLabel, labelCache);
-          await applyLabel(item.messageId, '예약발송 실패', labelCache);
+          await removeLabel(item.messageId, batch.scheduleLabel, labelCache, request);
+          await applyLabel(item.messageId, '예약발송 실패', labelCache, request);
         } catch (_) {}
       }
     }
@@ -437,6 +681,7 @@ function updateBatchSummary(batch) {
 
 async function scheduleNextRun(batches) {
   await chrome.alarms.clear(QUEUE_ALARM);
+  if (queuePausedForQuit) return;
   const times = [];
   batches.forEach((batch) => batch.items.forEach((item) => {
     if (item.status === 'queued') times.push(item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : Date.now() + 1000);
@@ -446,36 +691,94 @@ async function scheduleNextRun(batches) {
   if (next) await chrome.alarms.create(QUEUE_ALARM, { when: Math.max(next, Date.now() + 1000) });
 }
 
-async function processQueue() {
-  if (queueRunning) return { busy: true };
+function markBatchWaitingForAccount(batch, error) {
+  batch.items.forEach((item) => {
+    if (isTerminal(item.status)) return;
+    item.status = 'waiting-auth';
+    item.error = error?.message || '이 작업을 만든 Gmail 계정을 다시 연결해주세요.';
+    item.updatedAt = nowIso();
+  });
+  batch.currentItemId = '';
+  updateBatchSummary(batch);
+}
+
+async function acknowledgeBatchCancellation(batchId) {
+  cancelRequestedBatches.delete(batchId);
+  await updateCancelRequests((requests) => requests.delete(batchId));
+}
+
+async function cancelBatchInPlace(batch, request = null) {
+  let gmailRequest = request;
+  if (!gmailRequest && batch.items.some((item) => !isTerminal(item.status) && item.draftId)) {
+    try { gmailRequest = (await verifiedGmailContext(batch.senderEmail)).request; } catch (_) {}
+  }
+  for (const item of batch.items) {
+    if (isTerminal(item.status)) continue;
+    if (item.draftId && gmailRequest) {
+      try { await gmailRequest(`/drafts/${encodeURIComponent(item.draftId)}`, { method: 'DELETE' }); } catch (_) {}
+    }
+    item.status = 'canceled';
+    item.error = '';
+    item.updatedAt = nowIso();
+  }
+  batch.currentItemId = '';
+  updateBatchSummary(batch);
+}
+
+async function processQueueExclusive() {
   queueRunning = true;
   try {
     const batches = await getBatches();
+    (await getCancelRequests()).forEach((batchId) => cancelRequestedBatches.add(batchId));
     const labelCache = new Map();
     let processed = 0;
     const now = Date.now();
     for (const batch of batches) {
+      if (cancelRequestedBatches.has(batch.id)) {
+        await cancelBatchInPlace(batch);
+        await saveBatches(batches);
+        await acknowledgeBatchCancellation(batch.id);
+        continue;
+      }
+      if (batch.items.every((item) => isTerminal(item.status))) continue;
+      let account;
+      try {
+        account = await verifiedGmailContext(batch.senderEmail);
+        if (!batch.senderEmail) batch.senderEmail = account.email;
+      } catch (error) {
+        if (batch.items.some((item) => !isTerminal(item.status))) {
+          markBatchWaitingForAccount(batch, error);
+          await saveBatches(batches);
+        }
+        continue;
+      }
       for (const item of batch.items) {
         if (processed >= BATCH_SIZE) break;
+        if (cancelRequestedBatches.has(batch.id)) {
+          await cancelBatchInPlace(batch, account.request);
+          await saveBatches(batches);
+          await acknowledgeBatchCancellation(batch.id);
+          break;
+        }
         if (!canProcess(item, now)) continue;
         const statusBeforeProcessing = item.status;
         batch.currentItemId = item.id;
         batch.status = 'processing';
         batch.updatedAt = nowIso();
         await saveBatches(batches);
-        await processItem(batch, item, labelCache);
+        await processItem(batch, item, labelCache, account.request);
         processed += 1;
         if (cancelRequestedBatches.has(batch.id)) {
           const createdUnsentDraft = item.draftId && (batch.method === '임시 저장' || (batch.method === '예약 발송' && statusBeforeProcessing === 'queued'));
           if (createdUnsentDraft) {
-            try { await gmailFetch(`/drafts/${encodeURIComponent(item.draftId)}`, { method: 'DELETE' }); } catch (_) {}
+            try { await account.request(`/drafts/${encodeURIComponent(item.draftId)}`, { method: 'DELETE' }); } catch (_) {}
             item.status = 'canceled';
             item.error = '';
           }
           batch.items.forEach((pendingItem) => {
             if (!isTerminal(pendingItem.status) && pendingItem.id !== item.id) pendingItem.status = 'canceled';
           });
-          cancelRequestedBatches.delete(batch.id);
+          await acknowledgeBatchCancellation(batch.id);
         }
         batch.currentItemId = '';
         updateBatchSummary(batch);
@@ -485,6 +788,8 @@ async function processQueue() {
       if (processed >= BATCH_SIZE) break;
     }
     await saveBatches(batches);
+    const knownBatchIds = new Set(batches.map((batch) => batch.id));
+    for (const batchId of [...cancelRequestedBatches]) if (!knownBatchIds.has(batchId)) await acknowledgeBatchCancellation(batchId);
     await scheduleNextRun(batches);
     return { processed };
   } finally {
@@ -492,81 +797,114 @@ async function processQueue() {
   }
 }
 
-async function enqueueBatch(payload) {
+function processQueue() {
+  if (queuePausedForQuit) return Promise.resolve({ paused: true });
+  if (queueRunPromise) return queueRunPromise;
+  const operation = runMailBatchOperation(() => runAccountOperation(processQueueExclusive));
+  queueRunPromise = operation;
+  const clear = () => { if (queueRunPromise === operation) queueRunPromise = null; };
+  operation.then(clear, clear);
+  return operation;
+}
+
+async function prepareMailQueueForQuit() {
+  queuePausedForQuit = true;
+  await chrome.alarms.clear(QUEUE_ALARM);
+  await waitForMailBatchOperations();
+  return { idle: true, paused: true };
+}
+
+async function resumeMailQueueAfterQuitCanceled() {
+  queuePausedForQuit = false;
   const batches = await getBatches();
-  const createdAt = nowIso();
-  const batch = {
-    id: crypto.randomUUID(),
-    name: String(payload.name || payload.label || payload.subject || payload.method || '메일 작업').trim(),
-    method: payload.method,
-    senderEmail: String(payload.senderEmail || '').trim(),
-    attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
-    subjectTemplate: String(payload.subjectTemplate ?? payload.subject ?? ''),
-    bodyTemplate: String(payload.bodyTemplate ?? ''),
-    postscriptTemplate: String(payload.postscriptTemplate ?? ''),
-    label: payload.method === '즉시 발송' ? '' : String(payload.label || '').trim(),
-    scheduleLabel: payload.method === '예약 발송' && payload.scheduledAt
-      ? `예약_${new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(payload.scheduledAt)).replace(' ', '_').replace(':', '시')}분`
-      : '',
-    scheduledAt: payload.scheduledAt || '',
-    status: 'queued',
-    total: payload.items.length,
-    completed: 0,
-    failed: 0,
-    createdAt,
-    updatedAt: createdAt,
-    items: payload.items.map((item, index) => ({
-      ...item,
-      id: `${crypto.randomUUID()}-${index + 1}`,
-      status: 'queued',
-      attempts: 0,
-      error: '',
-      draftId: '',
-      messageId: '',
-      threadId: '',
+  if ((await getCancelRequests()).length || batches.some((batch) => batch.items.some((item) => item.status === 'queued' || item.status === 'scheduled'))) return processQueue();
+  await scheduleNextRun(batches);
+  return { resumed: true };
+}
+
+async function enqueueBatch(payload) {
+  const batchId = await runMailBatchOperation(() => runAccountOperation(async () => {
+    const account = await verifiedGmailContext(payload.senderEmail);
+    const batches = await getBatches();
+    const createdAt = nowIso();
+    const batch = {
+      id: crypto.randomUUID(),
+      name: String(payload.name || payload.label || payload.subject || payload.method || '메일 작업').trim(),
+      method: payload.method,
+      senderEmail: account.email,
+      attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+      subjectTemplate: String(payload.subjectTemplate ?? payload.subject ?? ''),
+      bodyTemplate: String(payload.bodyTemplate ?? ''),
+      postscriptTemplate: String(payload.postscriptTemplate ?? ''),
+      label: payload.method === '즉시 발송' ? '' : String(payload.label || '').trim(),
+      scheduleLabel: payload.method === '예약 발송' && payload.scheduledAt
+        ? `예약_${new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(payload.scheduledAt)).replace(' ', '_').replace(':', '시')}분`
+        : '',
       scheduledAt: payload.scheduledAt || '',
+      status: 'queued',
+      total: payload.items.length,
+      completed: 0,
+      failed: 0,
       createdAt,
-      updatedAt: createdAt
-    }))
-  };
-  batches.unshift(batch);
-  await saveBatches(batches);
+      updatedAt: createdAt,
+      items: payload.items.map((item, index) => ({
+        ...item,
+        id: `${crypto.randomUUID()}-${index + 1}`,
+        status: 'queued',
+        attempts: 0,
+        error: '',
+        draftId: '',
+        messageId: '',
+        threadId: '',
+        scheduledAt: payload.scheduledAt || '',
+        createdAt,
+        updatedAt: createdAt
+      }))
+    };
+    batches.unshift(batch);
+    await saveBatches(batches);
+    return batch.id;
+  }));
   await processQueue();
-  const updated = (await getBatches()).find((item) => item.id === batch.id) || batch;
-  return updated;
+  return runMailBatchOperation(async () => {
+    const updated = (await getBatches()).find((item) => item.id === batchId);
+    if (!updated) throw new Error('등록한 메일 작업을 다시 찾지 못했습니다.');
+    return updated;
+  });
 }
 
 async function resumeWaitingAuth() {
-  const batches = await getBatches();
-  batches.forEach((batch) => batch.items.forEach((item) => {
-    if (item.status === 'waiting-auth') {
-      item.status = item.draftId && batch.method === '예약 발송' ? 'scheduled' : 'queued';
-      item.error = '';
-    }
+  await runMailBatchOperation(() => runAccountOperation(async () => {
+    const account = await verifiedGmailContext();
+    const batches = await getBatches();
+    batches.forEach((batch) => {
+      if (!batch.senderEmail) batch.senderEmail = account.email;
+      const matches = normalizeEmail(batch.senderEmail) === account.email;
+      batch.items.forEach((item) => {
+        if (item.status !== 'waiting-auth') return;
+        if (!matches) {
+          item.error = accountMismatchError(normalizeEmail(batch.senderEmail), account.email).message;
+          return;
+        }
+        item.status = item.draftId && batch.method === '예약 발송' ? 'scheduled' : 'queued';
+        item.error = '';
+      });
+      updateBatchSummary(batch);
+    });
+    await saveBatches(batches);
   }));
-  await saveBatches(batches);
   return processQueue();
 }
 
-async function cancelBatch(batchId) {
+async function requestBatchCancellation(batchId) {
   const batches = await getBatches();
   const batch = batches.find((item) => item.id === batchId);
   if (!batch) throw new Error('작업을 찾을 수 없습니다.');
-  if (batch.currentItemId) cancelRequestedBatches.add(batchId);
-  for (const item of batch.items) {
-    if (isTerminal(item.status)) continue;
-    if (item.id === batch.currentItemId) continue;
-    if (item.draftId) {
-      try { await gmailFetch(`/drafts/${encodeURIComponent(item.draftId)}`, { method: 'DELETE' }); } catch (_) {}
-    }
-    item.status = 'canceled';
-    item.updatedAt = nowIso();
-  }
-  updateBatchSummary(batch);
-  if (batch.currentItemId) batch.status = 'canceling';
-  await saveBatches(batches);
-  await scheduleNextRun(batches);
-  return batch;
+  if (batch.items.every((item) => isTerminal(item.status))) return batch;
+  cancelRequestedBatches.add(batchId);
+  await updateCancelRequests((requests) => requests.add(batchId));
+  await chrome.alarms.create(QUEUE_ALARM, { when: Date.now() + 1000 });
+  return { ...batch, status: 'canceling' };
 }
 
 async function deleteBatch(batchId) {
@@ -581,9 +919,8 @@ async function connectionStatus() {
   const configured = !getOAuthClientId().includes(OAUTH_PLACEHOLDER);
   if (!configured) return { configured: false, connected: false, email: '', rememberedEmail: '' };
   try {
-    await getToken(false, [GMAIL_SCOPE]);
-    const profile = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
-    return { configured: true, connected: true, email: profile?.email || '', rememberedEmail: profile?.email || '' };
+    const account = await verifiedGmailContext();
+    return { configured: true, connected: true, email: account.email, rememberedEmail: account.email };
   } catch (error) {
     let rememberedEmail = '';
     try {
@@ -596,28 +933,38 @@ async function connectionStatus() {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
+    if (queuePausedForQuit && MAIL_MUTATION_MESSAGES.has(message.type)) throw mailQueueShutdownError();
     if (message.type === 'connection-status') return connectionStatus();
     if (message.type === 'authorize-drive-sync') {
-      await getToken(true, [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE]);
-      return { authorized: true };
+      const drive = await verifiedDriveContext(message.expectedAccount, true);
+      return { authorized: true, email: drive.email };
     }
-    if (message.type === 'cloud-sync-download') return downloadCloudSnapshot();
-    if (message.type === 'cloud-sync-upload') return uploadCloudSnapshot(message.snapshot);
+    if (message.type === 'cloud-sync-download') return downloadCloudSnapshot(await verifiedDriveContext(message.expectedAccount));
+    if (message.type === 'cloud-sync-verify') return verifyCloudSyncFile(await verifiedDriveContext(message.expectedAccount), message.expectedFile);
+    if (message.type === 'cloud-sync-upload') return uploadCloudSnapshot(await verifiedDriveContext(message.expectedAccount), message.snapshot, message.expectedFile);
     if (message.type === 'process-queue') return processQueue();
+    if (message.type === 'flush-mail-queue') return waitForMailBatchOperations();
+    if (message.type === 'prepare-mail-queue-for-quit') return prepareMailQueueForQuit();
+    if (message.type === 'resume-mail-queue-after-quit-canceled') return resumeMailQueueAfterQuitCanceled();
     if (message.type === 'resume-after-auth') return resumeWaitingAuth();
     if (message.type === 'enqueue-mail-batch') return enqueueBatch(message.payload);
-    if (message.type === 'update-draft-batch') return updateDraftBatch(message.batchId, message.payload);
-    if (message.type === 'check-draft-batch-status') return checkDraftBatchStatus(message.batchId);
-    if (message.type === 'cancel-mail-batch') return cancelBatch(message.batchId);
-    if (message.type === 'delete-mail-batch') return deleteBatch(message.batchId);
+    if (message.type === 'update-draft-batch') return runMailBatchOperation(() => runAccountOperation(() => updateDraftBatch(message.batchId, message.payload)));
+    if (message.type === 'check-draft-batch-status') return runMailBatchOperation(() => runAccountOperation(() => checkDraftBatchStatus(message.batchId)));
+    if (message.type === 'cancel-mail-batch') return runCancelOperation(() => requestBatchCancellation(message.batchId));
+    if (message.type === 'delete-mail-batch') return runMailBatchOperation(() => deleteBatch(message.batchId));
     throw new Error('지원하지 않는 요청입니다.');
   })().then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: error.message, code: error.code || '' }));
   return true;
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === QUEUE_ALARM) processQueue();
+  if (alarm.name === QUEUE_ALARM) void processQueue().catch(console.error);
 });
 
-chrome.runtime.onStartup.addListener(async () => scheduleNextRun(await getBatches()));
-chrome.runtime.onInstalled.addListener(async () => scheduleNextRun(await getBatches()));
+async function restoreMailQueueSchedule() {
+  if ((await getCancelRequests()).length) return processQueue();
+  return scheduleNextRun(await getBatches());
+}
+
+chrome.runtime.onStartup.addListener(() => restoreMailQueueSchedule().catch(console.error));
+chrome.runtime.onInstalled.addListener(() => restoreMailQueueSchedule().catch(console.error));

@@ -1,11 +1,43 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { createTransactionQueue } = require('./transaction-queue');
+
+const CLOUD_IDENTITY_MESSAGES = new Set(['connection-status', 'authorize-drive-sync', 'cloud-sync-download', 'cloud-sync-verify', 'cloud-sync-upload']);
+function appShuttingDownError() {
+  const error = new Error('앱 종료 준비 중에는 Gmail 계정이나 메일 작업을 변경할 수 없습니다.');
+  error.code = 'APP_SHUTTING_DOWN';
+  return error;
+}
+
+function createTrackedTransactionQueue() {
+  const run = createTransactionQueue();
+  const pending = new Set();
+  const execute = (operation) => {
+    const result = run(operation);
+    pending.add(result);
+    const remove = () => pending.delete(result);
+    result.then(remove, remove);
+    return result;
+  };
+  execute.drain = async () => {
+    let failure = null;
+    while (pending.size) {
+      const results = await Promise.allSettled([...pending]);
+      const rejected = results.find((result) => result.status === 'rejected');
+      if (!failure && rejected) failure = rejected.reason;
+    }
+    if (failure) throw failure;
+  };
+  return execute;
+}
 
 class GmailFlowHost {
   constructor({ app, BrowserWindow, ipcMain, safeStorage, shell, rootPath, showWindow, isSmokeTest = false }) {
     this.app = app; this.BrowserWindow = BrowserWindow; this.ipcMain = ipcMain; this.safeStorage = safeStorage; this.shell = shell;
-    this.rootPath = rootPath; this.showWindow = showWindow; this.isSmokeTest = isSmokeTest; this.timers = new Map(); this.alarmListeners = new Set(); this.runtimeListeners = new Set(); this.startupListeners = new Set(); this.installedListeners = new Set();
+    this.rootPath = rootPath; this.showWindow = showWindow; this.isSmokeTest = isSmokeTest; this.timers = new Map(); this.alarmListeners = new Set(); this.runtimeListeners = new Set(); this.startupListeners = new Set(); this.installedListeners = new Set(); this.shutdownPrepared = false;
+    this.runCloudIdentityOperation = createTrackedTransactionQueue();
+    this.runStorageOperation = createTrackedTransactionQueue();
   }
 
   get preloadPath() { return path.join(this.rootPath, 'desktop', 'preload.js'); }
@@ -37,8 +69,9 @@ class GmailFlowHost {
 
   async importLegacyRosters(rosters = []) {
     const migrationKey = 'workspaceRosterMigrationV1';
-    if (await this.storage.get(migrationKey, false)) return { imported: 0 };
-    const saved = await this.storage.get('savedRosters', []);
+    const migrationState = await this.storage.get({ [migrationKey]: false, savedRosters: [] });
+    if (migrationState[migrationKey]) return { imported: 0 };
+    const saved = Array.isArray(migrationState.savedRosters) ? migrationState.savedRosters : [];
     const existingIds = new Set(saved.map((item) => item.id));
     const imported = (Array.isArray(rosters) ? rosters : []).filter((roster) => roster?.id && !existingIds.has(`workspace-${roster.id}`)).map((roster) => {
       const columns = (roster.columns || []).map((column, index) => ({
@@ -56,23 +89,33 @@ class GmailFlowHost {
         createdAt: roster.savedAt || new Date().toISOString(), updatedAt: roster.savedAt || new Date().toISOString()
       };
     });
-    if (imported.length) await this.storage.set('savedRosters', [...imported, ...saved]);
-    await this.storage.set(migrationKey, true);
+    if (imported.length) await this.storage.set({ savedRosters: [...imported, ...saved] });
+    await this.storage.set({ [migrationKey]: true });
     return { imported: imported.length };
   }
 
   createChromeCompatibility() {
     global.chrome = {
-      storage: { local: { get: (keys) => this.storage.get(keys), set: (values) => this.storage.set(values) } },
-      identity: { getAuthToken: ({ interactive = false, scopes, loginHint = '', selectAccount = false } = {}) => this.oauth.getToken(interactive, scopes, { loginHint, selectAccount }), removeCachedAuthToken: () => this.oauth.invalidateAccessToken(), clearAllCachedAuthTokens: () => this.oauth.clear(), getProfileUserInfo: () => this.oauth.getProfile() },
+      storage: { local: { get: (keys) => this.storage.get(keys), set: (values) => this.runStorageOperation(() => this.storage.set(values)) } },
+      identity: {
+        getAuthToken: ({ interactive = false, scopes, loginHint = '', selectAccount = false } = {}) => this.oauth.getToken(interactive, scopes, { loginHint, selectAccount }),
+        removeCachedAuthToken: () => this.oauth.invalidateAccessToken(),
+        clearAllCachedAuthTokens: () => this.oauth.clear(),
+        getProfileUserInfo: () => this.oauth.getProfile(),
+        runAccountOperation: (operation) => this.runCloudIdentityOperation(operation)
+      },
       runtime: { getManifest: () => ({ oauth2: { client_id: '1055778436707-kcjul780j0o7m4pu29bkpj2v6bn0e2r8.apps.googleusercontent.com' } }), onMessage: { addListener: (listener) => this.runtimeListeners.add(listener) }, onStartup: { addListener: (listener) => this.startupListeners.add(listener) }, onInstalled: { addListener: (listener) => this.installedListeners.add(listener) } },
       alarms: { clear: async (name) => { if (this.timers.has(name)) clearTimeout(this.timers.get(name)); this.timers.delete(name); return true; }, create: async (name, info = {}) => { if (this.timers.has(name)) clearTimeout(this.timers.get(name)); const delay = Math.max(0, Number(info.when || Date.now()) - Date.now()); this.timers.set(name, setTimeout(() => { this.timers.delete(name); this.alarmListeners.forEach((listener) => listener({ name, scheduledTime: info.when })); }, Math.min(delay, 2_147_483_647))); }, onAlarm: { addListener: (listener) => this.alarmListeners.add(listener) } }
     };
   }
 
-  dispatchRuntimeMessage(message) {
-    const listener = [...this.runtimeListeners][0]; if (!listener) return Promise.reject(new Error('Gmail Flow 백그라운드 작업이 준비되지 않았습니다.'));
-    return new Promise((resolve, reject) => { let settled = false; const sendResponse = (response) => { if (!settled) { settled = true; resolve(response); } }; try { const result = listener(message, {}, sendResponse); if (result !== true && result !== undefined && !settled) Promise.resolve(result).then(sendResponse, reject); } catch (error) { reject(error); } });
+  dispatchRuntimeMessage(message, { allowDuringShutdown = false } = {}) {
+    if (this.shutdownPrepared && !allowDuringShutdown) return Promise.reject(appShuttingDownError());
+    const invoke = () => {
+      const listener = [...this.runtimeListeners][0]; if (!listener) return Promise.reject(new Error('Gmail Flow 백그라운드 작업이 준비되지 않았습니다.'));
+      return new Promise((resolve, reject) => { let settled = false; const sendResponse = (response) => { if (!settled) { settled = true; resolve(response); } }; try { const result = listener(message, {}, sendResponse); if (result !== true && result !== undefined && !settled) Promise.resolve(result).then(sendResponse, reject); } catch (error) { reject(error); } });
+    };
+    return CLOUD_IDENTITY_MESSAGES.has(message?.type) ? this.runCloudIdentityOperation(invoke) : invoke();
   }
 
   async openGoogleUrl(url) {
@@ -97,15 +140,42 @@ class GmailFlowHost {
     };
   }
 
+  async flushMailQueue() {
+    const response = await this.dispatchRuntimeMessage({ type: 'prepare-mail-queue-for-quit' }, { allowDuringShutdown: true });
+    if (!response?.ok) throw new Error(response?.error || 'Gmail 메일 작업 저장 완료를 확인하지 못했습니다.');
+    this.shutdownPrepared = true;
+    const drains = await Promise.allSettled([
+      this.runCloudIdentityOperation.drain(),
+      this.runStorageOperation.drain()
+    ]);
+    const failed = drains.find((result) => result.status === 'rejected');
+    if (failed) throw failed.reason;
+    return response.data || { idle: true };
+  }
+
+  async resumeMailQueue() {
+    this.shutdownPrepared = false;
+    const response = await this.dispatchRuntimeMessage({ type: 'resume-mail-queue-after-quit-canceled' }, { allowDuringShutdown: true });
+    if (!response?.ok) throw new Error(response?.error || 'Gmail 메일 작업을 다시 시작하지 못했습니다.');
+    return response.data || { resumed: true };
+  }
+
   registerIpc() {
     this.ipcMain.handle('storage:get', (_event, keys) => this.storage.get(keys));
-    this.ipcMain.handle('storage:set', (_event, values) => this.storage.set(values));
+    this.ipcMain.handle('storage:set', (_event, values) => {
+      if (this.shutdownPrepared) return Promise.reject(appShuttingDownError());
+      return this.runStorageOperation(() => this.storage.set(values));
+    });
     this.ipcMain.handle('runtime:message', (_event, message) => this.dispatchRuntimeMessage(message));
-    this.ipcMain.handle('identity:get-auth-token', (_event, options) => this.oauth.getToken(Boolean(options?.interactive), options?.scopes, { loginHint: options?.loginHint || '', selectAccount: Boolean(options?.selectAccount) }));
-    this.ipcMain.handle('identity:clear-auth-tokens', () => this.oauth.clear());
-    this.ipcMain.handle('identity:remove-cached-token', () => this.oauth.invalidateAccessToken());
-    this.ipcMain.handle('identity:get-profile', () => this.oauth.getProfile());
-    this.ipcMain.handle('gmail-flow:summary', () => this.summary());
+    const runRendererIdentityOperation = (operation) => {
+      if (this.shutdownPrepared) return Promise.reject(appShuttingDownError());
+      return this.runCloudIdentityOperation(operation);
+    };
+    this.ipcMain.handle('identity:get-auth-token', (_event, options) => runRendererIdentityOperation(() => this.oauth.getToken(Boolean(options?.interactive), options?.scopes, { loginHint: options?.loginHint || '', selectAccount: Boolean(options?.selectAccount) })));
+    this.ipcMain.handle('identity:clear-auth-tokens', () => runRendererIdentityOperation(() => this.oauth.clear()));
+    this.ipcMain.handle('identity:remove-cached-token', () => runRendererIdentityOperation(() => this.oauth.invalidateAccessToken()));
+    this.ipcMain.handle('identity:get-profile', () => runRendererIdentityOperation(() => this.oauth.getProfile()));
+    this.ipcMain.handle('gmail-flow:summary', () => runRendererIdentityOperation(() => this.summary()));
     this.ipcMain.handle('window:show', () => { this.showWindow(); return { ok: true }; });
     this.ipcMain.handle('external:open-google', async (_event, url) => { try { return { ok: true, data: await this.openGoogleUrl(url) }; } catch (error) { return { ok: false, error: error.message }; } });
   }

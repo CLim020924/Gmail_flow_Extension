@@ -198,6 +198,7 @@
   function stableArrayItemKey(item) {
     if (!isPlainObject(item)) return null;
     if (item.id !== undefined && item.id !== null && String(item.id) !== '') return `id:${typeof item.id}:${String(item.id)}`;
+    if (item.formId !== undefined && item.formId !== null && String(item.formId) !== '') return `form:${typeof item.formId}:${String(item.formId)}`;
     if (item.kind !== undefined && item.externalId !== undefined && item.externalId !== null && String(item.externalId) !== '') {
       return `artifact:${String(item.kind || 'artifact')}:${typeof item.externalId}:${String(item.externalId)}`;
     }
@@ -235,10 +236,17 @@
     const currentUnchanged = currentHas === baseHas && (!currentHas || mergeValuesEqual(currentValue, baseValue));
     const incomingUnchanged = incomingHas === baseHas && (!incomingHas || mergeValuesEqual(incomingValue, baseValue));
     const branchesEqual = currentHas === incomingHas && (!currentHas || mergeValuesEqual(currentValue, incomingValue));
+    const artifactTerminal = currentHas && incomingHas && isPlainObject(currentValue) && isPlainObject(incomingValue)
+      && [baseValue, currentValue, incomingValue].some((value) => isPlainObject(value) && value.kind && (value.externalId || value.slotId || value.personId))
+      && [baseValue, currentValue, incomingValue].some((value) => isPlainObject(value) && value.status === 'superseded');
+    const artifactArrayTerminal = currentHas && incomingHas && Array.isArray(currentValue) && Array.isArray(incomingValue)
+      && [baseValue, currentValue, incomingValue].some((value) => Array.isArray(value) && value.some((item) => isPlainObject(item) && item.kind && item.status === 'superseded'));
+
+    if (artifactTerminal) return { present: true, value: mergeObjectValues(isPlainObject(baseValue) ? baseValue : {}, currentValue, incomingValue) };
+    if (artifactArrayTerminal) return { present: true, value: mergeArrayValues(Array.isArray(baseValue) ? baseValue : [], currentValue, incomingValue) };
 
     if (branchesEqual) return currentHas ? { present: true, value: cloneMergeValue(currentValue) } : { present: false };
     if (incomingUnchanged) return currentHas ? { present: true, value: cloneMergeValue(currentValue) } : { present: false };
-    if (currentUnchanged) return incomingHas ? { present: true, value: cloneMergeValue(incomingValue) } : { present: false };
     if (!incomingHas) return { present: false };
     if (!currentHas) return { present: true, value: cloneMergeValue(incomingValue) };
 
@@ -250,6 +258,7 @@
       const arrayBase = Array.isArray(baseValue) ? baseValue : [];
       return { present: true, value: mergeArrayValues(arrayBase, currentValue, incomingValue) };
     }
+    if (currentUnchanged) return { present: true, value: cloneMergeValue(incomingValue) };
     return { present: true, value: cloneMergeValue(incomingValue) };
   }
 
@@ -264,6 +273,15 @@
       );
       if (merged.present) result[key] = merged.value;
     });
+    const artifactLike = [base, current, incoming].some((value) => isPlainObject(value) && value.kind && (value.externalId || value.slotId || value.personId));
+    if (artifactLike) {
+      const terminal = [current, incoming, base].find((value) => isPlainObject(value) && value.status === 'superseded');
+      if (terminal) {
+        result.status = 'superseded';
+        if (terminal.replacedAt) result.replacedAt = terminal.replacedAt;
+        if (terminal.replacementReason) result.replacementReason = terminal.replacementReason;
+      }
+    }
     return result;
   }
 
@@ -894,6 +912,67 @@
     return { state, connection };
   }
 
+  function connectionIdentity(connection) {
+    if (!connection) return null;
+    return {
+      id: String(connection.id || ''),
+      type: String(connection.type || ''),
+      status: String(connection.status || ''),
+      account: String(connection.account || '').trim().toLowerCase(),
+      updatedAt: String(connection.updatedAt || '')
+    };
+  }
+
+  function connectionIdentityMatches(connection, expectedIdentity) {
+    const actual = connectionIdentity(connection);
+    const expected = connectionIdentity(expectedIdentity);
+    return Boolean(actual && expected && mergeValuesEqual(actual, expected));
+  }
+
+  function applyConnectionAuthorization(stateInput, connectionId, status = {}, reason = '로그인 계정 변경 후 기존 외부 항목 재확인 필요') {
+    const state = normalizeState(stateInput);
+    const connection = state.connections.find((item) => item.id === connectionId);
+    if (!connection) return { state, connection: null, accountChanged: false, retiredArtifacts: 0, reviewedForms: 0 };
+    const previousAccount = String(connection.account || '').trim().toLowerCase();
+    connection.status = status.connected ? 'connected' : 'needsAuth';
+    connection.account = String(status.account || connection.account || '').trim();
+    connection.updatedAt = nowIso();
+    const nextAccount = connection.account.toLowerCase();
+    const accountChanged = Boolean(status.connected && (!previousAccount || previousAccount !== nextAccount));
+    let retiredArtifacts = 0;
+    let reviewedForms = 0;
+    if (accountChanged) {
+      const artifactKind = connection.type === 'gmail' ? 'gmailDraft' : connection.type === 'zoom' ? 'zoom' : '';
+      const moduleId = connection.type === 'gmail' ? 'gmailFlow' : connection.type;
+      [...state.projects, ...Object.values(state.quickWorkspaces || {})].forEach((project) => {
+        let changed = false;
+        if (artifactKind) {
+          project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => {
+            if (artifact.kind !== artifactKind || artifact.connectionId !== connection.id || artifact.status === 'superseded') return artifact;
+            changed = true; retiredArtifacts += 1;
+            return { ...artifact, status: 'superseded', replacedAt: nowIso(), replacementReason: reason };
+          });
+        }
+        if (connection.type === 'forms') {
+          project.data.forms.linkedForms = project.data.forms.linkedForms.map((linked) => {
+            if (linked.connectionId !== connection.id) return linked;
+            changed = true; reviewedForms += 1;
+            return { ...linked, needsReview: true, reviewReason: reason };
+          });
+        }
+        if (!changed) return;
+        const stamp = nowIso();
+        if (project.installedModules.includes(moduleId)) {
+          project.moduleState[moduleId] = { status: 'needsReview', summary: reason, updatedAt: stamp };
+          project.workflow = project.workflow.map((step) => step.moduleId === moduleId ? { ...step, status: 'needsReview', updatedAt: stamp } : step);
+        }
+        project.updatedAt = stamp;
+      });
+    }
+    state.updatedAt = nowIso();
+    return { state, connection, accountChanged, retiredArtifacts, reviewedForms };
+  }
+
   function removeConnection(stateInput, connectionId) {
     const state = normalizeState(stateInput);
     state.connections = state.connections.filter((connection) => connection.id !== connectionId);
@@ -944,6 +1023,9 @@
     saveWorkflowTemplate,
     removeWorkflowTemplate,
     addConnection,
+    connectionIdentity,
+    connectionIdentityMatches,
+    applyConnectionAuthorization,
     removeConnection,
     getActiveProject,
     getProjectProgress

@@ -48,7 +48,7 @@ class JsonStorage {
 
   async persist() {
     const snapshot = JSON.stringify(this.data, null, 2);
-    this.writeChain = this.writeChain.then(() => {
+    const operation = this.writeChain.catch(() => {}).then(() => {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
       const temporaryPath = `${this.filePath}.tmp`;
       fs.writeFileSync(temporaryPath, snapshot, 'utf8');
@@ -60,7 +60,8 @@ class JsonStorage {
         fs.renameSync(temporaryPath, this.filePath);
       }
     });
-    return this.writeChain;
+    this.writeChain = operation.catch(() => {});
+    return operation;
   }
 }
 

@@ -26,6 +26,12 @@ try {
   assert.ok(new ExcelJS.Workbook(), 'ExcelJS Workbook initialization failed.');
 
   const resources = Array.isArray(packageJson.build?.extraResources) ? packageJson.build.extraResources : [];
+  assert.equal(packageJson.build?.beforeBuild, 'scripts/electron-builder-hooks.js', 'electron-builder must use the self-contained runtime hook.');
+  assert.equal(typeof require(path.join(workspaceRoot, packageJson.build.beforeBuild)).beforeBuild, 'function', 'electron-builder beforeBuild hook is invalid.');
+  assert.ok((packageJson.build?.files || []).includes('desktop/**/*'), 'electron-builder must package all desktop runtime modules.');
+  ['desktop/drive-sync-guard.js', 'desktop/external-commit.js', 'desktop/transaction-queue.js'].forEach((relativePath) => {
+    assert.equal(fs.existsSync(path.join(workspaceRoot, relativePath)), true, `Critical desktop runtime is missing: ${relativePath}`);
+  });
   const vendorResource = resources.find((entry) => entry?.from === 'vendor/node_modules' && entry?.to === 'vendor/node_modules');
   assert.ok(vendorResource, 'electron-builder extraResources must copy vendor/node_modules.');
 
