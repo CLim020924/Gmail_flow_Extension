@@ -1251,9 +1251,9 @@
     state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${roster.people?.length || 0}명`); option.value = roster.id; rosterSelect.append(option); });
     const table = $('#rosterEditorTable');
     if (!project.data.columns.length) {
-      const letterRow = element('tr', 'sheet-letter-row'); const corner = element('th', 'sheet-corner', ''); corner.dataset.selectRosterAll = 'true'; letterRow.append(corner, element('th', 'sheet-letter', 'A'));
+      const letterRow = element('tr', 'sheet-letter-row'); const corner = element('th', 'sheet-corner', ''); letterRow.append(corner, element('th', 'sheet-letter', 'A'));
       const headRow = element('tr'); headRow.append(element('th', 'sheet-row-number', '1'));
-      const first = element('th', 'empty-sheet-header'); first.dataset.sheetRow = '0'; first.dataset.sheetCol = '0';
+      const first = element('th', 'empty-sheet-header');
       const add = element('button', 'add-empty-column', '＋ 첫 번째 열 만들기'); add.type = 'button'; add.dataset.emptySheetAddColumn = 'true'; first.append(add); headRow.append(first);
       table.tHead.replaceChildren(letterRow, headRow);
       const rows = Array.from({ length: 5 }, (_, index) => {
