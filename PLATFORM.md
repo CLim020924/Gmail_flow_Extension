@@ -4,13 +4,13 @@
 
 - Gmail Flow만 개발하려면 저장소 루트의 기존 명령을 사용합니다.
 - 전체 플랫폼을 실행하거나 설치 파일로 만들려면 `workspace/README.md`를 따릅니다.
-- 배포용 Windows 설치 파일은 Git 커밋에 넣지 않고 GitHub Releases에 첨부합니다.
+- 배포용 Windows 설치 파일은 Git 커밋에 넣지 않습니다. 설치본 smoke를 통과한 파일만 별도로 전달하거나 GitHub Releases에 수동으로 첨부합니다.
 
 ## 빠른 시작
 
 ```powershell
 cd workspace
-npm install
+npm ci
 npm run desktop
 ```
 
@@ -18,5 +18,9 @@ npm run desktop
 
 ```powershell
 cd workspace
+npm ci
+npm run preflight:build
+npm test
+npm run smoke
 npm run build:installer
 ```
