@@ -1703,8 +1703,15 @@ app.whenReady().then(async () => {
         clearTimeout(timeout);
         console.log('Workspace smoke test passed.');
         writeSmokeResult('passed', { step: 'complete' });
-        isQuitting = true;
-        app.exit(result?.passed ? 0 : 1);
+        const shutdownWatchdog = setTimeout(() => {
+          console.error('Workspace smoke test failed: graceful shutdown timed out.');
+          writeSmokeResult('failed', { step: 'shutdown-timeout' });
+          isQuitting = true;
+          app.exit(1);
+        }, 30_000);
+        shutdownWatchdog.unref?.();
+        app.once('quit', () => clearTimeout(shutdownWatchdog));
+        app.quit();
       } catch (error) {
         clearTimeout(timeout);
         console.error('Workspace smoke test failed:', error);
