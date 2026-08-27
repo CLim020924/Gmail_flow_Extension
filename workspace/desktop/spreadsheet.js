@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const Ops = require('../operations-core');
 const packagedExcelJs = process.resourcesPath ? path.join(process.resourcesPath, 'vendor', 'node_modules', 'exceljs') : '';
 const ExcelJS = require(packagedExcelJs && fs.existsSync(packagedExcelJs) ? packagedExcelJs : path.join(__dirname, '..', 'vendor', 'node_modules', 'exceljs'));
 
@@ -97,7 +98,7 @@ async function exportProjectWorkbook(filePath, project) {
   const conflicts = workbook.addWorksheet('확인 필요');
   conflicts.columns = [{ header: '종류', key: 'type', width: 18 }, { header: '내용', key: 'message', width: 80 }];
   styleHeader(conflicts.getRow(1));
-  project.data.conflicts.forEach((conflict) => conflicts.addRow({ type: conflict.type, message: conflict.message }));
+  Ops.collectScheduleConflicts(project).forEach((conflict) => conflicts.addRow({ type: conflict.type, message: conflict.message }));
 
   await workbook.xlsx.writeFile(filePath);
 }

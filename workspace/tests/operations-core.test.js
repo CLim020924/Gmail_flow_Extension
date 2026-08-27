@@ -18,6 +18,23 @@ assert.equal(roster.people[0].email, 'cs-smile@naver.com');
 const parsedSlots = Ops.parseSlots('2026-07-06 09:30-10:30\n2026/07/06 10:30-11:30 오전반');
 assert.equal(parsedSlots.errors.length, 0);
 assert.equal(parsedSlots.slots.length, 2);
+const impossibleDate = Ops.parseSlots('2026-02-31 09:30-10:30');
+assert.equal(impossibleDate.slots.length, 0);
+assert.match(impossibleDate.errors[0], /실제 날짜/);
+const invalidTime = Ops.parseSlots('2026-08-20 25:99-26:88');
+assert.equal(invalidTime.slots.length, 0);
+assert.match(invalidTime.errors.join('\n'), /HH:MM/);
+const reversedRange = Ops.parseSlots('2026-08-20 10:00-09:00');
+assert.equal(reversedRange.slots.length, 0);
+assert.match(reversedRange.errors[0], /종료 시간은 시작 시간보다 늦어야/);
+const nonStrictTime = Ops.parseSlots('2026-08-20 9:00-10:00');
+assert.equal(nonStrictTime.slots.length, 0, 'times must use strict HH:MM formatting');
+const leapDay = Ops.parseSlots('2028-02-29 09:00-10:00 윤년');
+assert.equal(leapDay.errors.length, 0);
+assert.equal(leapDay.slots[0].date, '2028-02-29');
+assert.equal(Ops.isValidCalendarDate('2026-02-29'), false);
+assert.equal(Ops.timeToMinutes('23:59'), 1439);
+assert.equal(Ops.timeToMinutes('24:00'), null);
 
 const people = roster.people.slice(0, 2).map((person, index) => ({ ...person, id: `p${index + 1}`, roleIds: ['participant'] }));
 const roles = [{ id: 'participant', name: '참여자', minPerSession: 2, maxPerSession: 2, targetSessions: 1, active: true }];
@@ -192,6 +209,37 @@ const selectedRosterIssues = Ops.validateScheduleConstraints({
   targetPersonIds: ['p1']
 });
 assert(!selectedRosterIssues.some((item) => item.type === 'personTarget' && item.personId === 'p2'), 'people excluded from the schedule roster should not receive target-count warnings');
+
+const recomputedProject = {
+  data: {
+    people,
+    roles: [{ ...roles[0], minPerSession: 0, maxPerSession: 3, targetSessions: 1, candidateFilter: 'all' }],
+    slots: [
+      { id: 'invalid-slot', date: '2026-02-30', startTime: '10:00', endTime: '09:00', label: '잘못된 일정', status: 'draft' },
+      { id: 'overlap-a', date: '2028-02-29', startTime: '09:00', endTime: '10:00', label: '겹침 A', status: 'draft' },
+      { id: 'overlap-b', date: '2028-02-29', startTime: '09:30', endTime: '10:30', label: '겹침 B', status: 'draft' }
+    ],
+    assignments: [
+      { id: 'overlap-assignment-a', slotId: 'overlap-a', personId: 'p1', roleId: 'participant' },
+      { id: 'overlap-assignment-b', slotId: 'overlap-b', personId: 'p1', roleId: 'participant' }
+    ],
+    availability: { p1: ['overlap-a'], p2: [] },
+    scheduleRules: { rosterViewId: 'selected-view' },
+    rosterViews: [{ id: 'selected-view', personIds: ['p1', 'p2'], excludedPersonIds: ['p2'] }],
+    scheduleSheetInitialized: false,
+    conflicts: [{ type: 'stale', message: '저장된 오래된 결과' }]
+  }
+};
+const recomputedConflicts = Ops.collectScheduleConflicts(recomputedProject);
+assert(recomputedConflicts.some((item) => item.code === 'invalidDate'), 'impossible sheet dates are recomputed');
+assert(recomputedConflicts.some((item) => item.code === 'invalidTimeRange'), 'reversed sheet time ranges are recomputed');
+assert(recomputedConflicts.some((item) => item.type === 'validation' && /중복/.test(item.message)), 'assignment overlaps are recomputed');
+assert(recomputedConflicts.some((item) => item.type === 'unavailable' && item.slotId === 'overlap-b'), 'availability conflicts are recomputed');
+assert(!recomputedConflicts.some((item) => item.type === 'personTarget' && item.personId === 'p2'), 'the selected roster view limits target-count conflicts');
+assert(!recomputedConflicts.some((item) => item.type === 'stale'), 'stored conflict snapshots are ignored');
+
+const cleanRecomputedConflicts = Ops.collectScheduleConflicts({ data: { people, roles, slots, assignments: generated.assignments, availability, scheduleRules: {}, rosterViews: [], scheduleSheetInitialized: false } });
+assert.deepEqual(cleanRecomputedConflicts, [], 'a valid current schedule recomputes to a clean conflict list');
 
 const project = { data: { people, roles, slots, assignments: generated.assignments } };
 assert.match(Ops.scheduleToCsv(project), /날짜,시작,종료/);

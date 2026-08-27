@@ -159,16 +159,47 @@
     return { columns, people, warnings };
   }
 
+  function isValidCalendarDate(value) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return false;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (year < 1 || month < 1 || month > 12 || day < 1) return false;
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return day <= daysInMonth[month - 1];
+  }
+
+  function timeToMinutes(value) {
+    const match = String(value || '').match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  }
+
+  function validateScheduleSlot(slot = {}) {
+    const issues = [];
+    if (!isValidCalendarDate(slot.date)) issues.push({ type: 'sheet', code: 'invalidDate', field: 'date', message: '날짜를 YYYY-MM-DD 형식의 실제 날짜로 입력해주세요.' });
+    const startMinutes = timeToMinutes(slot.startTime);
+    const endMinutes = timeToMinutes(slot.endTime);
+    if (startMinutes == null) issues.push({ type: 'sheet', code: 'invalidStartTime', field: 'startTime', message: '시작 시간을 00:00–23:59 범위의 HH:MM 형식으로 입력해주세요.' });
+    if (endMinutes == null) issues.push({ type: 'sheet', code: 'invalidEndTime', field: 'endTime', message: '종료 시간을 00:00–23:59 범위의 HH:MM 형식으로 입력해주세요.' });
+    if (startMinutes != null && endMinutes != null && endMinutes <= startMinutes) issues.push({ type: 'sheet', code: 'invalidTimeRange', field: 'timeRange', message: '종료 시간은 시작 시간보다 늦어야 합니다.' });
+    return issues;
+  }
+
   function parseSlots(text) {
     const slots = [];
     const errors = [];
     String(text || '').replace(/\r\n?/g, '\n').split('\n').forEach((line, index) => {
       const value = clean(line);
       if (!value) return;
-      const match = value.match(/^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\s+(\d{1,2}:\d{2})\s*[-~]\s*(\d{1,2}:\d{2})(?:\s+(.+))?$/);
+      const match = value.match(/^(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\s+(\d{2}:\d{2})\s*[-~]\s*(\d{2}:\d{2})(?:\s+(.+))?$/);
       if (!match) { errors.push(`${index + 1}줄 형식을 확인해주세요: ${value}`); return; }
       const date = match[1].replace(/[/.]/g, '-').split('-').map((part, partIndex) => partIndex ? part.padStart(2, '0') : part).join('-');
-      slots.push({ id: makeId('slot'), date, startTime: match[2].padStart(5, '0'), endTime: match[3].padStart(5, '0'), label: clean(match[4]), locked: false, status: 'draft' });
+      const slot = { id: makeId('slot'), date, startTime: match[2], endTime: match[3], label: clean(match[4]), locked: false, status: 'draft' };
+      const issues = validateScheduleSlot(slot);
+      if (issues.length) { issues.forEach((issue) => errors.push(`${index + 1}줄: ${issue.message}`)); return; }
+      slots.push(slot);
     });
     return { slots, errors };
   }
@@ -366,6 +397,64 @@
 
     const unique = new Map();
     issues.forEach((issue) => unique.set([issue.type, issue.personId || '', issue.slotId || '', issue.roleId || '', issue.message].join('|'), issue));
+    return [...unique.values()];
+  }
+
+  function rosterViewIncludedIds(view, project) {
+    const people = Array.isArray(project?.data?.people) ? project.data.people : [];
+    const source = Array.isArray(view?.personIds) ? view.personIds : people.map((person) => person.id);
+    const excluded = new Set(Array.isArray(view?.excludedPersonIds) ? view.excludedPersonIds : []);
+    return source.filter((id) => !excluded.has(id) && people.some((person) => person.id === id && person.active !== false));
+  }
+
+  function scheduleSheetConflicts(project) {
+    const data = project?.data || {};
+    const slots = Array.isArray(data.slots) ? data.slots : [];
+    const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+    const columns = Array.isArray(data.scheduleSheetColumns) ? data.scheduleSheetColumns : [];
+    const keys = data.scheduleSheetInitialized ? new Set(columns.map((column) => column.key)) : new Set(['date', 'startTime', 'endTime']);
+    const messages = [];
+    if (!keys.has('date') || !keys.has('startTime') || !keys.has('endTime')) messages.push({ type: 'sheet', code: 'missingScheduleColumns', message: 'Zoom·메일 일정 연결을 사용하려면 날짜·시작·종료 컬럼을 추가하거나 해당 헤더가 있는 표를 붙여넣어주세요.' });
+    slots.forEach((slot, index) => {
+      const issues = validateScheduleSlot(slot).filter((issue) => {
+        if (issue.field === 'date') return keys.has('date');
+        if (issue.field === 'startTime') return keys.has('startTime');
+        if (issue.field === 'endTime') return keys.has('endTime');
+        if (issue.field === 'timeRange') return keys.has('startTime') && keys.has('endTime');
+        return true;
+      });
+      const hasInvalidTime = issues.some((issue) => issue.code === 'invalidStartTime' || issue.code === 'invalidEndTime');
+      issues.forEach((issue) => {
+        if (hasInvalidTime && issue.code === 'invalidEndTime' && issues.some((candidate) => candidate.code === 'invalidStartTime')) return;
+        const message = (issue.code === 'invalidStartTime' || issue.code === 'invalidEndTime')
+          ? '시작·종료 시간을 00:00–23:59 범위의 HH:MM 형식으로 입력해주세요.'
+          : issue.message;
+        messages.push({ ...issue, message: `${index + 2}행: ${message}` });
+      });
+    });
+    assignments.forEach((assignment) => {
+      if (!assignment.personId) messages.push({ type: 'sheet', code: 'unknownPerson', assignmentId: assignment.id, message: `명단에 없는 사람 “${assignment.personName || '이름 없음'}”이 일정표에 있습니다.` });
+    });
+    return messages;
+  }
+
+  function collectScheduleConflicts(project) {
+    const data = project?.data || {};
+    const assignments = Array.isArray(data.assignments) ? data.assignments : [];
+    const people = Array.isArray(data.people) ? data.people : [];
+    const roles = Array.isArray(data.roles) ? data.roles : [];
+    const slots = Array.isArray(data.slots) ? data.slots : [];
+    const availability = data.availability && typeof data.availability === 'object' ? data.availability : {};
+    const rules = data.scheduleRules && typeof data.scheduleRules === 'object' ? data.scheduleRules : {};
+    const rosterViews = Array.isArray(data.rosterViews) ? data.rosterViews : [];
+    const scheduleView = rosterViews.find((view) => view.id === rules.rosterViewId) || null;
+    const conflicts = [
+      ...scheduleSheetConflicts(project),
+      ...validateAssignments({ assignments, people, roles, slots }).map((message) => ({ type: 'validation', message })),
+      ...validateScheduleConstraints({ assignments, people, roles, slots, availability, rules, targetPersonIds: rosterViewIncludedIds(scheduleView, project) })
+    ];
+    const unique = new Map();
+    conflicts.forEach((conflict) => unique.set([conflict.type || '', conflict.personId || '', conflict.slotId || '', conflict.roleId || '', conflict.message].join('|'), conflict));
     return [...unique.values()];
   }
 
@@ -598,11 +687,17 @@
     classifyValue,
     parseDelimited,
     matrixToRoster,
+    isValidCalendarDate,
+    timeToMinutes,
+    validateScheduleSlot,
     parseSlots,
     slotKey,
     generateSchedule,
     validateAssignments,
     validateScheduleConstraints,
+    rosterViewIncludedIds,
+    scheduleSheetConflicts,
+    collectScheduleConflicts,
     diffScheduleDependencies,
     planScheduleChange,
     scheduleToCsv,
