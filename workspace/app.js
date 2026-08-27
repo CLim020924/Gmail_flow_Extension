@@ -45,6 +45,7 @@
   let selectedSessionPersonId = null;
   let sheetChoiceResolver = null;
   let templateInsertionTarget = 'body';
+  let templateAutocompleteState = null;
   let activeWorkflowStepId = null;
   let workflowEditorDraft = [];
   let workflowEditorTemplateDraft = null;
@@ -1513,6 +1514,71 @@
     return [...new Set(['프로젝트', '이름', '이메일', '개인일정', ...project.data.columns.map((column) => column.name).filter(Boolean)])];
   }
 
+  function hideTemplateAutocomplete() {
+    templateAutocompleteState = null;
+    const menu = $('#templateVariableAutocomplete');
+    if (!menu) return;
+    menu.hidden = true; menu.replaceChildren();
+  }
+
+  function inputCaretPosition(target, caret) {
+    const rect = target.getBoundingClientRect(); const style = getComputedStyle(target); const mirror = document.createElement('div');
+    ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'lineHeight', 'wordSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'boxSizing'].forEach((property) => { mirror.style[property] = style[property]; });
+    Object.assign(mirror.style, { position: 'fixed', visibility: 'hidden', pointerEvents: 'none', whiteSpace: 'pre', left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px` });
+    mirror.textContent = target.value.slice(0, caret); const marker = document.createElement('span'); marker.textContent = '\u200b'; mirror.append(marker); document.body.append(mirror);
+    const markerRect = marker.getBoundingClientRect(); const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.35;
+    const point = { left: markerRect.left - target.scrollLeft, top: markerRect.top + lineHeight + 3 }; mirror.remove(); return point;
+  }
+
+  function templateAutocompleteContext(target) {
+    if (target.matches('input, textarea')) {
+      const caret = target.selectionStart ?? target.value.length; if ((target.selectionEnd ?? caret) !== caret) return null;
+      const match = target.value.slice(0, caret).match(/\{([^{}\r\n]*)$/); if (!match) return null;
+      return { query: match[1], matchLength: match[0].length, caret, point: inputCaretPosition(target, caret) };
+    }
+    const selection = getSelection(); if (!selection?.rangeCount || !target.contains(selection.anchorNode) || !selection.isCollapsed) return null;
+    const caretRange = selection.getRangeAt(0).cloneRange(); const before = caretRange.cloneRange(); before.selectNodeContents(target); before.setEnd(caretRange.endContainer, caretRange.endOffset);
+    const match = before.toString().match(/\{([^{}\r\n]*)$/); if (!match) return null;
+    const rect = caretRange.getBoundingClientRect(); const editorRect = target.getBoundingClientRect(); const lineHeight = Number.parseFloat(getComputedStyle(target).lineHeight) || 20;
+    return { query: match[1], matchLength: match[0].length, range: caretRange, point: { left: rect.left || editorRect.left + 8, top: (rect.bottom || editorRect.top + lineHeight) + 3 } };
+  }
+
+  function renderTemplateAutocomplete(target) {
+    const menu = $('#templateVariableAutocomplete'); const project = activeProject(); if (!menu || !project) return;
+    const context = templateAutocompleteContext(target); if (!context) { hideTemplateAutocomplete(); return; }
+    const query = context.query.trim().toLocaleLowerCase('ko-KR'); const available = templateVariableNames(project);
+    const starts = available.filter((name) => name.toLocaleLowerCase('ko-KR').startsWith(query));
+    const items = [...starts, ...available.filter((name) => !starts.includes(name) && name.toLocaleLowerCase('ko-KR').includes(query))];
+    templateAutocompleteState = { ...context, target, items, index: 0 };
+    if (items.length) menu.replaceChildren(...items.map((name, index) => {
+      const button = element('button'); button.type = 'button'; button.dataset.templateAutocomplete = name; button.role = 'option'; button.classList.toggle('active', index === 0); button.setAttribute('aria-selected', String(index === 0));
+      button.append(element('span', '', `{${name}}`), element('small', '', index === 0 ? 'Enter' : '선택')); return button;
+    }));
+    else menu.replaceChildren(element('div', 'variable-autocomplete-empty', '일치하는 명단 컬럼이 없습니다.'));
+    menu.hidden = false; const width = Math.min(360, Math.max(190, menu.offsetWidth));
+    menu.style.left = `${Math.max(8, Math.min(context.point.left, innerWidth - width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(context.point.top, innerHeight - Math.min(menu.scrollHeight, 220) - 8))}px`;
+  }
+
+  function applyTemplateAutocomplete(name) {
+    const current = templateAutocompleteState; if (!current) return; const target = current.target;
+    target.focus();
+    if (target.matches('input, textarea')) {
+      const end = target.selectionEnd ?? current.caret; target.setRangeText(`{${name}}`, end - current.matchLength, end, 'end');
+    } else {
+      const selection = getSelection(); selection.removeAllRanges(); selection.addRange(current.range); selection.modify('extend', 'backward', 'character');
+      for (let index = 1; index < current.matchLength; index += 1) selection.modify('extend', 'backward', 'character');
+      document.execCommand('insertText', false, `{${name}}`);
+    }
+    hideTemplateAutocomplete(); target.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function moveTemplateAutocomplete(step) {
+    const current = templateAutocompleteState; if (!current?.items.length) return;
+    current.index = (current.index + step + current.items.length) % current.items.length;
+    $$('#templateVariableAutocomplete [data-template-autocomplete]').forEach((button, index) => { button.classList.toggle('active', index === current.index); button.setAttribute('aria-selected', String(index === current.index)); if (index === current.index) button.scrollIntoView({ block: 'nearest' }); });
+  }
+
   function renderTemplateVariables(project, { paletteId = 'templateVariablePalette', statusId = 'templateTokenStatus', subjectId = 'mailSubjectTemplate', bodyId = 'mailBodyEditor' } = {}) {
     const validNames = templateVariableNames(project); const valid = new Set(validNames);
     const palette = $(`#${paletteId}`); const status = $(`#${statusId}`); if (!palette || !status) return;
@@ -1956,11 +2022,27 @@
   function bindEvents() {
     bindRichEditor($('#mailBodyEditor')); bindRichEditor($('#mailEditBody'));
     const markMailEditorDirty = () => { mailEditorDirty = true; $('#mailPackageStatus').textContent = '메일 편집 내용을 자동 저장하는 중입니다.'; const project = activeProject(); if (project) renderTemplateVariables(project); clearTimeout(mailDraftTimer); mailDraftTimer = setTimeout(() => void saveMailEditorDraft(), 700); };
-    $('#mailSubjectTemplate').addEventListener('input', markMailEditorDirty);
-    $('#mailBodyEditor').addEventListener('input', markMailEditorDirty);
+    $('#mailSubjectTemplate').addEventListener('input', (event) => { markMailEditorDirty(); renderTemplateAutocomplete(event.currentTarget); });
+    $('#mailBodyEditor').addEventListener('input', (event) => { markMailEditorDirty(); renderTemplateAutocomplete(event.currentTarget); });
     ['mailSubjectTemplate', 'mailBodyEditor', 'mailEditSubject', 'mailEditBody'].forEach((id) => $(`#${id}`).addEventListener('focus', () => { templateInsertionTarget = id; }));
-    $('#mailEditSubject').addEventListener('input', () => { const project = activeProject(); if (project) renderTemplateVariables(project, { paletteId: 'mailEditVariablePalette', statusId: 'mailEditTokenStatus', subjectId: 'mailEditSubject', bodyId: 'mailEditBody' }); });
-    $('#mailEditBody').addEventListener('input', () => { const project = activeProject(); if (project) renderTemplateVariables(project, { paletteId: 'mailEditVariablePalette', statusId: 'mailEditTokenStatus', subjectId: 'mailEditSubject', bodyId: 'mailEditBody' }); });
+    $('#mailEditSubject').addEventListener('input', (event) => { const project = activeProject(); if (project) renderTemplateVariables(project, { paletteId: 'mailEditVariablePalette', statusId: 'mailEditTokenStatus', subjectId: 'mailEditSubject', bodyId: 'mailEditBody' }); renderTemplateAutocomplete(event.currentTarget); });
+    $('#mailEditBody').addEventListener('input', (event) => { const project = activeProject(); if (project) renderTemplateVariables(project, { paletteId: 'mailEditVariablePalette', statusId: 'mailEditTokenStatus', subjectId: 'mailEditSubject', bodyId: 'mailEditBody' }); renderTemplateAutocomplete(event.currentTarget); });
+    ['mailSubjectTemplate', 'mailBodyEditor', 'mailEditSubject', 'mailEditBody'].forEach((id) => {
+      const target = $(`#${id}`);
+      target.addEventListener('click', () => renderTemplateAutocomplete(target));
+      target.addEventListener('keyup', (event) => { if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) renderTemplateAutocomplete(target); });
+      target.addEventListener('keydown', (event) => {
+        if (!templateAutocompleteState || templateAutocompleteState.target !== target || $('#templateVariableAutocomplete').hidden) return;
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); moveTemplateAutocomplete(event.key === 'ArrowDown' ? 1 : -1); }
+        else if ((event.key === 'Enter' || event.key === 'Tab') && templateAutocompleteState.items.length) { event.preventDefault(); applyTemplateAutocomplete(templateAutocompleteState.items[templateAutocompleteState.index]); }
+        else if (event.key === 'Escape') { event.preventDefault(); hideTemplateAutocomplete(); }
+      });
+      target.addEventListener('blur', () => setTimeout(() => { if (!$('#templateVariableAutocomplete').matches(':hover')) hideTemplateAutocomplete(); }, 100));
+    });
+    $('#templateVariableAutocomplete').addEventListener('mousedown', (event) => event.preventDefault());
+    $('#templateVariableAutocomplete').addEventListener('click', (event) => { const option = event.target.closest('[data-template-autocomplete]'); if (option) applyTemplateAutocomplete(option.dataset.templateAutocomplete); });
+    globalThis.addEventListener('resize', hideTemplateAutocomplete);
+    document.addEventListener('scroll', hideTemplateAutocomplete, true);
     $$('.template-variable-palette').forEach((palette) => palette.addEventListener('click', (event) => { const token = event.target.closest('[data-template-token]'); if (token) insertTemplateToken(token.dataset.templateToken, token.dataset.templateTargetGroup); }));
 
     const rosterTable = $('#rosterEditorTable');

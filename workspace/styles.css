@@ -440,6 +440,11 @@ button.variable-chip { cursor: pointer; }
 button.variable-chip.valid:hover { border-color: #397c60; background: #e1f3e9; }
 .variable-chip.invalid { border: 1px solid #cf8d8d; background: #fff0f0; color: #9b2929; text-decoration: underline wavy #b53a3a; }
 .variable-empty { color: #85909b; font-size: 10px; }
+.variable-autocomplete { position: fixed; z-index: 2400; min-width: 190px; max-width: min(360px, calc(100vw - 24px)); max-height: 220px; overflow-y: auto; padding: 3px; border: 1px solid #9aa1a8; border-radius: 2px; background: #fff; box-shadow: 0 5px 14px rgba(0,0,0,.18); }
+.variable-autocomplete button { display: flex; justify-content: space-between; gap: 14px; width: 100%; min-height: 31px; padding: 6px 9px; border: 0; border-radius: 1px; background: transparent; color: #222; text-align: left; font: 12px Consolas, "Malgun Gothic", monospace; cursor: pointer; }
+.variable-autocomplete button:hover, .variable-autocomplete button.active { background: #e8eef6; color: #173f6b; }
+.variable-autocomplete small { color: #777; font: 10px "Malgun Gothic", sans-serif; }
+.variable-autocomplete-empty { padding: 8px 9px; color: #777; font-size: 11px; }
 .composer-resource-bar { display: flex; gap: 7px; margin-top: 11px; }
 .compact-variable-panel { margin-top: 9px; }
 .mail-primary-actions .action-menu-panel { inset: auto 0 calc(100% + 5px) auto; }

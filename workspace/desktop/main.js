@@ -550,6 +550,15 @@ app.whenReady().then(async () => {
             assert(document.querySelector('#gmailFlowAccountButton') && document.querySelector('#openOriginalGmailFlow'), 'Gmail account and original app controls should be visible');
             assert(document.querySelector('#openMailRosterManager')?.textContent.includes('명단 가져오기') && document.querySelectorAll('#mailRosterPeople .resource-chip').length === 2 && document.querySelector('#mailRosterSummary')?.textContent.trim(), 'gmail page should show the applied shared roster');
             const mailEditor = document.querySelector('#mailBodyEditor');
+            const mailSubject = document.querySelector('#mailSubjectTemplate');
+            mailSubject.value = '{전'; mailSubject.focus(); mailSubject.setSelectionRange(2, 2); mailSubject.dispatchEvent(new Event('input', { bubbles: true }));
+            await waitFor(() => !document.querySelector('#templateVariableAutocomplete').hidden && [...document.querySelectorAll('#templateVariableAutocomplete [data-template-autocomplete]')].some((item) => item.dataset.templateAutocomplete === '전화번호'), 'workspace subject variable autocomplete');
+            mailSubject.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+            assert(mailSubject.value === '{전화번호}', 'workspace subject autocomplete insertion');
+            mailEditor.focus(); document.execCommand('insertText', false, '{이'); mailEditor.dispatchEvent(new Event('input', { bubbles: true }));
+            await waitFor(() => !document.querySelector('#templateVariableAutocomplete').hidden && [...document.querySelectorAll('#templateVariableAutocomplete [data-template-autocomplete]')].some((item) => item.dataset.templateAutocomplete === '이름'), 'workspace body variable autocomplete');
+            mailEditor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+            assert(mailEditor.textContent.includes('{이름}'), 'workspace body autocomplete insertion');
             document.querySelector('#mailSubjectTemplate').value += ' {전화번호} {없는컬럼}';
             document.querySelector('#mailSubjectTemplate').dispatchEvent(new Event('input', { bubbles: true }));
             assert([...document.querySelectorAll('#templateTokenStatus .variable-chip.valid')].some((item) => item.textContent === '{전화번호}') && document.querySelector('#templateTokenStatus .variable-chip.invalid')?.textContent === '{없는컬럼}', 'template column token validation');

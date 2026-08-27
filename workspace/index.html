@@ -263,6 +263,7 @@
               <label>글자색 <input type="color" value="#202124" data-rich-color="foreColor"></label><label>배경색 <input type="color" value="#fff2cc" data-rich-color="hiliteColor"></label>
             </div>
             <div id="mailBodyEditor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="본문을 입력하거나 Excel 셀을 복사해 붙여넣으세요."></div>
+            <div id="templateVariableAutocomplete" class="variable-autocomplete" role="listbox" aria-label="사용 가능한 명단 변수" hidden></div>
             <textarea id="mailBodyTemplate" hidden></textarea>
             <p class="field-help">Excel 셀을 붙여넣으면 표, 셀 배경색, 글꼴, 테두리를 가능한 범위에서 유지합니다.</p>
             <div class="template-variable-panel"><div class="template-variable-heading"><strong>받는 사람마다 바뀌는 항목</strong><small>이름이나 일정 항목을 클릭하면 메일에 삽입됩니다.</small></div><div id="templateVariablePalette" class="template-variable-palette"></div><div id="templateTokenStatus" class="template-token-status"></div></div>
