@@ -294,6 +294,7 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#addColumn'), 'initial roster render');
             assert(document.querySelectorAll('.roster-load-panel > .load-submenu').length === 2, 'roster and structure root menu items');
             assert(document.querySelector('#pasteTable') && document.querySelector('#fileInput'), 'table data and Excel/CSV root menu items');
+            assert(document.querySelector('#rosterDragHelp')?.textContent.includes('Ctrl+C/X/V') && document.querySelector('#rosterFillDown'), 'roster range actions should be discoverable');
             document.querySelector('[data-page="roster"]').click();
             await waitFor(() => document.querySelector('#page-roster').classList.contains('active'), 'roster page activation');
 
@@ -304,14 +305,23 @@ app.whenReady().then(async () => {
 
             let cell = document.querySelector('#rosterBody .cell-input');
             await new Promise((resolve) => setTimeout(resolve, 50));
-            cell.closest('.data-cell').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-            assert(document.activeElement === cell, 'cell should focus on first mouse press; active=' + document.activeElement?.tagName + '.' + document.activeElement?.className);
-            const secondCell = document.querySelectorAll('#rosterBody .cell-input')[1];
-            secondCell.closest('.data-cell').dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 1 }));
+            const firstRect = cell.getBoundingClientRect();
+            cell.closest('.data-cell').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: firstRect.left + firstRect.width / 2, clientY: firstRect.top + firstRect.height / 2 }));
             window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            assert(document.querySelectorAll('#rosterBody .selected-cell').length === 2, 'mouse drag should select a cell range');
+            assert(document.activeElement === cell, 'initial cell should focus on mouse press; active=' + document.activeElement?.tagName + '.' + document.activeElement?.className);
+            const secondCell = document.querySelectorAll('#rosterBody .cell-input')[1];
+            const secondRect = secondCell.getBoundingClientRect();
+            cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: firstRect.left + firstRect.width / 2, clientY: firstRect.top + firstRect.height / 2 }));
+            cell.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, buttons: 1, clientX: secondRect.left + secondRect.width / 2, clientY: secondRect.top + secondRect.height / 2 }));
+            window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            assert(document.querySelectorAll('#rosterBody .selected-cell').length === 2, 'input-captured mouse drag should select the cell under the real pointer');
             cell.value = 'Alpha';
             cell.dispatchEvent(new Event('input', { bubbles: true }));
+            document.querySelector('#rosterFillDown').click();
+            assert([...document.querySelectorAll('#rosterBody .cell-input')].slice(0, 2).every((input) => input.value === 'Alpha'), 'fill-down should apply the first selected value to the selected cells');
+            document.querySelector('#rosterUndo').click();
+            cell = document.querySelector('#rosterBody .cell-input');
+            assert(cell.value === 'Alpha' && document.querySelectorAll('#rosterBody .cell-input')[1].value === '', 'roster undo should restore the range before fill-down');
             await waitFor(() => !document.querySelector('#saveRoster').disabled, 'roster save enabled');
 
             await addAttachments([new File(['attachment smoke'], 'smoke.txt', { type: 'text/plain' })]);
@@ -376,8 +386,9 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('.column-header')?.textContent.includes('Smoke Test Column'), 'structure apply');
             cell = document.querySelector('#rosterBody .cell-input');
             assert(cell.value === '', 'structure apply should not restore row data');
-            cell.closest('.data-cell').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-            assert(document.activeElement === cell, 'cell should focus on first mouse press');
+            cell.focus();
+            cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, buttons: 1 }));
+            assert(document.activeElement === cell, 'structure-applied cell should focus on mouse press; active=' + document.activeElement?.tagName + '.' + document.activeElement?.className);
 
             document.querySelector('[data-quick-roster-id]').click();
             await waitFor(() => document.querySelector('#rosterBody .cell-input')?.value === 'Alpha', 'roster data restore');

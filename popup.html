@@ -145,12 +145,13 @@
             </details>
           </div>
           <p id="rosterContext" class="muted">새 명단 · 연결된 구조 템플릿 없음</p>
+          <p id="rosterDragHelp" class="sheet-help">셀 안에서 다른 셀까지 드래그해 범위를 선택하세요. Ctrl+C/X/V · Delete · 아래 채우기는 ‘셀 작업’</p>
           <div id="pasteBox" class="paste-box" hidden>
             <textarea id="pasteInput" placeholder="Excel에서 복사한 표를 여기에 붙여넣으세요"></textarea>
             <div class="toolbar"><button id="applyPaste" class="primary" type="button">표 적용</button><button id="cancelPaste" class="button" type="button">취소</button></div>
           </div>
           <div class="sheet-wrap">
-            <table id="rosterTable" class="sheet" aria-label="명단 편집 표">
+            <table id="rosterTable" class="sheet" aria-label="명단 편집 표" aria-describedby="rosterDragHelp rosterMessage">
               <thead id="rosterHead"></thead>
               <tbody id="rosterBody"></tbody>
             </table>

@@ -46,8 +46,12 @@
   const arrangementDrafts = new Map();
   let rosterSelection = null;
   let rosterSelecting = false;
+  let rosterHistory = [];
+  let rosterFuture = [];
   let arrangementSelection = null;
   let arrangementSelecting = false;
+  let arrangementHistory = [];
+  let arrangementFuture = [];
   let scheduleSelection = null;
   let scheduleSelecting = false;
   let scheduleHistory = [];
@@ -184,13 +188,56 @@
       const requestState = cloneState(state);
       const requestBaseState = cloneState(persistedStateBaseline);
       const result = await storage.save(requestState, { scheduleProjects, baseState: requestBaseState, externalCommit });
+      let mergedRosterChanged = Boolean(result?.merged);
+      let mergedArrangementChanged = Boolean(result?.merged);
+      let mergedScheduleChanged = Boolean(result?.merged);
       if (result?.state) {
         const normalized = Core.normalizeState(result.state);
+        if (result.merged) {
+          const activeProjectChanged = normalized.activeProjectId !== requestState.activeProjectId;
+          const requestedProject = requestState.projects.find((project) => project.id === requestState.activeProjectId) || Object.values(requestState.quickWorkspaces || {}).find((project) => project.id === requestState.activeProjectId);
+          const mergedProject = normalized.projects.find((project) => project.id === requestState.activeProjectId) || Object.values(normalized.quickWorkspaces || {}).find((project) => project.id === requestState.activeProjectId);
+          mergedRosterChanged = activeProjectChanged || !requestedProject || !mergedProject || rosterSnapshot(requestedProject) !== rosterSnapshot(mergedProject);
+          mergedScheduleChanged = activeProjectChanged || !requestedProject || !mergedProject || scheduleSnapshot(requestedProject) !== scheduleSnapshot(mergedProject);
+          const requestedItem = requestedProject?.data.workItems.find((item) => item.id === requestedProject.data.activeWorkItemId);
+          const mergedItem = mergedProject?.data.workItems.find((item) => item.id === requestedProject?.data.activeWorkItemId);
+          const arrangementContent = (item) => item ? JSON.stringify({ columns: item.columns, rows: item.rows }) : '';
+          mergedArrangementChanged = activeProjectChanged || requestedProject?.data.activeWorkItemId !== mergedProject?.data.activeWorkItemId || (Boolean(requestedItem || mergedItem) && (!requestedItem || !mergedItem || arrangementContent(requestedItem) !== arrangementContent(mergedItem)));
+        }
         const localAdvanced = requestSequence !== persistSequence || JSON.stringify(state) !== JSON.stringify(requestState); requestHadLocalAdvance = localAdvanced;
         acceptPersistedBaseline(normalized);
         state = localAdvanced ? Core.normalizeState(Core.threeWayMerge(requestState, normalized, state)) : normalized;
       }
-      if (result?.merged) showToast('다른 창의 변경사항과 안전하게 병합했습니다.');
+      if (result?.merged) {
+        // The save response may contain another window's edits without going
+        // through applyIncomingWorkspaceState(). Whole-sheet Undo snapshots
+        // taken before that merge are no longer safe, but drafts typed while
+        // this async save was in flight must remain queued.
+        if (mergedRosterChanged) {
+          clearRosterHistory({ preserveEditingState: true });
+          const input = document.activeElement;
+          const project = activeProject();
+          if (project && input?.matches?.('[data-person-row], [data-column-name], #rosterCellValue')) input.dataset.beforeRosterEdit = rosterSnapshot(project);
+        }
+        if (mergedArrangementChanged) {
+          clearArrangementHistory({ preserveEditingState: true });
+          const input = document.activeElement; const item = activeWorkItem();
+          if (item && input?.matches?.('[data-arrangement-input], #arrangementCellValue')) input.dataset.beforeArrangementEdit = arrangementSnapshot(item);
+        }
+        if (mergedScheduleChanged) {
+          clearScheduleHistory();
+          const input = document.activeElement; const project = activeProject();
+          if (project && input?.matches?.('[data-schedule-input]')) {
+            const snapshot = scheduleSnapshot(project);
+            input.dataset.scheduleBefore = snapshot; input.dataset.scheduleImpactBefore = snapshot;
+          }
+        }
+        rosterSelecting = false; arrangementSelecting = false; scheduleSelecting = false;
+        $('#rosterEditorTable')?.classList.remove('range-selecting');
+        $('#arrangementBoard')?.classList.remove('range-selecting');
+        $('#scheduleBoard')?.classList.remove('range-selecting');
+        showToast('다른 창의 변경사항과 안전하게 병합했습니다.');
+      }
       if (requestSequence === persistSequence && !schedulePersistBaseline && !requestHadLocalAdvance) {
         persistDirty = false;
         persistReconcileNeeded = false;
@@ -830,6 +877,21 @@
     return result;
   }
 
+  function spreadsheetPointerTarget(event, table) {
+    const hasViewportPoint = Number.isFinite(event.clientX) && Number.isFinite(event.clientY) && (event.clientX !== 0 || event.clientY !== 0);
+    if (!hasViewportPoint || typeof document.elementFromPoint !== 'function') return event.target;
+    const hit = document.elementFromPoint(event.clientX, event.clientY);
+    return hit && table?.contains(hit) ? hit : null;
+  }
+
+  function beginSpreadsheetRangeDrag(table) {
+    if (table.classList.contains('range-selecting')) return;
+    table.classList.add('range-selecting');
+    const input = document.activeElement;
+    if (input?.matches?.('input') && typeof input.selectionStart === 'number') input.setSelectionRange(input.selectionStart, input.selectionStart);
+    globalThis.getSelection?.()?.removeAllRanges();
+  }
+
   function sheetCellValue(project, row, column) {
     if (row === 0) return project.data.columns[column]?.name || '';
     return project.data.people[row - 1]?.values?.[project.data.columns[column]?.id] ?? '';
@@ -928,8 +990,127 @@
     return true;
   }
 
-  function updateRosterSelection(anchor, focus = anchor) {
-    rosterSelection = { anchor, focus };
+  function rosterSnapshot(project) {
+    return JSON.stringify({
+      columns: project.data.columns,
+      people: project.data.people,
+      availability: project.data.availability,
+      assignments: project.data.assignments,
+      rosterViewMemberships: (project.data.rosterViews || []).map((view) => ({ id: view.id, personIds: view.personIds || [], excludedPersonIds: view.excludedPersonIds || [] })),
+      roleCandidateFilters: project.data.roles.map((role) => ({ id: role.id, candidateFilter: role.candidateFilter }))
+    });
+  }
+
+  function restoreRosterSnapshot(project, snapshot) {
+    const value = JSON.parse(snapshot);
+    const nextColumns = Array.isArray(value.columns) ? value.columns : [];
+    const snapshotPeople = Array.isArray(value.people) ? value.people : [];
+    const currentPersonIds = new Set(project.data.people.map((person) => person.id));
+    const currentPeople = new Map(project.data.people.map((person) => [person.id, person]));
+    const nextPeople = snapshotPeople.map((person) => {
+      const current = currentPeople.get(person.id); if (!current) return person;
+      return { ...person, active: current.active, roleIds: JSON.parse(JSON.stringify(current.roleIds || [])) };
+    });
+    const nextPersonIds = new Set(nextPeople.map((person) => person.id));
+    const restoredPersonIds = new Set([...nextPersonIds].filter((id) => !currentPersonIds.has(id)));
+    const removedPersonIds = new Set([...currentPersonIds].filter((id) => !nextPersonIds.has(id)));
+    const currentColumnIds = project.data.columns.map((column) => column.id);
+    const nextColumnIds = nextColumns.map((column) => column.id);
+    const restoredColumnIds = new Set(nextColumnIds.filter((id) => !currentColumnIds.includes(id)));
+    project.data.columns = nextColumns;
+    project.data.people = nextPeople;
+    project.data.availability ||= {};
+    removedPersonIds.forEach((id) => { delete project.data.availability[id]; });
+    const snapshotAvailability = value.availability && typeof value.availability === 'object' ? value.availability : {};
+    const validSlotIds = new Set(project.data.slots.map((slot) => slot.id));
+    restoredPersonIds.forEach((id) => { project.data.availability[id] = (snapshotAvailability[id] || []).filter((slotId) => validSlotIds.has(slotId)); });
+    const validRoleIds = new Set(project.data.roles.map((role) => role.id));
+    project.data.assignments = (Array.isArray(project.data.assignments) ? project.data.assignments : [])
+      .filter((assignment) => !removedPersonIds.has(assignment.personId) && !restoredPersonIds.has(assignment.personId));
+    project.data.assignments.push(...JSON.parse(JSON.stringify((Array.isArray(value.assignments) ? value.assignments : []).filter((assignment) => restoredPersonIds.has(assignment.personId) && validSlotIds.has(assignment.slotId) && (!assignment.roleId || validRoleIds.has(assignment.roleId))))));
+    const snapshotViews = new Map((value.rosterViewMemberships || []).map((view) => [view.id, view]));
+    project.data.rosterViews.forEach((view) => {
+      const snapshotView = snapshotViews.get(view.id);
+      view.personIds = (view.personIds || []).filter((id) => !removedPersonIds.has(id));
+      view.excludedPersonIds = (view.excludedPersonIds || []).filter((id) => !removedPersonIds.has(id));
+      if (snapshotView) {
+        restoredPersonIds.forEach((id) => {
+          if (snapshotView.personIds?.includes(id) && !view.personIds.includes(id)) view.personIds.push(id);
+          if (snapshotView.excludedPersonIds?.includes(id) && !view.excludedPersonIds.includes(id)) view.excludedPersonIds.push(id);
+        });
+      }
+    });
+    pruneRosterViewMembershipsForSheetStructure(project);
+    const validColumnIds = new Set(nextColumnIds);
+    const snapshotFilters = new Map((value.roleCandidateFilters || []).map((item) => [item.id, item.candidateFilter]));
+    project.data.roles.forEach((role) => {
+      const match = String(role.candidateFilter || '').match(/^column:([^:]+):/);
+      if (match && !validColumnIds.has(match[1])) role.candidateFilter = 'all';
+      const snapshotFilter = snapshotFilters.get(role.id); const snapshotMatch = String(snapshotFilter || '').match(/^column:([^:]+):/);
+      if (role.candidateFilter === 'all' && snapshotMatch && restoredColumnIds.has(snapshotMatch[1])) role.candidateFilter = snapshotFilter;
+    });
+    syncPersonDerivedFields(project);
+    refreshScheduleConflicts(project);
+    return {
+      peopleChanged: [...currentPersonIds].some((id) => !nextPersonIds.has(id)) || [...nextPersonIds].some((id) => !currentPersonIds.has(id)),
+      columnsChanged: JSON.stringify(currentColumnIds) !== JSON.stringify(nextColumnIds)
+    };
+  }
+
+  function syncRosterHistoryControls() {
+    if ($('#rosterUndo')) $('#rosterUndo').disabled = !rosterHistory.length;
+    if ($('#rosterRedo')) $('#rosterRedo').disabled = !rosterFuture.length;
+  }
+
+  function pushRosterHistorySnapshot(snapshot) {
+    if (!snapshot || rosterHistory.at(-1) === snapshot) return;
+    rosterHistory.push(snapshot); if (rosterHistory.length > 80) rosterHistory.shift(); rosterFuture = []; syncRosterHistoryControls();
+  }
+
+  function pushRosterHistory(project) { if (project) pushRosterHistorySnapshot(rosterSnapshot(project)); }
+
+  function clearRosterHistory({ preserveEditingState = false } = {}) {
+    rosterHistory = []; rosterFuture = [];
+    if (!preserveEditingState) {
+      rosterSelection = null;
+      clearTimeout(rosterFormulaPersistTimer); rosterFormulaPersistTimer = null; rosterFormulaDraft = null;
+    }
+    syncRosterHistoryControls();
+  }
+
+  async function moveRosterHistory(project, undo = true) {
+    const from = undo ? rosterHistory : rosterFuture; const to = undo ? rosterFuture : rosterHistory;
+    if (!project || !from.length) return;
+    clearTimeout(rosterFormulaPersistTimer); rosterFormulaPersistTimer = null; rosterFormulaDraft = null;
+    const beforeScheduleSnapshot = scheduleSnapshot(project);
+    to.push(rosterSnapshot(project)); const restored = restoreRosterSnapshot(project, from.pop()); rosterSelection = null;
+    if (restored.peopleChanged || restored.columnsChanged) clearScheduleHistory();
+    if (restored.peopleChanged) {
+      const impact = applyScheduleMutationImpact(project, beforeScheduleSnapshot);
+      syncScheduleProjectState(project, undo ? '명단 행 편집 실행 취소 후 일정 재검토 필요' : '명단 행 편집 다시 실행 후 일정 재검토 필요', impact);
+      recordScheduleMergeImpact(project.id, impact, { scheduleOnly: false });
+    }
+    if (!restored.peopleChanged || restored.columnsChanged) markRosterDependenciesStale(project, undo ? '명단 편집 실행 취소 후 일정 재검토 필요' : '명단 편집 다시 실행 후 일정 재검토 필요');
+    syncRosterHistoryControls(); await persist(undo ? '명단 편집 실행 취소됨' : '명단 편집 다시 실행됨'); renderPeoplePage();
+  }
+
+  function rosterSelectionBounds() {
+    if (!rosterSelection) return null;
+    return {
+      minRow: Math.min(rosterSelection.anchor.row, rosterSelection.focus.row),
+      maxRow: Math.max(rosterSelection.anchor.row, rosterSelection.focus.row),
+      minCol: Math.min(rosterSelection.anchor.col, rosterSelection.focus.col),
+      maxCol: Math.max(rosterSelection.anchor.col, rosterSelection.focus.col)
+    };
+  }
+
+  function rosterSelectionIsRange() {
+    const bounds = rosterSelectionBounds();
+    return Boolean(bounds && (rosterSelection.mode !== 'cells' || bounds.minRow !== bounds.maxRow || bounds.minCol !== bounds.maxCol));
+  }
+
+  function updateRosterSelection(anchor, focus = anchor, mode = rosterSelection?.mode || 'cells') {
+    rosterSelection = { anchor, focus, mode };
     const minRow = Math.min(anchor.row, focus.row); const maxRow = Math.max(anchor.row, focus.row);
     const minCol = Math.min(anchor.col, focus.col); const maxCol = Math.max(anchor.col, focus.col);
     $$('[data-sheet-row][data-sheet-col]', $('#rosterEditorTable')).forEach((cell) => {
@@ -937,6 +1118,9 @@
       cell.classList.toggle('sheet-selected', row >= minRow && row <= maxRow && col >= minCol && col <= maxCol);
       cell.classList.toggle('sheet-anchor', row === anchor.row && col === anchor.col);
     });
+    $$('[data-select-roster-row]', $('#rosterEditorTable')).forEach((cell) => { const row = Number(cell.dataset.selectRosterRow); cell.classList.toggle('sheet-selector-selected', mode === 'row' && row >= minRow && row <= maxRow); });
+    $$('[data-select-roster-column]', $('#rosterEditorTable')).forEach((cell) => { const col = Number(cell.dataset.selectRosterColumn); cell.classList.toggle('sheet-selector-selected', mode === 'column' && col >= minCol && col <= maxCol); });
+    $('#rosterEditorTable [data-select-roster-all]')?.classList.toggle('sheet-selector-selected', mode === 'all');
     const from = `${spreadsheetColumnName(minCol)}${minRow + 1}`; const to = `${spreadsheetColumnName(maxCol)}${maxRow + 1}`;
     $('#rosterSelectionStatus').textContent = from === to ? from : `${from}:${to}`;
     $('#rosterCellAddress').textContent = `${spreadsheetColumnName(focus.col)}${focus.row + 1}`;
@@ -951,6 +1135,97 @@
     const minRow = Math.min(rosterSelection.anchor.row, rosterSelection.focus.row); const maxRow = Math.max(rosterSelection.anchor.row, rosterSelection.focus.row);
     const minCol = Math.min(rosterSelection.anchor.col, rosterSelection.focus.col); const maxCol = Math.max(rosterSelection.anchor.col, rosterSelection.focus.col);
     return Array.from({ length: maxRow - minRow + 1 }, (_, offset) => Array.from({ length: maxCol - minCol + 1 }, (_unused, columnOffset) => sheetCellValue(project, minRow + offset, minCol + columnOffset)));
+  }
+
+  function focusRosterCell(row, col, extend = false) {
+    const project = activeProject(); if (!project?.data.columns.length) return;
+    const visibleRows = Math.max(project.data.people.length + 2, 5);
+    const point = { row: Math.max(0, Math.min(visibleRows, row)), col: Math.max(0, Math.min(project.data.columns.length - 1, col)) };
+    updateRosterSelection(extend && rosterSelection ? rosterSelection.anchor : point, point);
+    const cell = $(`[data-sheet-row="${point.row}"][data-sheet-col="${point.col}"]`, $('#rosterEditorTable'));
+    const input = cell?.querySelector('input');
+    if (input && !input.readOnly) { input.focus({ preventScroll: true }); if (point.row > 0) input.select(); }
+    else if (cell) { cell.tabIndex = -1; cell.focus({ preventScroll: true }); }
+  }
+
+  function shouldUseNativeRosterClipboard(event) {
+    if (event.target.closest?.('[contenteditable="true"]')) return true;
+    const input = event.target.closest?.('input, textarea'); if (!input) return false;
+    if (!input.matches('#rosterCellValue, #rosterEditorTable input')) return true;
+    if (rosterSelectionIsRange()) return false;
+    return typeof input.selectionStart === 'number' && input.selectionStart !== input.selectionEnd;
+  }
+
+  async function finishRosterSheetMutation(project, message, { locked = 0 } = {}) {
+    syncPersonDerivedFields(project); markRosterDependenciesStale(project); await persist(message); renderPeoplePage();
+    if (locked) showToast(`잠긴 행의 ${locked}개 셀은 그대로 유지했습니다.`);
+  }
+
+  async function clearSelectedRosterCells(project, { recordHistory = true, message = '선택 명단 셀 지움' } = {}) {
+    const bounds = rosterSelectionBounds(); if (!project || !bounds) return false;
+    if (recordHistory) pushRosterHistory(project);
+    let changed = 0; let locked = 0;
+    for (let row = Math.max(1, bounds.minRow); row <= bounds.maxRow; row += 1) {
+      const person = project.data.people[row - 1];
+      if (person?.active === false) { locked += bounds.maxCol - bounds.minCol + 1; continue; }
+      for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) if (setSheetCellValue(project, row, col, '')) changed += 1;
+    }
+    if (!changed) { if (recordHistory) rosterHistory.pop(); syncRosterHistoryControls(); if (locked) showToast('제외된 행은 공용 명단 관리자에서 다시 포함한 뒤 수정해주세요.'); return false; }
+    await finishRosterSheetMutation(project, message, { locked }); return true;
+  }
+
+  function removeRosterPeopleWithDependencies(project, personIds, beforeScheduleSnapshot) {
+    const ids = personIds instanceof Set ? personIds : new Set(personIds);
+    project.data.people = project.data.people.filter((person) => !ids.has(person.id));
+    project.data.assignments = project.data.assignments.filter((assignment) => !ids.has(assignment.personId));
+    ids.forEach((id) => { delete project.data.availability[id]; });
+    syncPersonDerivedFields(project);
+    pruneRosterViewMembershipsForSheetStructure(project);
+    refreshScheduleConflicts(project);
+    const impact = applyScheduleMutationImpact(project, beforeScheduleSnapshot);
+    project.data.externalArtifacts.forEach((artifact) => {
+      if (artifact.kind === 'gmailDraft' && ids.has(artifact.personId)) { artifact.status = 'superseded'; artifact.replacedAt = new Date().toISOString(); }
+    });
+    syncScheduleProjectState(project, `명단 삭제 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact);
+    recordScheduleMergeImpact(project.id, impact, { scheduleOnly: false });
+  }
+
+  async function applyRosterSheetAction(action, columnName = '새 컬럼') {
+    const project = activeProject(); const bounds = rosterSelectionBounds(); if (!project || (!bounds && action !== 'insert-row')) return;
+    if (action === 'clear') { await clearSelectedRosterCells(project); return; }
+    pushRosterHistory(project); let locked = 0;
+    if (action === 'fill-down') {
+      const sourceRow = Math.max(1, bounds.minRow);
+      for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) {
+        const value = sheetCellValue(project, sourceRow, col);
+        for (let row = sourceRow + 1; row <= bounds.maxRow; row += 1) {
+          if (project.data.people[row - 1]?.active === false) { locked += 1; continue; }
+          setSheetCellValue(project, row, col, value);
+        }
+      }
+    } else if (action === 'insert-row') {
+      const index = Math.max(0, (bounds?.minRow || 1) - 1); project.data.people.splice(index, 0, createBlankRosterPerson(project, index));
+      rosterSelection = { anchor: { row: index + 1, col: Math.max(0, bounds?.minCol || 0) }, focus: { row: index + 1, col: Math.max(0, bounds?.minCol || 0) }, mode: 'cells' };
+    } else if (action === 'delete-rows') {
+      const minIndex = Math.max(0, bounds.minRow - 1); const maxIndex = Math.min(project.data.people.length - 1, bounds.maxRow - 1);
+      const targets = project.data.people.slice(minIndex, maxIndex + 1).filter((person) => person.active !== false); const ids = new Set(targets.map((person) => person.id));
+      const lockedAssignment = project.data.assignments.some((assignment) => ids.has(assignment.personId) && (assignment.locked || scheduleRowLocked(project, assignment.slotId)));
+      if (lockedAssignment) { rosterHistory.pop(); syncRosterHistoryControls(); showToast('잠긴 일정에 배정된 사람이 포함되어 있습니다. 일정 잠금을 해제한 뒤 행을 삭제해주세요.', 'error'); return; }
+      if (!ids.size) { rosterHistory.pop(); syncRosterHistoryControls(); return; }
+      const beforeScheduleSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); clearScheduleHistory();
+      removeRosterPeopleWithDependencies(project, ids, beforeScheduleSnapshot); rosterSelection = null;
+      await persist('명단 행 삭제됨'); renderPeoplePage(); return;
+    } else if (action === 'insert-column') {
+      const index = Math.max(0, bounds.minCol); const id = `column-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      project.data.columns.splice(index, 0, { id, name: String(columnName || '새 컬럼').trim() || '새 컬럼', type: 'text' }); project.data.people.forEach((person) => { person.values[id] = ''; });
+      rosterSelection = { anchor: { row: 0, col: index }, focus: { row: 0, col: index }, mode: 'cells' };
+    } else if (action === 'delete-columns') {
+      const removed = project.data.columns.slice(bounds.minCol, bounds.maxCol + 1); const ids = new Set(removed.map((column) => column.id));
+      project.data.columns = project.data.columns.filter((column) => !ids.has(column.id)); project.data.people.forEach((person) => ids.forEach((id) => delete person.values[id]));
+      project.data.roles.forEach((role) => { if ([...ids].some((id) => String(role.candidateFilter || '').startsWith(`column:${id}:`))) role.candidateFilter = 'all'; }); rosterSelection = null;
+    }
+    if (['insert-row', 'delete-rows', 'insert-column', 'delete-columns'].includes(action)) clearScheduleHistory();
+    await finishRosterSheetMutation(project, ({ 'fill-down': '명단 아래로 채우기', 'insert-row': '명단 행 삽입', 'delete-rows': '명단 행 삭제', 'insert-column': '명단 컬럼 삽입', 'delete-columns': '명단 컬럼 삭제' })[action] || '명단 시트 편집', { locked });
   }
 
   function renderPeoplePage() {
@@ -974,7 +1249,7 @@
     state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${roster.people?.length || 0}명`); option.value = roster.id; rosterSelect.append(option); });
     const table = $('#rosterEditorTable');
     if (!project.data.columns.length) {
-      const letterRow = element('tr', 'sheet-letter-row'); letterRow.append(element('th', 'sheet-corner', ''), element('th', 'sheet-letter', 'A'));
+      const letterRow = element('tr', 'sheet-letter-row'); const corner = element('th', 'sheet-corner', ''); corner.dataset.selectRosterAll = 'true'; letterRow.append(corner, element('th', 'sheet-letter', 'A'));
       const headRow = element('tr'); headRow.append(element('th', 'sheet-row-number', '1'));
       const first = element('th', 'empty-sheet-header'); first.dataset.sheetRow = '0'; first.dataset.sheetCol = '0';
       const add = element('button', 'add-empty-column', '＋ 첫 번째 열 만들기'); add.type = 'button'; add.dataset.emptySheetAddColumn = 'true'; first.append(add); headRow.append(first);
@@ -984,11 +1259,11 @@
         const cell = element('td', 'empty-sheet-cell'); cell.dataset.sheetRow = String(index + 1); cell.dataset.sheetCol = '0';
         const input = element('input'); input.type = 'text'; input.readOnly = true; input.tabIndex = 0; input.placeholder = index === 0 ? '클릭한 뒤 Ctrl+V' : ''; cell.append(input); tr.append(cell); return tr;
       });
-      table.tBodies[0].replaceChildren(...rows); rosterSelection = rosterSelection || { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } };
-      updateRosterSelection(rosterSelection.anchor, rosterSelection.focus); return;
+      table.tBodies[0].replaceChildren(...rows); rosterSelection = rosterSelection || { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 }, mode: 'cells' };
+      updateRosterSelection(rosterSelection.anchor, rosterSelection.focus, rosterSelection.mode); syncRosterHistoryControls(); return;
     }
-    const letterRow = element('tr', 'sheet-letter-row'); letterRow.append(element('th', 'sheet-corner', ''));
-    project.data.columns.forEach((_column, index) => letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(index))));
+    const letterRow = element('tr', 'sheet-letter-row'); const corner = element('th', 'sheet-corner', ''); corner.dataset.selectRosterAll = 'true'; corner.title = '전체 표 선택'; letterRow.append(corner);
+    project.data.columns.forEach((_column, index) => { const letter = element('th', 'sheet-letter', spreadsheetColumnName(index)); letter.dataset.selectRosterColumn = String(index); letter.title = `${spreadsheetColumnName(index)}열 전체 선택`; letterRow.append(letter); });
     letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(project.data.columns.length)));
     const headRow = element('tr'); headRow.append(element('th', 'sheet-row-number', '1'));
     project.data.columns.forEach((column, columnIndex) => {
@@ -1019,7 +1294,7 @@
       const inactive = person?.active === false;
       const tr = element('tr', inactive ? 'roster-inactive-row' : '');
       if (inactive) { tr.dataset.rosterInactive = person.id; tr.title = '공용 명단 관리자에서 제외된 행입니다. 다시 포함한 뒤 수정할 수 있습니다.'; tr.setAttribute('aria-label', `${person.name || `${rowIndex + 2}행`} · 제외됨 · 읽기 전용`); }
-      tr.append(element('th', 'sheet-row-number', String(rowIndex + 2)));
+      const rowNumber = element('th', 'sheet-row-number', String(rowIndex + 2)); rowNumber.dataset.selectRosterRow = String(rowIndex + 1); rowNumber.title = `${rowIndex + 2}행 전체 선택`; tr.append(rowNumber);
       project.data.columns.forEach((column, columnIndex) => {
         const td = element('td');
         td.dataset.sheetRow = String(rowIndex + 1); td.dataset.sheetCol = String(columnIndex);
@@ -1038,12 +1313,22 @@
     });
     table.tBodies[0].replaceChildren(...rows);
     if (rosterSelection && [rosterSelection.anchor, rosterSelection.focus].some((point) => point.row > project.data.people.length || point.col >= project.data.columns.length)) rosterSelection = null;
-    if (rosterSelection) updateRosterSelection(rosterSelection.anchor, rosterSelection.focus);
+    if (rosterSelection) updateRosterSelection(rosterSelection.anchor, rosterSelection.focus, rosterSelection.mode);
     else { $('#rosterSelectionStatus').textContent = '선택 없음'; $('#rosterCellAddress').textContent = '—'; $('#rosterCellValue').value = ''; $('#rosterCellValue').disabled = true; }
+    syncRosterHistoryControls();
   }
 
   function activeRosterView(project = activeProject()) {
     return project?.data.rosterViews?.find((view) => view.id === project.data.activeRosterViewId) || null;
+  }
+
+  function rosterViewMutationSignature(project) {
+    return JSON.stringify({
+      activeRosterViewId: project?.data.activeRosterViewId || null,
+      scheduleRosterViewId: project?.data.scheduleRules?.rosterViewId || null,
+      people: (project?.data.people || []).map((person) => [person.id, person.active]),
+      rosterViews: project?.data.rosterViews || []
+    });
   }
 
   function rosterViewIncludedIds(view, project) {
@@ -1073,11 +1358,13 @@
   async function createRosterViewFromCurrent(saveIncludedOnly = false) {
     const project = activeProject(); if (!project?.data.people.length) { showToast('원본 명단을 먼저 입력해주세요.', 'error'); return; }
     const current = activeRosterView(project); const sourceIds = saveIncludedOnly ? rosterViewIncludedIds(current, project) : project.data.people.map((person) => person.id);
+    const projectId = project.id; const currentViewId = current?.id || null; const before = rosterViewMutationSignature(project);
     const defaultName = saveIncludedOnly && current ? `${current.name} 다음 단계` : '새 단계 명단';
     const name = await requestName(saveIncludedOnly ? '현재 포함 인원으로 새 단계 명단' : '원본에서 새 단계 명단', defaultName); if (!name) return;
+    const currentProject = projectById(projectId); if (activeProject()?.id !== projectId || !currentProject || rosterViewMutationSignature(currentProject) !== before || (activeRosterView(currentProject)?.id || null) !== currentViewId) { showToast('명단 또는 단계 명단이 바뀌었습니다. 다시 저장해주세요.'); renderPeoplePage(); return; }
     const now = new Date().toISOString(); const view = { id: `roster-view-${Date.now().toString(36)}`, name, parentId: current?.id || null, personIds: [...sourceIds], excludedPersonIds: [], createdAt: now, updatedAt: now };
-    project.data.rosterViews.push(view); project.data.activeRosterViewId = view.id;
-    state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 저장됨'); renderPeoplePage(); showToast(`“${name}” 명단을 ${sourceIds.length}명으로 만들었습니다.`, 'success');
+    currentProject.data.rosterViews.push(view); currentProject.data.activeRosterViewId = view.id;
+    state = Core.updateProject(state, currentProject.id, { data: currentProject.data }); await persist('단계 명단 저장됨'); renderPeoplePage(); showToast(`“${name}” 명단을 ${sourceIds.length}명으로 만들었습니다.`, 'success');
   }
 
   function activeWorkItem(project = activeProject()) {
@@ -1165,15 +1452,73 @@
     project.data.workItems.push(item); project.data.activeWorkItemId = item.id; return item;
   }
 
-  function updateArrangementSelection(anchor, focus = anchor) {
+  function arrangementSnapshot(item) {
+    return JSON.stringify({ columns: item.columns, rows: item.rows, updatedAt: item.updatedAt });
+  }
+
+  function restoreArrangementSnapshot(item, snapshot) {
+    const value = JSON.parse(snapshot); item.columns = Array.isArray(value.columns) ? value.columns : []; item.rows = Array.isArray(value.rows) ? value.rows : []; item.updatedAt = value.updatedAt || new Date().toISOString();
+  }
+
+  function syncArrangementHistoryControls() {
+    if ($('#arrangementUndo')) $('#arrangementUndo').disabled = !arrangementHistory.length;
+    if ($('#arrangementRedo')) $('#arrangementRedo').disabled = !arrangementFuture.length;
+  }
+
+  function pushArrangementHistorySnapshot(snapshot) {
+    if (!snapshot || arrangementHistory.at(-1) === snapshot) return;
+    arrangementHistory.push(snapshot); if (arrangementHistory.length > 80) arrangementHistory.shift(); arrangementFuture = []; syncArrangementHistoryControls();
+  }
+
+  function pushArrangementHistory(item) { if (item) pushArrangementHistorySnapshot(arrangementSnapshot(item)); }
+
+  function clearArrangementHistory({ preserveEditingState = false } = {}) {
+    arrangementHistory = []; arrangementFuture = [];
+    if (!preserveEditingState) { arrangementSelection = null; clearTimeout(arrangementPersistTimer); arrangementPersistTimer = null; arrangementDrafts.clear(); }
+    syncArrangementHistoryControls();
+  }
+
+  async function moveArrangementHistory(project, item, undo = true) {
+    const from = undo ? arrangementHistory : arrangementFuture; const to = undo ? arrangementFuture : arrangementHistory;
+    if (!project || !item || !from.length) return;
+    // Core.getActiveProject normalizes (and therefore clones) state.  Button
+    // callbacks can consequently hand us a project and item from two different
+    // clones; always resolve the work item inside the project that will be saved.
+    const projectItem = project.data.workItems.find((candidate) => candidate.id === item.id);
+    if (!projectItem) return;
+    clearTimeout(arrangementPersistTimer); arrangementPersistTimer = null; arrangementDrafts.clear();
+    to.push(arrangementSnapshot(projectItem)); restoreArrangementSnapshot(projectItem, from.pop()); arrangementSelection = null;
+    projectItem.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); syncArrangementHistoryControls();
+    await persist(undo ? '작업표 편집 실행 취소됨' : '작업표 편집 다시 실행됨'); renderArrangementPage();
+  }
+
+  function arrangementSelectionBounds() {
+    if (!arrangementSelection) return null;
+    return {
+      minRow: Math.min(arrangementSelection.anchor.row, arrangementSelection.focus.row),
+      maxRow: Math.max(arrangementSelection.anchor.row, arrangementSelection.focus.row),
+      minCol: Math.min(arrangementSelection.anchor.col, arrangementSelection.focus.col),
+      maxCol: Math.max(arrangementSelection.anchor.col, arrangementSelection.focus.col)
+    };
+  }
+
+  function arrangementSelectionIsRange() {
+    const bounds = arrangementSelectionBounds();
+    return Boolean(bounds && (arrangementSelection.mode !== 'cells' || bounds.minRow !== bounds.maxRow || bounds.minCol !== bounds.maxCol));
+  }
+
+  function updateArrangementSelection(anchor, focus = anchor, mode = arrangementSelection?.mode || 'cells') {
     const item = activeWorkItem(); if (!item) return;
-    arrangementSelection = { anchor, focus };
+    arrangementSelection = { anchor, focus, mode };
     const minRow = Math.min(anchor.row, focus.row); const maxRow = Math.max(anchor.row, focus.row); const minCol = Math.min(anchor.col, focus.col); const maxCol = Math.max(anchor.col, focus.col);
     $$('[data-arrangement-row][data-arrangement-col]', $('#arrangementBoard')).forEach((cell) => {
       const row = Number(cell.dataset.arrangementRow); const col = Number(cell.dataset.arrangementCol);
       cell.classList.toggle('sheet-selected', row >= minRow && row <= maxRow && col >= minCol && col <= maxCol);
       cell.classList.toggle('sheet-anchor', row === anchor.row && col === anchor.col);
     });
+    $$('[data-select-arrangement-row]', $('#arrangementBoard')).forEach((cell) => { const row = Number(cell.dataset.selectArrangementRow); cell.classList.toggle('sheet-selector-selected', mode === 'row' && row >= minRow && row <= maxRow); });
+    $$('[data-select-arrangement-column]', $('#arrangementBoard')).forEach((cell) => { const col = Number(cell.dataset.selectArrangementColumn); cell.classList.toggle('sheet-selector-selected', mode === 'column' && col >= minCol && col <= maxCol); });
+    $('#arrangementBoard [data-select-arrangement-all]')?.classList.toggle('sheet-selector-selected', mode === 'all');
     const from = `${spreadsheetColumnName(minCol)}${minRow + 2}`; const to = `${spreadsheetColumnName(maxCol)}${maxRow + 2}`;
     $('#arrangementSelectionStatus').textContent = from === to ? from : `${from}:${to}`;
     $('#arrangementCellAddress').textContent = `${spreadsheetColumnName(focus.col)}${focus.row + 2}`;
@@ -1186,6 +1531,55 @@
     return Array.from({ length: maxRow - minRow + 1 }, (_, rowOffset) => Array.from({ length: maxCol - minCol + 1 }, (_unused, colOffset) => arrangementCellValue(item, minRow + rowOffset, minCol + colOffset)));
   }
 
+  function focusArrangementCell(row, col, extend = false) {
+    const item = activeWorkItem(); if (!item?.columns.length) return; const visibleRows = Math.max(item.rows.length + 2, 5);
+    const point = { row: Math.max(0, Math.min(visibleRows - 1, row)), col: Math.max(0, Math.min(item.columns.length - 1, col)) };
+    updateArrangementSelection(extend && arrangementSelection ? arrangementSelection.anchor : point, point);
+    const cell = $(`[data-arrangement-row="${point.row}"][data-arrangement-col="${point.col}"]`, $('#arrangementBoard')); const input = cell?.querySelector('input');
+    if (input) { input.focus({ preventScroll: true }); input.select(); } else if (cell) { cell.tabIndex = -1; cell.focus({ preventScroll: true }); }
+  }
+
+  function shouldUseNativeArrangementClipboard(event) {
+    if (event.target.closest?.('[contenteditable="true"]')) return true;
+    const input = event.target.closest?.('input, textarea'); if (!input) return false;
+    if (!input.matches('#arrangementCellValue, #arrangementBoard input')) return true;
+    if (arrangementSelectionIsRange()) return false;
+    return typeof input.selectionStart === 'number' && input.selectionStart !== input.selectionEnd;
+  }
+
+  async function finishArrangementSheetMutation(project, item, message) {
+    item.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist(message); renderArrangementPage();
+  }
+
+  async function clearSelectedArrangementCells(project, item, { recordHistory = true, message = '선택 작업표 셀 지움' } = {}) {
+    const bounds = arrangementSelectionBounds(); if (!project || !item || !bounds) return false; if (recordHistory) pushArrangementHistory(item); let changed = 0;
+    for (let row = Math.max(0, bounds.minRow); row <= bounds.maxRow; row += 1) for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) { setArrangementCellValue(item, row, col, ''); changed += 1; }
+    if (!changed) { if (recordHistory) arrangementHistory.pop(); syncArrangementHistoryControls(); return false; }
+    await finishArrangementSheetMutation(project, item, message); return true;
+  }
+
+  async function applyArrangementSheetAction(action, columnName = '새 컬럼') {
+    const project = activeProject(); const item = activeWorkItem(project); const bounds = arrangementSelectionBounds(); if (!project || !item || (!bounds && action !== 'insert-row')) return;
+    if (action === 'clear') { await clearSelectedArrangementCells(project, item); return; }
+    pushArrangementHistory(item);
+    if (action === 'fill-down') {
+      const sourceRow = Math.max(0, bounds.minRow);
+      for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) { const value = arrangementCellValue(item, sourceRow, col); for (let row = sourceRow + 1; row <= bounds.maxRow; row += 1) setArrangementCellValue(item, row, col, value); }
+    } else if (action === 'insert-row') {
+      const index = Math.max(0, bounds?.minRow || 0); item.rows.splice(index, 0, { id: `work-row-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, personId: null, values: Object.fromEntries(item.columns.map((column) => [column.id, ''])) });
+      arrangementSelection = { anchor: { row: index, col: Math.max(0, bounds?.minCol || 0) }, focus: { row: index, col: Math.max(0, bounds?.minCol || 0) }, mode: 'cells' };
+    } else if (action === 'delete-rows') {
+      const start = Math.max(0, bounds.minRow); const count = Math.max(0, Math.min(item.rows.length - 1, bounds.maxRow) - start + 1); if (count) item.rows.splice(start, count); arrangementSelection = null;
+    } else if (action === 'insert-column') {
+      const index = Math.max(0, bounds.minCol); const id = `work-column-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`; item.columns.splice(index, 0, { id, name: String(columnName || '새 컬럼').trim() || '새 컬럼' }); item.rows.forEach((row) => { row.values[id] = ''; });
+      arrangementSelection = { anchor: { row: -1, col: index }, focus: { row: -1, col: index }, mode: 'cells' };
+    } else if (action === 'delete-columns') {
+      const count = bounds.maxCol - bounds.minCol + 1; if (item.columns.length - count < 1) { arrangementHistory.pop(); syncArrangementHistoryControls(); showToast('작업표에는 컬럼이 하나 이상 있어야 합니다.', 'error'); return; }
+      const removed = item.columns.splice(bounds.minCol, count); item.rows.forEach((row) => removed.forEach((column) => delete row.values[column.id])); arrangementSelection = null;
+    }
+    await finishArrangementSheetMutation(project, item, ({ 'fill-down': '작업표 아래로 채우기', 'insert-row': '작업표 행 삽입', 'delete-rows': '작업표 행 삭제', 'insert-column': '작업표 컬럼 삽입', 'delete-columns': '작업표 컬럼 삭제' })[action] || '작업표 편집');
+  }
+
   function renderArrangementPage() {
     const project = activeProject(); const item = activeWorkItem(project);
     if (!project || !item) { navigate('people'); return; }
@@ -1193,14 +1587,15 @@
     $('#arrangementTitle').textContent = item.name;
     $('#arrangementSummary').textContent = `이 작업표는 원본 명단과 별도로 저장됩니다.`;
     const select = $('#arrangementSelect'); select.replaceChildren(...project.data.workItems.map((work) => { const option = element('option', '', work.name); option.value = work.id; option.selected = work.id === item.id; return option; }));
-    const table = $('#arrangementBoard'); const letterRow = element('tr', 'sheet-letter-row'); letterRow.append(element('th', 'sheet-corner', ''));
-    item.columns.forEach((_column, index) => letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(index)))); letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(item.columns.length)));
+    const table = $('#arrangementBoard'); const letterRow = element('tr', 'sheet-letter-row'); const corner = element('th', 'sheet-corner', ''); corner.dataset.selectArrangementAll = 'true'; corner.title = '전체 표 선택'; letterRow.append(corner);
+    item.columns.forEach((_column, index) => { const letter = element('th', 'sheet-letter', spreadsheetColumnName(index)); letter.dataset.selectArrangementColumn = String(index); letter.title = `${spreadsheetColumnName(index)}열 전체 선택`; letterRow.append(letter); }); letterRow.append(element('th', 'sheet-letter', spreadsheetColumnName(item.columns.length)));
     const headerRow = element('tr'); headerRow.append(element('th', 'sheet-row-number', '1'));
-    item.columns.forEach((column, index) => { const th = element('th', 'arrangement-column-header'); th.dataset.arrangementRow = '-1'; th.dataset.arrangementCol = String(index); const name = element('button', 'arrangement-column-name', column.name); name.type = 'button'; name.dataset.arrangementRenameColumn = column.id; const remove = element('button', 'arrangement-column-remove', '×'); remove.type = 'button'; remove.dataset.arrangementRemoveColumn = column.id; th.append(name, remove); headerRow.append(th); });
+    item.columns.forEach((column, index) => { const th = element('th', 'arrangement-column-header'); th.dataset.arrangementRow = '-1'; th.dataset.arrangementCol = String(index); const name = element('button', 'arrangement-column-name', column.name); name.type = 'button'; name.dataset.arrangementRenameColumn = column.id; name.title = '드래그하여 선택 · 더블클릭하여 컬럼 이름 변경'; const remove = element('button', 'arrangement-column-remove', '×'); remove.type = 'button'; remove.dataset.arrangementRemoveColumn = column.id; th.append(name, remove); headerRow.append(th); });
     const addTh = element('th', 'arrangement-add-column'); const add = element('button', '', '＋ 컬럼'); add.type = 'button'; add.dataset.arrangementAddColumn = 'true'; addTh.append(add); headerRow.append(addTh); table.tHead.replaceChildren(letterRow, headerRow);
-    const visibleRows = Math.max(item.rows.length + 2, 5); const rows = Array.from({ length: visibleRows }, (_, rowIndex) => { const tr = element('tr'); tr.append(element('th', 'sheet-row-number', String(rowIndex + 2))); item.columns.forEach((column, colIndex) => { const td = element('td'); td.dataset.arrangementRow = String(rowIndex); td.dataset.arrangementCol = String(colIndex); const input = element('input'); input.type = 'text'; input.value = item.rows[rowIndex]?.values?.[column.id] || ''; input.dataset.arrangementInput = 'true'; td.append(input); tr.append(td); }); tr.append(element('td', 'roster-add-column-spacer', '')); return tr; });
+    const visibleRows = Math.max(item.rows.length + 2, 5); const rows = Array.from({ length: visibleRows }, (_, rowIndex) => { const tr = element('tr'); const rowNumber = element('th', 'sheet-row-number', String(rowIndex + 2)); rowNumber.dataset.selectArrangementRow = String(rowIndex); rowNumber.title = `${rowIndex + 2}행 전체 선택`; tr.append(rowNumber); item.columns.forEach((column, colIndex) => { const td = element('td'); td.dataset.arrangementRow = String(rowIndex); td.dataset.arrangementCol = String(colIndex); const input = element('input'); input.type = 'text'; input.value = item.rows[rowIndex]?.values?.[column.id] || ''; input.dataset.arrangementInput = 'true'; td.append(input); tr.append(td); }); tr.append(element('td', 'roster-add-column-spacer', '')); return tr; });
     table.tBodies[0].replaceChildren(...rows);
-    if (arrangementSelection && arrangementSelection.focus.col < item.columns.length) updateArrangementSelection(arrangementSelection.anchor, arrangementSelection.focus); else { arrangementSelection = null; $('#arrangementSelectionStatus').textContent = '선택 없음'; $('#arrangementCellAddress').textContent = '—'; $('#arrangementCellValue').value = ''; $('#arrangementCellValue').disabled = true; }
+    if (arrangementSelection && arrangementSelection.focus.col < item.columns.length) updateArrangementSelection(arrangementSelection.anchor, arrangementSelection.focus, arrangementSelection.mode); else { arrangementSelection = null; $('#arrangementSelectionStatus').textContent = '선택 없음'; $('#arrangementCellAddress').textContent = '—'; $('#arrangementCellValue').value = ''; $('#arrangementCellValue').disabled = true; }
+    syncArrangementHistoryControls();
   }
 
   function openArrangementSetup(type = 'grouping') {
@@ -1482,6 +1877,18 @@
 
   function applyIncomingWorkspaceState(nextState) {
     resetScheduleHistoryForIncomingState(nextState);
+    // Undo snapshots are scoped to the exact in-memory revision they were taken
+    // from.  Once another window wins with a newer workspace revision, keeping
+    // either sheet stack would let Undo overwrite that newer state with stale
+    // roster/work-item data.  Draft queues are cleared by these helpers too.
+    clearRosterHistory();
+    clearArrangementHistory();
+    rosterSelecting = false;
+    arrangementSelecting = false;
+    scheduleSelecting = false;
+    $('#rosterEditorTable')?.classList.remove('range-selecting');
+    $('#arrangementBoard')?.classList.remove('range-selecting');
+    $('#scheduleBoard')?.classList.remove('range-selecting');
     acceptPersistedBaseline(nextState);
     state = nextState;
     if (state.preferences.storageMode === 'drive') scheduleDriveStateSync();
@@ -1522,6 +1929,24 @@
         page: document.activeElement.closest('.page')?.dataset.page || ''
       } : null
     });
+    globalThis.__workspaceSheetDiagnostics = () => {
+      const summarizeArrangement = (snapshot) => {
+        const value = JSON.parse(snapshot);
+        return {
+          columns: value.columns?.map((column) => column.name),
+          rows: value.rows?.slice(0, 3).map((row) => value.columns?.map((column) => row.values?.[column.id]))
+        };
+      };
+      const item = activeWorkItem();
+      return {
+        rosterHistoryLength: rosterHistory.length,
+        rosterFutureLength: rosterFuture.length,
+        arrangementHistory: arrangementHistory.map(summarizeArrangement),
+        arrangementFuture: arrangementFuture.map(summarizeArrangement),
+        arrangementCurrent: item ? summarizeArrangement(arrangementSnapshot(item)) : null,
+        arrangementDrafts: [...arrangementDrafts.values()]
+      };
+    };
   }
 
   function scheduleMutationImpact(before = {}, after = {}) {
@@ -2267,6 +2692,7 @@
   async function mergeScheduleRoster(rosterId) {
     await flushSchedulePersist();
     const project = activeProject(); const roster = state.library.rosters.find((item) => item.id === rosterId); if (!project || !roster) { showToast('추가할 전역 저장 명단을 선택해주세요.', 'error'); return; }
+    let rosterColumnsChanged = false;
     const columnMap = new Map(); (roster.columns || []).forEach((sourceColumn) => {
       const sourceName = String(sourceColumn.name || '').trim().toLowerCase();
       const sourceType = sourceColumn.type || sourceColumn.workspaceType || (sourceColumn.role === 'email' ? 'email' : 'text');
@@ -2275,6 +2701,7 @@
       if (!target) {
         target = { ...JSON.parse(JSON.stringify(sourceColumn)), id: `column-${Date.now().toString(36)}-${project.data.columns.length}`, type: sourceType };
         project.data.columns.push(target); project.data.people.forEach((person) => { person.values ||= {}; person.values[target.id] = ''; });
+        rosterColumnsChanged = true;
       }
       columnMap.set(sourceColumn.id, target.id);
     });
@@ -2313,6 +2740,7 @@
     });
     if (scheduleViewChanged) scheduleView.updatedAt = new Date().toISOString();
     syncPersonDerivedFields(project);
+    if (added || scheduleViewChanged || rosterColumnsChanged) clearRosterHistory();
     markRosterDependenciesStale(project, '저장 명단 추가 후 일정 재검토 필요'); await persist('전역 명단 배정 후보 추가됨'); renderAll(); navigate('schedule');
     const linkedMessage = linkedExisting ? ` 기존 ${linkedExisting}명도 선택한 단계 명단에 포함했습니다.` : '';
     showToast(`${roster.name}에서 중복을 제외한 ${added}명을 배정 후보에 추가했습니다.${linkedMessage}`, 'success');
@@ -2794,6 +3222,7 @@
       if (mailEditorDirty) await saveMailEditorDraft(mailEditorProjectId);
       const navigationAtStart = navigationGeneration;
       state = Core.setActiveProject(state, projectId);
+      rosterSelection = null; rosterHistory = []; rosterFuture = []; arrangementSelection = null; arrangementHistory = []; arrangementFuture = [];
       scheduleSelection = null; scheduleHistory = []; scheduleFuture = []; selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null;
       await persist('프로젝트 전환됨');
       renderAll();
@@ -2967,6 +3396,18 @@
     if (!viewIds.has(project.data.scheduleRules.rosterViewId)) project.data.scheduleRules.rosterViewId = null;
   }
 
+  function pruneRosterViewMembershipsForSheetStructure(project) {
+    const personIds = new Set(project.data.people.map((person) => person.id));
+    project.data.rosterViews = (project.data.rosterViews || []).map((view) => ({
+      ...view,
+      personIds: (view.personIds || []).filter((id) => personIds.has(id)),
+      excludedPersonIds: (view.excludedPersonIds || []).filter((id) => personIds.has(id))
+    }));
+    const viewIds = new Set(project.data.rosterViews.map((view) => view.id));
+    if (!viewIds.has(project.data.activeRosterViewId)) project.data.activeRosterViewId = null;
+    if (!viewIds.has(project.data.scheduleRules.rosterViewId)) project.data.scheduleRules.rosterViewId = null;
+  }
+
   async function applyRosterMatrix(matrix) {
     let project = activeProject();
     if (!project) return false;
@@ -2977,6 +3418,7 @@
     if (!project || rosterReplacementSignature(project) !== confirmationSignature || hasLockedSchedule(project)) { showToast('확인하는 동안 다른 창의 명단 또는 일정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return false; }
     const beforeSnapshot = scheduleSnapshot(project);
     const result = Ops.matrixToRoster(matrix);
+    clearRosterHistory();
     clearScheduleHistory();
     project.data.columns = result.columns; project.data.people = result.people; reconcileRosterViewsAfterReplacement(project); project.data.availability = {}; project.data.assignments = [];
     project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => artifact.kind === 'gmailDraft' ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString() } : artifact);
@@ -3004,6 +3446,7 @@
     if (!project || rosterReplacementSignature(project) !== confirmationSignature || hasLockedSchedule(project) || !currentRoster || sharedRosterSignature(currentRoster) !== confirmationRosterSignature) { showToast('확인하는 동안 다른 창의 명단·일정 또는 저장 명단이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return false; }
     roster = currentRoster;
     const beforeSnapshot = scheduleSnapshot(project);
+    clearRosterHistory();
     clearScheduleHistory();
     project.data.rosterName = roster.name;
     project.data.columns = JSON.parse(JSON.stringify(roster.columns || []));
@@ -3162,6 +3605,7 @@
       if (person?.active === false) { event.target.value = person.values[event.target.dataset.columnId] || ''; return; }
       if (person) person.values[event.target.dataset.columnId] = event.target.value;
       syncPersonDerivedFields(project);
+      if (person) state = Core.updateProject(state, project.id, { data: project.data });
     });
     document.addEventListener('focusout', () => setTimeout(() => applyDeferredWorkspaceState(), 0));
     const markMailEditorDirty = () => { mailEditorDirty = true; $('#mailPackageStatus').textContent = '메일 편집 내용을 자동 저장하는 중입니다.'; const project = activeProject(); if (project) renderTemplateVariables(project); clearTimeout(mailDraftTimer); mailDraftTimer = setTimeout(() => void saveMailEditorDraft(), 700); };
@@ -3190,105 +3634,216 @@
 
     const rosterTable = $('#rosterEditorTable');
     if (rosterTable) {
-    rosterTable.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return; const cell = event.target.closest('[data-sheet-row][data-sheet-col]'); if (!cell) return;
-      const point = { row: Number(cell.dataset.sheetRow), col: Number(cell.dataset.sheetCol) };
-      rosterSelecting = true; updateRosterSelection(event.shiftKey && rosterSelection ? rosterSelection.anchor : point, point);
+    rosterTable.addEventListener('mousedown', (event) => {
+      if (event.button !== 0 || event.target.closest('[data-empty-sheet-add-column], [data-roster-add-column]')) return;
+      rosterTable.classList.remove('range-selecting');
+      const project = activeProject(); if (!project) return; const cell = event.target.closest('[data-sheet-row][data-sheet-col]'); const columnSelector = event.target.closest('[data-select-roster-column]'); const rowSelector = event.target.closest('[data-select-roster-row]'); const allSelector = event.target.closest('[data-select-roster-all]');
+      if (!cell && !columnSelector && !rowSelector && !allSelector) return; const visibleRows = Math.max(project.data.people.length + 2, 5); let anchor; let focus; let mode = 'cells';
+      if (columnSelector) { const col = Number(columnSelector.dataset.selectRosterColumn); anchor = { row: 0, col }; focus = { row: visibleRows, col }; mode = 'column'; }
+      else if (rowSelector) { const row = Number(rowSelector.dataset.selectRosterRow); anchor = { row, col: 0 }; focus = { row, col: Math.max(0, project.data.columns.length - 1) }; mode = 'row'; }
+      else if (allSelector) { anchor = { row: 0, col: 0 }; focus = { row: visibleRows, col: Math.max(0, project.data.columns.length - 1) }; mode = 'all'; }
+      else { const point = { row: Number(cell.dataset.sheetRow), col: Number(cell.dataset.sheetCol) }; anchor = point; focus = point; }
+      if (event.shiftKey && rosterSelection && rosterSelection.mode === mode && mode !== 'all') anchor = rosterSelection.anchor;
+      rosterSelecting = true; updateRosterSelection(anchor, focus, mode);
+      const input = event.target.closest('input') || cell?.querySelector('input'); const target = input?.readOnly ? cell : input || event.target.closest('[tabindex]') || columnSelector || rowSelector || allSelector || cell;
+      if (!input && target) { event.preventDefault(); if (!target.hasAttribute('tabindex')) target.tabIndex = -1; target.focus({ preventScroll: true }); }
     });
-    rosterTable.addEventListener('pointerover', (event) => {
-      if (!rosterSelecting || !rosterSelection) return; const cell = event.target.closest('[data-sheet-row][data-sheet-col]'); if (!cell) return;
-      updateRosterSelection(rosterSelection.anchor, { row: Number(cell.dataset.sheetRow), col: Number(cell.dataset.sheetCol) });
+    globalThis.addEventListener('mousemove', (event) => {
+      if (!rosterSelecting || !rosterSelection || !(event.buttons & 1)) return; const pointerTarget = spreadsheetPointerTarget(event, rosterTable); if (!pointerTarget) return; const cell = pointerTarget.closest('[data-sheet-row][data-sheet-col]'); const columnSelector = pointerTarget.closest('[data-select-roster-column]'); const rowSelector = pointerTarget.closest('[data-select-roster-row]'); let focus = rosterSelection.focus;
+      if (rosterSelection.mode === 'column' && columnSelector) focus = { row: rosterSelection.focus.row, col: Number(columnSelector.dataset.selectRosterColumn) };
+      else if (rosterSelection.mode === 'row' && rowSelector) focus = { row: Number(rowSelector.dataset.selectRosterRow), col: rosterSelection.focus.col };
+      else if (rosterSelection.mode === 'cells' && cell) focus = { row: Number(cell.dataset.sheetRow), col: Number(cell.dataset.sheetCol) };
+      else return; if (focus.row === rosterSelection.focus.row && focus.col === rosterSelection.focus.col) return; beginSpreadsheetRangeDrag(rosterTable); event.preventDefault(); updateRosterSelection(rosterSelection.anchor, focus, rosterSelection.mode);
+    }, true);
+    globalThis.addEventListener('mouseup', () => { rosterSelecting = false; rosterTable.classList.remove('range-selecting'); });
+    rosterTable.addEventListener('dragstart', (event) => { if (rosterSelecting && event.target.closest('input')) event.preventDefault(); });
+    rosterTable.addEventListener('focusin', (event) => { if (event.target.matches('[data-person-row], [data-column-name], [data-column-type]')) event.target.dataset.beforeRosterEdit = rosterSnapshot(activeProject()); });
+    rosterTable.addEventListener('input', (event) => {
+      if (!event.target.matches('[data-person-row], [data-column-name]')) return;
+      if (event.target.dataset.beforeRosterEdit) { pushRosterHistorySnapshot(event.target.dataset.beforeRosterEdit); delete event.target.dataset.beforeRosterEdit; }
+      if (event.target.matches('[data-column-name]')) { const project = activeProject(); const column = project?.data.columns.find((item) => item.id === event.target.dataset.columnName); if (project && column) { column.name = event.target.value; state = Core.updateProject(state, project.id, { data: project.data }); } }
     });
-    document.addEventListener('pointerup', () => { rosterSelecting = false; });
+    rosterTable.addEventListener('change', (event) => { if (!event.target.dataset.beforeRosterEdit) return; pushRosterHistorySnapshot(event.target.dataset.beforeRosterEdit); delete event.target.dataset.beforeRosterEdit; });
     document.addEventListener('copy', (event) => {
-      if (currentPage !== 'people' || !rosterSelection) return; const project = activeProject(); if (!project) return;
+      if (currentPage !== 'people' || !rosterSelection || shouldUseNativeRosterClipboard(event)) return; const project = activeProject(); if (!project) return;
       const matrix = selectedRosterMatrix(project); if (!matrix.length) return;
       const text = matrix.map((row) => row.join('\t')).join('\r\n');
       const html = `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`;
       event.clipboardData.setData('text/plain', text); event.clipboardData.setData('text/html', html); event.preventDefault(); showToast(`${matrix.length}행 × ${matrix[0].length}열을 복사했습니다.`);
     });
+    document.addEventListener('cut', (event) => {
+      if (currentPage !== 'people' || !rosterSelection || shouldUseNativeRosterClipboard(event)) return; const project = activeProject(); if (!project) return; const matrix = selectedRosterMatrix(project); if (!matrix.length) return;
+      event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`); event.preventDefault(); void clearSelectedRosterCells(project, { message: '명단 셀 잘라내기 저장됨' });
+    });
     rosterTable.addEventListener('paste', async (event) => {
       if (!rosterSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text.trim()) return;
       const project = activeProject(); if (!project) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return;
-      if (!project.data.columns.length) { event.preventDefault(); await applyRosterMatrix(matrix); rosterSelection = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } }; return; }
-      if (!/[\t\r\n]/.test(text)) return; event.preventDefault();
-      const start = rosterSelection.focus;
+      if (!project.data.columns.length) { event.preventDefault(); clearRosterHistory(); await applyRosterMatrix(matrix); rosterSelection = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 }, mode: 'cells' }; return; }
+      const singleValue = matrix.length === 1 && matrix[0].length === 1;
+      if (singleValue && rosterSelectionIsRange()) {
+        event.preventDefault(); pushRosterHistory(project); const bounds = rosterSelectionBounds(); let changed = 0; let locked = 0;
+        for (let row = Math.max(1, bounds.minRow); row <= bounds.maxRow; row += 1) for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) { if (setSheetCellValue(project, row, col, matrix[0][0])) changed += 1; else locked += 1; }
+        if (!changed) { rosterHistory.pop(); syncRosterHistoryControls(); showToast('선택한 범위는 수정할 수 없습니다.'); return; }
+        await finishRosterSheetMutation(project, '선택 명단 범위 채우기 저장됨', { locked }); return;
+      }
+      if (singleValue) return; event.preventDefault(); pushRosterHistory(project);
+      const pasteBounds = rosterSelectionBounds(); const start = { row: pasteBounds.minRow, col: pasteBounds.minCol };
       let changed = 0; let locked = 0;
       matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => {
         if (start.col + colOffset >= project.data.columns.length) return;
         if (setSheetCellValue(project, start.row + rowOffset, start.col + colOffset, value)) changed += 1; else locked += 1;
       }));
       updateRosterSelection(start, { row: start.row + matrix.length - 1, col: Math.min(project.data.columns.length - 1, start.col + Math.max(...matrix.map((row) => row.length)) - 1) });
-      if (!changed) { showToast('제외된 행은 공용 명단 관리자에서 다시 포함한 뒤 수정해주세요.'); return; }
-      markRosterDependenciesStale(project); await persist('셀 붙여넣기 저장됨'); renderPeoplePage();
+      if (!changed) { rosterHistory.pop(); syncRosterHistoryControls(); showToast('제외된 행은 공용 명단 관리자에서 다시 포함한 뒤 수정해주세요.'); return; }
+      await finishRosterSheetMutation(project, '셀 붙여넣기 저장됨');
       if (locked) showToast(`붙여넣기는 완료했지만 제외 행의 ${locked}개 셀은 잠금 상태로 유지했습니다.`);
     });
+    rosterTable.addEventListener('keydown', (event) => {
+      const project = activeProject(); if (!project) return;
+      if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) { event.preventDefault(); void moveRosterHistory(project, event.key.toLowerCase() === 'z' && !event.shiftKey); return; }
+      if (!rosterSelection) return;
+      if (event.key === 'Escape') { event.preventDefault(); rosterSelection = null; renderPeoplePage(); return; }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !event.target.matches('input, textarea, select')) { event.preventDefault(); const visibleRows = Math.max(project.data.people.length + 2, 5); updateRosterSelection({ row: 0, col: 0 }, { row: visibleRows, col: project.data.columns.length - 1 }, 'all'); return; }
+      const movement = { Enter: [1, 0], Tab: [0, event.shiftKey ? -1 : 1], ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[event.key];
+      if (movement && (['Enter', 'Tab'].includes(event.key) || event.altKey || !event.target.matches('input, textarea, select'))) { event.preventDefault(); focusRosterCell(rosterSelection.focus.row + movement[0], rosterSelection.focus.col + movement[1], event.shiftKey && event.key !== 'Tab'); return; }
+      if ((event.key === 'Delete' || event.key === 'Backspace') && (!event.target.matches('input:focus') || rosterSelectionIsRange())) { event.preventDefault(); void clearSelectedRosterCells(project); }
+    });
+    $('#rosterCellValue').addEventListener('focus', (event) => { const project = activeProject(); if (project) event.target.dataset.beforeRosterEdit = rosterSnapshot(project); });
     $('#rosterCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !rosterSelection) return; const point = rosterSelection.focus;
+      if (event.target.dataset.beforeRosterEdit) { pushRosterHistorySnapshot(event.target.dataset.beforeRosterEdit); delete event.target.dataset.beforeRosterEdit; }
       if (!setSheetCellValue(project, point.row, point.col, event.target.value)) return;
+      state = Core.updateProject(state, project.id, { data: project.data });
       queueRosterFormulaPersist(project, point, event.target.value);
       const cellInput = $(`[data-sheet-row="${point.row}"][data-sheet-col="${point.col}"] input`, rosterTable); if (cellInput) cellInput.value = event.target.value;
     });
-    $('#rosterCellValue').addEventListener('change', async () => { await flushRosterFormulaPersist({ render: true }); });
+    $('#rosterCellValue').addEventListener('change', async (event) => { if (event.target.dataset.beforeRosterEdit) { pushRosterHistorySnapshot(event.target.dataset.beforeRosterEdit); delete event.target.dataset.beforeRosterEdit; } await flushRosterFormulaPersist({ render: true }); });
     rosterTable.addEventListener('click', async (event) => {
       const project = activeProject(); if (!project) return;
       if (event.target.closest('[data-empty-sheet-add-column], [data-roster-add-column]')) {
-        addRosterColumn(project); markRosterDependenciesStale(project, '명단 컬럼 추가 후 일정 재검토 필요'); await persist('명단 컬럼 추가됨'); renderPeoplePage();
+        pushRosterHistory(project); addRosterColumn(project); clearScheduleHistory(); markRosterDependenciesStale(project, '명단 컬럼 추가 후 일정 재검토 필요'); await persist('명단 컬럼 추가됨'); renderPeoplePage();
       }
     });
+    $('#rosterUndo').addEventListener('click', () => void moveRosterHistory(activeProject(), true));
+    $('#rosterRedo').addEventListener('click', () => void moveRosterHistory(activeProject(), false));
+    $('#rosterClearSelection').addEventListener('click', () => void applyRosterSheetAction('clear'));
+    $('#rosterFillDown').addEventListener('click', () => void applyRosterSheetAction('fill-down'));
+    $('#rosterInsertRow').addEventListener('click', () => void applyRosterSheetAction('insert-row'));
+    $('#rosterDeleteRows').addEventListener('click', () => void applyRosterSheetAction('delete-rows'));
+    $('#rosterInsertColumn').addEventListener('click', async () => {
+      const project = activeProject(); if (!project) return; const projectId = project.id; const before = rosterSnapshot(project); const selection = JSON.stringify(rosterSelection);
+      const name = await requestName('삽입할 명단 컬럼 이름', '새 컬럼'); if (!name?.trim()) return;
+      const current = activeProject(); if (!current || current.id !== projectId || rosterSnapshot(current) !== before || JSON.stringify(rosterSelection) !== selection) { showToast('명단 또는 선택 범위가 바뀌었습니다. 컬럼 삽입을 다시 시도해주세요.'); return; }
+      await applyRosterSheetAction('insert-column', name);
+    });
+    $('#rosterDeleteColumns').addEventListener('click', () => void applyRosterSheetAction('delete-columns'));
     }
 
     document.addEventListener('copy', (event) => {
-      if (currentPage !== 'arrange' || !arrangementSelection) return; const item = activeWorkItem(); if (!item) return;
+      if (currentPage !== 'arrange' || !arrangementSelection || shouldUseNativeArrangementClipboard(event)) return; const item = activeWorkItem(); if (!item) return;
       const matrix = selectedArrangementMatrix(item); if (!matrix.length) return; const text = matrix.map((row) => row.join('\t')).join('\r\n'); const html = `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`;
       event.clipboardData.setData('text/plain', text); event.clipboardData.setData('text/html', html); event.preventDefault(); showToast(`${matrix.length}행 × ${matrix[0].length}열을 복사했습니다.`);
+    });
+    document.addEventListener('cut', (event) => {
+      if (currentPage !== 'arrange' || !arrangementSelection || shouldUseNativeArrangementClipboard(event)) return; const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; const matrix = selectedArrangementMatrix(item); if (!matrix.length) return;
+      event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`); event.preventDefault(); void clearSelectedArrangementCells(project, item, { message: '작업표 셀 잘라내기 저장됨' });
     });
 
     const arrangementBoard = $('#arrangementBoard');
     arrangementBoard.addEventListener('mousedown', (event) => {
-      if (event.button !== 0 || event.target.closest('[data-arrangement-add-column], [data-arrangement-remove-column], [data-arrangement-rename-column]')) return;
-      const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!cell) return; const point = { row: Number(cell.dataset.arrangementRow), col: Number(cell.dataset.arrangementCol) }; arrangementSelecting = true; updateArrangementSelection(event.shiftKey && arrangementSelection ? arrangementSelection.anchor : point, point);
+      if (event.button !== 0 || event.target.closest('[data-arrangement-add-column], [data-arrangement-remove-column]')) return;
+      arrangementBoard.classList.remove('range-selecting');
+      const item = activeWorkItem(); if (!item) return; const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); const columnSelector = event.target.closest('[data-select-arrangement-column]'); const rowSelector = event.target.closest('[data-select-arrangement-row]'); const allSelector = event.target.closest('[data-select-arrangement-all]');
+      if (!cell && !columnSelector && !rowSelector && !allSelector) return; const visibleRows = Math.max(item.rows.length + 2, 5); let anchor; let focus; let mode = 'cells';
+      if (columnSelector) { const col = Number(columnSelector.dataset.selectArrangementColumn); anchor = { row: -1, col }; focus = { row: visibleRows - 1, col }; mode = 'column'; }
+      else if (rowSelector) { const row = Number(rowSelector.dataset.selectArrangementRow); anchor = { row, col: 0 }; focus = { row, col: Math.max(0, item.columns.length - 1) }; mode = 'row'; }
+      else if (allSelector) { anchor = { row: -1, col: 0 }; focus = { row: visibleRows - 1, col: Math.max(0, item.columns.length - 1) }; mode = 'all'; }
+      else { const point = { row: Number(cell.dataset.arrangementRow), col: Number(cell.dataset.arrangementCol) }; anchor = point; focus = point; }
+      if (event.shiftKey && arrangementSelection && arrangementSelection.mode === mode && mode !== 'all') anchor = arrangementSelection.anchor;
+      arrangementSelecting = true; updateArrangementSelection(anchor, focus, mode);
+      const input = event.target.closest('[data-arrangement-input]') || cell?.querySelector('[data-arrangement-input]'); const target = input || event.target.closest('button, [tabindex]') || columnSelector || rowSelector || allSelector || cell;
+      if (!input && target) { event.preventDefault(); if (!target.hasAttribute('tabindex')) target.tabIndex = -1; target.focus({ preventScroll: true }); }
     });
-    arrangementBoard.addEventListener('mousemove', (event) => {
-      if (!arrangementSelecting || !arrangementSelection || !(event.buttons & 1)) return; const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!cell) return; updateArrangementSelection(arrangementSelection.anchor, { row: Number(cell.dataset.arrangementRow), col: Number(cell.dataset.arrangementCol) });
-    });
-    globalThis.addEventListener('mouseup', () => { arrangementSelecting = false; });
-    arrangementBoard.addEventListener('input', (event) => { if (!event.target.matches('[data-arrangement-input]')) return; const project = activeProject(); const item = activeWorkItem(project); const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!project || !item || !cell) return; const row = Number(cell.dataset.arrangementRow); const col = Number(cell.dataset.arrangementCol); setArrangementCellValue(item, row, col, event.target.value); queueArrangementPersist(project, item, row, col, event.target.value); $('#arrangementCellValue').value = event.target.value; });
-    arrangementBoard.addEventListener('change', async (event) => { if (!event.target.matches('[data-arrangement-input]')) return; await flushArrangementPersist({ render: true }); });
+    globalThis.addEventListener('mousemove', (event) => {
+      if (!arrangementSelecting || !arrangementSelection || !(event.buttons & 1)) return; const pointerTarget = spreadsheetPointerTarget(event, arrangementBoard); if (!pointerTarget) return; const cell = pointerTarget.closest('[data-arrangement-row][data-arrangement-col]'); const columnSelector = pointerTarget.closest('[data-select-arrangement-column]'); const rowSelector = pointerTarget.closest('[data-select-arrangement-row]'); let focus = arrangementSelection.focus;
+      if (arrangementSelection.mode === 'column' && columnSelector) focus = { row: arrangementSelection.focus.row, col: Number(columnSelector.dataset.selectArrangementColumn) };
+      else if (arrangementSelection.mode === 'row' && rowSelector) focus = { row: Number(rowSelector.dataset.selectArrangementRow), col: arrangementSelection.focus.col };
+      else if (arrangementSelection.mode === 'cells' && cell) focus = { row: Number(cell.dataset.arrangementRow), col: Number(cell.dataset.arrangementCol) };
+      else return; if (focus.row === arrangementSelection.focus.row && focus.col === arrangementSelection.focus.col) return; beginSpreadsheetRangeDrag(arrangementBoard); event.preventDefault(); updateArrangementSelection(arrangementSelection.anchor, focus, arrangementSelection.mode);
+    }, true);
+    globalThis.addEventListener('mouseup', () => { arrangementSelecting = false; arrangementBoard.classList.remove('range-selecting'); });
+    arrangementBoard.addEventListener('dragstart', (event) => { if (arrangementSelecting && event.target.closest('input')) event.preventDefault(); });
+    arrangementBoard.addEventListener('focusin', (event) => { if (event.target.matches('[data-arrangement-input]')) event.target.dataset.beforeArrangementEdit = arrangementSnapshot(activeWorkItem()); });
+    arrangementBoard.addEventListener('input', (event) => { if (!event.target.matches('[data-arrangement-input]')) return; const project = activeProject(); const item = activeWorkItem(project); const cell = event.target.closest('[data-arrangement-row][data-arrangement-col]'); if (!project || !item || !cell) return; if (event.target.dataset.beforeArrangementEdit) { pushArrangementHistorySnapshot(event.target.dataset.beforeArrangementEdit); delete event.target.dataset.beforeArrangementEdit; } const row = Number(cell.dataset.arrangementRow); const col = Number(cell.dataset.arrangementCol); setArrangementCellValue(item, row, col, event.target.value); state = Core.updateProject(state, project.id, { data: project.data }); queueArrangementPersist(project, item, row, col, event.target.value); $('#arrangementCellValue').value = event.target.value; });
+    arrangementBoard.addEventListener('change', async (event) => { if (!event.target.matches('[data-arrangement-input]')) return; if (event.target.dataset.beforeArrangementEdit) { pushArrangementHistorySnapshot(event.target.dataset.beforeArrangementEdit); delete event.target.dataset.beforeArrangementEdit; } await flushArrangementPersist({ render: true }); });
     arrangementBoard.addEventListener('paste', async (event) => {
-      if (!arrangementSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!/[\t\r\n]/.test(text)) return; const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return; event.preventDefault(); const start = arrangementSelection.focus; const width = Math.max(...matrix.map((row) => row.length));
+      if (!arrangementSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text) return; const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return; const singleValue = matrix.length === 1 && matrix[0].length === 1;
+      if (singleValue && arrangementSelectionIsRange()) { event.preventDefault(); pushArrangementHistory(item); const bounds = arrangementSelectionBounds(); for (let row = Math.max(0, bounds.minRow); row <= bounds.maxRow; row += 1) for (let col = bounds.minCol; col <= bounds.maxCol; col += 1) setArrangementCellValue(item, row, col, matrix[0][0]); await finishArrangementSheetMutation(project, item, '선택 작업표 범위 채우기 저장됨'); return; }
+      if (singleValue) return; event.preventDefault(); pushArrangementHistory(item); const pasteBounds = arrangementSelectionBounds(); const start = { row: pasteBounds.minRow, col: pasteBounds.minCol }; const width = Math.max(...matrix.map((row) => row.length));
       while (item.columns.length < start.col + width) { const id = `work-column-${Date.now().toString(36)}-${item.columns.length}`; item.columns.push({ id, name: `컬럼${item.columns.length + 1}` }); item.rows.forEach((row) => { row.values[id] = ''; }); }
-      matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => setArrangementCellValue(item, start.row + rowOffset, start.col + colOffset, value))); state = Core.updateProject(state, project.id, { data: project.data }); await persist('명단 작업표 붙여넣기됨'); renderArrangementPage(); updateArrangementSelection(start, { row: start.row + matrix.length - 1, col: start.col + width - 1 });
+      matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => setArrangementCellValue(item, start.row + rowOffset, start.col + colOffset, value))); arrangementSelection = { anchor: start, focus: { row: start.row + matrix.length - 1, col: start.col + width - 1 }, mode: 'cells' }; await finishArrangementSheetMutation(project, item, '명단 작업표 붙여넣기됨');
+    });
+    arrangementBoard.addEventListener('keydown', (event) => {
+      const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return;
+      if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) { event.preventDefault(); void moveArrangementHistory(project, item, event.key.toLowerCase() === 'z' && !event.shiftKey); return; }
+      if (!arrangementSelection) return;
+      if (event.key === 'Escape') { event.preventDefault(); arrangementSelection = null; renderArrangementPage(); return; }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !event.target.matches('input, textarea')) { event.preventDefault(); updateArrangementSelection({ row: -1, col: 0 }, { row: Math.max(item.rows.length + 1, 4), col: item.columns.length - 1 }, 'all'); return; }
+      const movement = { Enter: [1, 0], Tab: [0, event.shiftKey ? -1 : 1], ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[event.key];
+      if (movement && (['Enter', 'Tab'].includes(event.key) || event.altKey || !event.target.matches('input, textarea'))) { event.preventDefault(); focusArrangementCell(arrangementSelection.focus.row + movement[0], arrangementSelection.focus.col + movement[1], event.shiftKey && event.key !== 'Tab'); return; }
+      if ((event.key === 'Delete' || event.key === 'Backspace') && (!event.target.matches('input:focus') || arrangementSelectionIsRange())) { event.preventDefault(); void clearSelectedArrangementCells(project, item); }
     });
     arrangementBoard.addEventListener('click', async (event) => {
       const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return;
-      if (event.target.closest('[data-arrangement-add-column]')) { const id = `work-column-${Date.now().toString(36)}-${item.columns.length}`; item.columns.push({ id, name: `컬럼${item.columns.length + 1}` }); item.rows.forEach((row) => { row.values[id] = ''; }); item.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 추가됨'); renderArrangementPage(); return; }
-      const rename = event.target.closest('[data-arrangement-rename-column]'); if (rename) { const column = item.columns.find((candidate) => candidate.id === rename.dataset.arrangementRenameColumn); const name = await requestName('컬럼 이름', column?.name || '컬럼'); if (!column || !name?.trim()) return; column.name = name.trim(); item.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 이름 변경됨'); renderArrangementPage(); return; }
-      const remove = event.target.closest('[data-arrangement-remove-column]'); if (remove) { if (item.columns.length <= 1) { showToast('작업표에는 컬럼이 하나 이상 있어야 합니다.', 'error'); return; } const column = item.columns.find((candidate) => candidate.id === remove.dataset.arrangementRemoveColumn); if (!await showConfirm(`“${column?.name || '컬럼'}”을 삭제할까요?`, { title: '작업표 컬럼 삭제', action: '삭제' })) return; item.columns = item.columns.filter((candidate) => candidate.id !== column.id); item.rows.forEach((row) => { delete row.values[column.id]; }); item.updatedAt = new Date().toISOString(); arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('작업표 컬럼 삭제됨'); renderArrangementPage(); }
+      if (event.target.closest('[data-arrangement-add-column]')) { pushArrangementHistory(item); const id = `work-column-${Date.now().toString(36)}-${item.columns.length}`; item.columns.push({ id, name: `컬럼${item.columns.length + 1}` }); item.rows.forEach((row) => { row.values[id] = ''; }); await finishArrangementSheetMutation(project, item, '작업표 컬럼 추가됨'); return; }
+      const remove = event.target.closest('[data-arrangement-remove-column]'); if (remove) { if (item.columns.length <= 1) { showToast('작업표에는 컬럼이 하나 이상 있어야 합니다.', 'error'); return; } const projectId = project.id; const itemId = item.id; const columnId = remove.dataset.arrangementRemoveColumn; const column = item.columns.find((candidate) => candidate.id === columnId); const before = arrangementSnapshot(item); if (!await showConfirm(`“${column?.name || '컬럼'}”을 삭제할까요?`, { title: '작업표 컬럼 삭제', action: '삭제' })) return; const currentProject = projectById(projectId); const currentItem = currentProject?.data.workItems.find((candidate) => candidate.id === itemId); const currentColumn = currentItem?.columns.find((candidate) => candidate.id === columnId); if (activeProject()?.id !== projectId || !currentItem || !currentColumn || arrangementSnapshot(currentItem) !== before) { showToast('작업표가 바뀌었습니다. 컬럼 삭제를 다시 시도해주세요.'); renderArrangementPage(); return; } pushArrangementHistory(currentItem); currentItem.columns = currentItem.columns.filter((candidate) => candidate.id !== columnId); currentItem.rows.forEach((row) => { delete row.values[columnId]; }); arrangementSelection = null; await finishArrangementSheetMutation(currentProject, currentItem, '작업표 컬럼 삭제됨'); }
     });
-    $('#arrangementCellValue').addEventListener('input', (event) => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item || !arrangementSelection) return; const row = arrangementSelection.focus.row; const col = arrangementSelection.focus.col; setArrangementCellValue(item, row, col, event.target.value); queueArrangementPersist(project, item, row, col, event.target.value); const input = $(`[data-arrangement-row="${row}"][data-arrangement-col="${col}"] input`, arrangementBoard); if (input) input.value = event.target.value; });
-    $('#arrangementCellValue').addEventListener('change', async () => { await flushArrangementPersist({ render: true }); });
+    arrangementBoard.addEventListener('dblclick', async (event) => { const rename = event.target.closest('[data-arrangement-rename-column]'); if (!rename) return; const project = activeProject(); const item = activeWorkItem(project); const columnId = rename.dataset.arrangementRenameColumn; const column = item?.columns.find((candidate) => candidate.id === columnId); if (!project || !item || !column) return; const projectId = project.id; const itemId = item.id; const before = arrangementSnapshot(item); const name = await requestName('컬럼 이름', column.name || '컬럼'); if (!name?.trim()) return; const currentProject = projectById(projectId); const currentItem = currentProject?.data.workItems.find((candidate) => candidate.id === itemId); const currentColumn = currentItem?.columns.find((candidate) => candidate.id === columnId); if (activeProject()?.id !== projectId || !currentItem || !currentColumn || arrangementSnapshot(currentItem) !== before) { showToast('작업표가 바뀌었습니다. 컬럼 이름 변경을 다시 시도해주세요.'); renderArrangementPage(); return; } pushArrangementHistory(currentItem); currentColumn.name = name.trim(); await finishArrangementSheetMutation(currentProject, currentItem, '작업표 컬럼 이름 변경됨'); });
+    $('#arrangementCellValue').addEventListener('focus', (event) => { const item = activeWorkItem(); if (item) event.target.dataset.beforeArrangementEdit = arrangementSnapshot(item); });
+    $('#arrangementCellValue').addEventListener('input', (event) => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item || !arrangementSelection) return; if (event.target.dataset.beforeArrangementEdit) { pushArrangementHistorySnapshot(event.target.dataset.beforeArrangementEdit); delete event.target.dataset.beforeArrangementEdit; } const row = arrangementSelection.focus.row; const col = arrangementSelection.focus.col; setArrangementCellValue(item, row, col, event.target.value); state = Core.updateProject(state, project.id, { data: project.data }); queueArrangementPersist(project, item, row, col, event.target.value); const input = $(`[data-arrangement-row="${row}"][data-arrangement-col="${col}"] input`, arrangementBoard); if (input) input.value = event.target.value; });
+    $('#arrangementCellValue').addEventListener('change', async (event) => { if (event.target.dataset.beforeArrangementEdit) { pushArrangementHistorySnapshot(event.target.dataset.beforeArrangementEdit); delete event.target.dataset.beforeArrangementEdit; } await flushArrangementPersist({ render: true }); });
+    $('#arrangementUndo').addEventListener('click', () => { const project = activeProject(); void moveArrangementHistory(project, activeWorkItem(project), true); });
+    $('#arrangementRedo').addEventListener('click', () => { const project = activeProject(); void moveArrangementHistory(project, activeWorkItem(project), false); });
+    $('#arrangementClearSelection').addEventListener('click', () => void applyArrangementSheetAction('clear'));
+    $('#arrangementFillDown').addEventListener('click', () => void applyArrangementSheetAction('fill-down'));
+    $('#arrangementInsertRow').addEventListener('click', () => void applyArrangementSheetAction('insert-row'));
+    $('#arrangementDeleteRows').addEventListener('click', () => void applyArrangementSheetAction('delete-rows'));
+    $('#arrangementInsertColumn').addEventListener('click', async () => {
+      const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; const projectId = project.id; const itemId = item.id; const before = arrangementSnapshot(item); const selection = JSON.stringify(arrangementSelection);
+      const name = await requestName('삽입할 작업표 컬럼 이름', '새 컬럼'); if (!name?.trim()) return;
+      const currentProject = activeProject(); const currentItem = activeWorkItem(currentProject); if (!currentProject || currentProject.id !== projectId || currentItem?.id !== itemId || arrangementSnapshot(currentItem) !== before || JSON.stringify(arrangementSelection) !== selection) { showToast('작업표 또는 선택 범위가 바뀌었습니다. 컬럼 삽입을 다시 시도해주세요.'); return; }
+      await applyArrangementSheetAction('insert-column', name);
+    });
+    $('#arrangementDeleteColumns').addEventListener('click', () => void applyArrangementSheetAction('delete-columns'));
+    ['rosterUndo', 'rosterRedo', 'rosterClearSelection', 'rosterFillDown', 'rosterInsertRow', 'rosterDeleteRows', 'rosterInsertColumn', 'rosterDeleteColumns', 'arrangementUndo', 'arrangementRedo', 'arrangementClearSelection', 'arrangementFillDown', 'arrangementInsertRow', 'arrangementDeleteRows', 'arrangementInsertColumn', 'arrangementDeleteColumns'].forEach((id) => {
+      $(`#${id}`)?.addEventListener('click', (event) => event.currentTarget.closest('.schedule-sheet-toolbar, .roster-compact-toolbar')?.querySelectorAll('details.action-menu[open]').forEach((menu) => { menu.open = false; }));
+    });
 
     const scheduleTable = $('#scheduleBoard');
     scheduleTable.addEventListener('mousedown', (event) => {
       if (event.button !== 0 || event.target.closest('[data-schedule-remove-column], [data-schedule-insert-row], [data-schedule-append-row], [data-schedule-add-column-inline]')) return;
+      scheduleTable.classList.remove('range-selecting');
       const project = activeProject(); if (!project) return; const cell = event.target.closest('[data-schedule-row][data-schedule-col]'); const columnSelector = event.target.closest('[data-select-schedule-column]'); const rowSelector = event.target.closest('[data-select-schedule-row]'); const allSelector = event.target.closest('[data-select-schedule-all]');
       if (!cell && !columnSelector && !rowSelector && !allSelector) return; const columns = scheduleSheetColumns(project); const visibleRows = Math.max(project.data.slots.length + 2, 5); let anchor; let focus; let mode = 'cells';
       if (columnSelector) { const col = Number(columnSelector.dataset.selectScheduleColumn); anchor = { row: -1, col }; focus = { row: visibleRows - 1, col }; mode = 'column'; }
       else if (rowSelector) { const row = Number(rowSelector.dataset.selectScheduleRow); anchor = { row, col: 0 }; focus = { row, col: Math.max(0, columns.length - 1) }; mode = 'row'; }
       else if (allSelector) { anchor = { row: -1, col: 0 }; focus = { row: visibleRows - 1, col: Math.max(0, columns.length - 1) }; mode = 'all'; }
-      else { const point = { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) }; anchor = event.shiftKey && scheduleSelection ? scheduleSelection.anchor : point; focus = point; }
+      else { const point = { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) }; anchor = point; focus = point; }
+      if (event.shiftKey && scheduleSelection && scheduleSelection.mode === mode && mode !== 'all') anchor = scheduleSelection.anchor;
       scheduleSelecting = true; updateScheduleSelection(anchor, focus, mode);
-      const input = event.target.closest('[data-schedule-input]') || cell?.querySelector('[data-schedule-input]'); const target = input?.disabled ? cell : input || event.target.closest('button, [tabindex]') || cell; if (target && document.activeElement !== target) { event.preventDefault(); if (input?.disabled) { document.activeElement?.blur(); cell.tabIndex = -1; } target.focus({ preventScroll: true }); }
+      const input = event.target.closest('[data-schedule-input]') || cell?.querySelector('[data-schedule-input]');
+      if (input && !input.disabled) return;
+      const target = input?.disabled ? cell : event.target.closest('button, [tabindex]') || columnSelector || rowSelector || allSelector || cell; if (target && document.activeElement !== target) { event.preventDefault(); if (!target.hasAttribute('tabindex')) target.tabIndex = -1; if (input?.disabled) { document.activeElement?.blur(); cell.tabIndex = -1; } target.focus({ preventScroll: true }); }
     });
-    scheduleTable.addEventListener('mousemove', (event) => {
-      if (!scheduleSelecting || !scheduleSelection || !(event.buttons & 1)) return; const cell = event.target.closest('[data-schedule-row][data-schedule-col]'); const columnSelector = event.target.closest('[data-select-schedule-column]'); const rowSelector = event.target.closest('[data-select-schedule-row]'); let focus = scheduleSelection.focus;
+    globalThis.addEventListener('mousemove', (event) => {
+      if (!scheduleSelecting || !scheduleSelection || !(event.buttons & 1)) return; const pointerTarget = spreadsheetPointerTarget(event, scheduleTable); if (!pointerTarget) return; const cell = pointerTarget.closest('[data-schedule-row][data-schedule-col]'); const columnSelector = pointerTarget.closest('[data-select-schedule-column]'); const rowSelector = pointerTarget.closest('[data-select-schedule-row]'); let focus = scheduleSelection.focus;
       if (scheduleSelection.mode === 'column' && columnSelector) focus = { row: scheduleSelection.focus.row, col: Number(columnSelector.dataset.selectScheduleColumn) };
       else if (scheduleSelection.mode === 'row' && rowSelector) focus = { row: Number(rowSelector.dataset.selectScheduleRow), col: scheduleSelection.focus.col };
       else if (scheduleSelection.mode === 'cells' && cell) focus = { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) };
-      else return; updateScheduleSelection(scheduleSelection.anchor, focus, scheduleSelection.mode);
-    });
-    globalThis.addEventListener('mouseup', () => { scheduleSelecting = false; });
+      else return; if (focus.row === scheduleSelection.focus.row && focus.col === scheduleSelection.focus.col) return; beginSpreadsheetRangeDrag(scheduleTable); event.preventDefault(); updateScheduleSelection(scheduleSelection.anchor, focus, scheduleSelection.mode);
+    }, true);
+    globalThis.addEventListener('mouseup', () => { scheduleSelecting = false; scheduleTable.classList.remove('range-selecting'); });
+    scheduleTable.addEventListener('dragstart', (event) => { if (scheduleSelecting && event.target.closest('input')) event.preventDefault(); });
     scheduleTable.addEventListener('focusin', (event) => {
       if (!event.target.matches('[data-schedule-input]')) return;
       const snapshot = scheduleSnapshot(activeProject()); event.target.dataset.scheduleBefore = snapshot; event.target.dataset.scheduleImpactBefore = snapshot;
@@ -3306,7 +3861,7 @@
     scheduleTable.addEventListener('change', (event) => { if (event.target.matches('[data-schedule-input]')) delete event.target.dataset.scheduleImpactBefore; });
     scheduleTable.addEventListener('paste', async (event) => {
       if (!scheduleSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text) return;
-      const project = activeProject(); if (!project) return; const matrix = /[\t\r\n]/.test(text) ? Ops.parseDelimited(text) : [[text]]; if (!matrix.length) return; const start = scheduleSelection.focus; const structured = matrix.length > 1 || matrix.some((row) => row.length > 1); if (!structured && shouldUseNativeScheduleClipboard(event)) return; event.preventDefault();
+      const project = activeProject(); if (!project) return; const matrix = /[\t\r\n]/.test(text) ? Ops.parseDelimited(text) : [[text]]; if (!matrix.length) return; const start = { row: Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row), col: Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col) }; const structured = matrix.length > 1 || matrix.some((row) => row.length > 1); if (!structured && shouldUseNativeScheduleClipboard(event)) return; event.preventDefault();
       if (structured && start.row <= 0 && start.col === 0 && (looksLikeScheduleHeader(matrix) || !project.data.slots.length)) { await importScheduleMatrix(matrix, 'replace'); return; }
       const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); ensureScheduleSheetInitialized(project); pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length)); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => scheduleRowLocked(project, slot.id)).map((slot) => slot.id));
       while (scheduleSheetColumns(project).length < start.col + width) { const index = project.data.scheduleSheetColumns.length; const id = `schedule-column-${Date.now().toString(36)}-${index}`; project.data.scheduleSheetColumns.push({ id, key: `custom:${id}`, name: `컬럼${index + 1}`, kind: 'custom', roleId: null }); }
@@ -3322,9 +3877,9 @@
         event.preventDefault(); await moveScheduleHistory(project, event.key.toLowerCase() === 'z' && !event.shiftKey); return;
       }
       if (!scheduleSelection) return;
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); updateScheduleSelection({ row: -1, col: 0 }, { row: Math.max(project.data.slots.length + 1, 4), col: scheduleSheetColumns(project).length - 1 }, 'all'); return; }
-      const movement = { Enter: [1, 0], Tab: [0, event.shiftKey ? -1 : 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[event.key];
-      if (movement && (!event.target.matches('input') || event.key === 'Enter' || event.key === 'Tab' || event.altKey)) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !event.target.matches('input, textarea')) { event.preventDefault(); updateScheduleSelection({ row: -1, col: 0 }, { row: Math.max(project.data.slots.length + 1, 4), col: scheduleSheetColumns(project).length - 1 }, 'all'); return; }
+      const movement = { Enter: [1, 0], Tab: [0, event.shiftKey ? -1 : 1], ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[event.key];
+      if (movement && (!event.target.matches('input, textarea') || event.key === 'Enter' || event.key === 'Tab' || event.altKey)) {
         event.preventDefault(); focusScheduleCell(scheduleSelection.focus.row + movement[0], scheduleSelection.focus.col + movement[1], event.shiftKey && event.key !== 'Tab'); return;
       }
       const rangeSelected = scheduleSelection.anchor.row !== scheduleSelection.focus.row || scheduleSelection.anchor.col !== scheduleSelection.focus.col || scheduleSelection.mode !== 'cells';
@@ -3746,13 +4301,13 @@
     $('#openLibraryRosterManager').addEventListener('click', () => void openRosterManager());
     $('#createRosterView').addEventListener('click', () => void createRosterViewFromCurrent(false));
     $('#saveRosterViewAs').addEventListener('click', () => void createRosterViewFromCurrent(true));
-    $('#renameRosterView').addEventListener('click', async () => { const project = activeProject(); const view = activeRosterView(project); if (!project || !view) return; const name = await requestName('단계 명단 이름 변경', view.name); if (!name) return; view.name = name; view.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 이름 변경됨'); renderPeoplePage(); });
-    $('#deleteRosterView').addEventListener('click', async () => { const project = activeProject(); const view = activeRosterView(project); if (!project || !view || !await showConfirm(`“${view.name}” 단계 명단을 삭제할까요? 원본 명단과 일정 배정은 삭제되지 않습니다.`, { title: '단계 명단 삭제', action: '삭제' })) return; project.data.rosterViews = project.data.rosterViews.filter((item) => item.id !== view.id); project.data.activeRosterViewId = null; if (project.data.scheduleRules.rosterViewId === view.id) project.data.scheduleRules.rosterViewId = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 삭제됨'); renderPeoplePage(); });
+    $('#renameRosterView').addEventListener('click', async () => { const project = activeProject(); const view = activeRosterView(project); if (!project || !view) return; const projectId = project.id; const viewId = view.id; const before = rosterViewMutationSignature(project); const name = await requestName('단계 명단 이름 변경', view.name); if (!name) return; const currentProject = projectById(projectId); const currentView = currentProject?.data.rosterViews.find((item) => item.id === viewId); if (activeProject()?.id !== projectId || !currentProject || !currentView || rosterViewMutationSignature(currentProject) !== before) { showToast('단계 명단이 바뀌었습니다. 이름 변경을 다시 시도해주세요.'); renderPeoplePage(); return; } currentView.name = name; currentView.updatedAt = new Date().toISOString(); state = Core.updateProject(state, currentProject.id, { data: currentProject.data }); await persist('단계 명단 이름 변경됨'); renderPeoplePage(); });
+    $('#deleteRosterView').addEventListener('click', async () => { const project = activeProject(); const view = activeRosterView(project); if (!project || !view) return; const projectId = project.id; const viewId = view.id; const before = rosterViewMutationSignature(project); if (!await showConfirm(`“${view.name}” 단계 명단을 삭제할까요? 원본 명단과 일정 배정은 삭제되지 않습니다.`, { title: '단계 명단 삭제', action: '삭제' })) return; const currentProject = projectById(projectId); const currentView = currentProject?.data.rosterViews.find((item) => item.id === viewId); if (activeProject()?.id !== projectId || !currentProject || !currentView || rosterViewMutationSignature(currentProject) !== before) { showToast('단계 명단이 바뀌었습니다. 삭제를 다시 시도해주세요.'); renderPeoplePage(); return; } currentProject.data.rosterViews = currentProject.data.rosterViews.filter((item) => item.id !== viewId); currentProject.data.activeRosterViewId = null; if (currentProject.data.scheduleRules.rosterViewId === viewId) currentProject.data.scheduleRules.rosterViewId = null; state = Core.updateProject(state, currentProject.id, { data: currentProject.data }); await persist('단계 명단 삭제됨'); renderPeoplePage(); });
     $('#rosterViewSelect').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.activeRosterViewId = event.target.value || null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 전환됨'); renderPeoplePage(); });
     $('#rosterViewPeople').addEventListener('click', async (event) => { const button = event.target.closest('[data-roster-view-toggle]'); const project = activeProject(); const view = activeRosterView(project); if (!button || !project || !view) return; const ids = new Set(view.excludedPersonIds || []); if (ids.has(button.dataset.rosterViewToggle)) ids.delete(button.dataset.rosterViewToggle); else ids.add(button.dataset.rosterViewToggle); view.excludedPersonIds = [...ids]; view.updatedAt = new Date().toISOString(); state = Core.updateProject(state, project.id, { data: project.data }); await persist('단계 명단 인원 변경됨'); renderPeoplePage(); });
     $('#rosterStartTask').addEventListener('click', openRosterTaskChooser);
     $('#arrangementNewTask').addEventListener('click', openRosterTaskChooser);
-    $('#existingArrangementList').addEventListener('click', async (event) => { const button = event.target.closest('[data-open-arrangement]'); const project = activeProject(); if (!button || !project) return; project.data.activeWorkItemId = button.dataset.openArrangement; arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); closeDialog('rosterTaskChooserDialog'); navigate('arrange'); await persist(); });
+    $('#existingArrangementList').addEventListener('click', async (event) => { const button = event.target.closest('[data-open-arrangement]'); const project = activeProject(); if (!button || !project) return; project.data.activeWorkItemId = button.dataset.openArrangement; clearArrangementHistory(); state = Core.updateProject(state, project.id, { data: project.data }); closeDialog('rosterTaskChooserDialog'); navigate('arrange'); await persist(); });
     $$('[data-roster-task]').forEach((button) => button.addEventListener('click', () => {
       const task = button.dataset.rosterTask; closeDialog('rosterTaskChooserDialog');
       if (['grouping', 'matching', 'free'].includes(task)) { openArrangementSetup(task); return; }
@@ -3761,11 +4316,26 @@
     $('#arrangementMethod').addEventListener('change', (event) => { $('#arrangementSourceColumn').disabled = !['same', 'mixed'].includes(event.target.value); });
     $('#arrangementSetupForm').addEventListener('submit', async (event) => {
       event.preventDefault(); const project = activeProject(); if (!project) return; const values = { type: $('#arrangementType').value, name: $('#arrangementName').value.trim(), method: $('#arrangementMethod').value, groupSize: $('#arrangementGroupSize').value, sourceColumnId: $('#arrangementSourceColumn').value };
-      if (!values.name) return; createArrangement(project, values); state = Core.updateProject(state, project.id, { data: project.data }); closeDialog('arrangementSetupDialog'); arrangementSelection = null; renderAll(); navigate('arrange'); await persist('새 명단 작업 생성됨');
+      if (!values.name) return; createArrangement(project, values); state = Core.updateProject(state, project.id, { data: project.data }); closeDialog('arrangementSetupDialog'); clearArrangementHistory(); renderAll(); navigate('arrange'); await persist('새 명단 작업 생성됨');
     });
-    $('#arrangementSelect').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.activeWorkItemId = event.target.value; arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderArrangementPage(); });
-    $('#arrangementDelete').addEventListener('click', async () => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; if (!await showConfirm(`“${item.name}” 작업표를 삭제할까요? 원본 명단은 삭제되지 않습니다.`, { title: '명단 작업 삭제', action: '삭제' })) return; project.data.workItems = project.data.workItems.filter((candidate) => candidate.id !== item.id); project.data.activeWorkItemId = project.data.workItems.at(-1)?.id || null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('명단 작업 삭제됨'); if (project.data.activeWorkItemId) renderArrangementPage(); else navigate('people'); });
-    $('#arrangementImportExcel').addEventListener('click', async () => { const project = activeProject(); const item = activeWorkItem(project); if (!project || !item || !globalThis.workspaceDesktop?.chooseSpreadsheet) return; try { const result = await globalThis.workspaceDesktop.chooseSpreadsheet(); if (result.canceled || !result.matrix?.length) return; if (!await showConfirm('Excel의 첫 행을 컬럼 이름으로 사용하여 현재 작업표를 교체할까요? 원본 명단은 바뀌지 않습니다.', { title: '작업표 Excel 불러오기', action: '교체', danger: false })) return; const width = Math.max(...result.matrix.map((row) => row.length)); item.columns = Array.from({ length: width }, (_, index) => ({ id: `work-column-${Date.now().toString(36)}-${index}`, name: String(result.matrix[0]?.[index] || `컬럼${index + 1}`) })); item.rows = result.matrix.slice(1).filter((row) => row.some((value) => String(value || '').trim())).map((row, rowIndex) => ({ id: `work-row-${Date.now().toString(36)}-${rowIndex}`, personId: null, values: Object.fromEntries(item.columns.map((column, index) => [column.id, String(row[index] ?? '')])) })); item.updatedAt = new Date().toISOString(); arrangementSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('Excel 작업표 불러옴'); renderArrangementPage(); } catch (error) { showToast(`Excel을 불러오지 못했습니다: ${error.message}`, 'error'); } });
+    $('#arrangementSelect').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.activeWorkItemId = event.target.value; clearArrangementHistory(); state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderArrangementPage(); });
+    $('#arrangementDelete').addEventListener('click', async () => {
+      const project = activeProject(); const item = activeWorkItem(project); if (!project || !item) return; const projectId = project.id; const itemId = item.id; const before = arrangementSnapshot(item);
+      if (!await showConfirm(`“${item.name}” 작업표를 삭제할까요? 원본 명단은 삭제되지 않습니다.`, { title: '명단 작업 삭제', action: '삭제' })) return;
+      const currentProject = projectById(projectId); const currentItem = currentProject?.data.workItems.find((candidate) => candidate.id === itemId);
+      if (activeProject()?.id !== projectId || !currentItem || arrangementSnapshot(currentItem) !== before) { showToast('작업표가 바뀌었습니다. 삭제를 다시 시도해주세요.'); renderArrangementPage(); return; }
+      currentProject.data.workItems = currentProject.data.workItems.filter((candidate) => candidate.id !== itemId); currentProject.data.activeWorkItemId = currentProject.data.workItems.at(-1)?.id || null; clearArrangementHistory(); state = Core.updateProject(state, currentProject.id, { data: currentProject.data }); await persist('명단 작업 삭제됨'); if (currentProject.data.activeWorkItemId) renderArrangementPage(); else navigate('people');
+    });
+    $('#arrangementImportExcel').addEventListener('click', async () => {
+      const project = activeProject(); const item = activeWorkItem(project); if (!project || !item || !globalThis.workspaceDesktop?.chooseSpreadsheet) return; const projectId = project.id; const itemId = item.id; const before = arrangementSnapshot(item);
+      try {
+        const result = await globalThis.workspaceDesktop.chooseSpreadsheet(); if (result.canceled || !result.matrix?.length) return;
+        if (!await showConfirm('Excel의 첫 행을 컬럼 이름으로 사용하여 현재 작업표를 교체할까요? 원본 명단은 바뀌지 않습니다.', { title: '작업표 Excel 불러오기', action: '교체', danger: false })) return;
+        const currentProject = projectById(projectId); const currentItem = currentProject?.data.workItems.find((candidate) => candidate.id === itemId);
+        if (activeProject()?.id !== projectId || !currentItem || arrangementSnapshot(currentItem) !== before) { showToast('작업표가 바뀌었습니다. Excel 불러오기를 다시 시도해주세요.'); renderArrangementPage(); return; }
+        const width = Math.max(...result.matrix.map((row) => row.length)); currentItem.columns = Array.from({ length: width }, (_, index) => ({ id: `work-column-${Date.now().toString(36)}-${index}`, name: String(result.matrix[0]?.[index] || `컬럼${index + 1}`) })); currentItem.rows = result.matrix.slice(1).filter((row) => row.some((value) => String(value || '').trim())).map((row, rowIndex) => ({ id: `work-row-${Date.now().toString(36)}-${rowIndex}`, personId: null, values: Object.fromEntries(currentItem.columns.map((column, index) => [column.id, String(row[index] ?? '')])) })); currentItem.updatedAt = new Date().toISOString(); clearArrangementHistory(); state = Core.updateProject(state, currentProject.id, { data: currentProject.data }); await persist('Excel 작업표 불러옴'); renderArrangementPage();
+      } catch (error) { showToast(`Excel을 불러오지 못했습니다: ${error.message}`, 'error'); }
+    });
     $('#arrangementDownloadCsv').addEventListener('click', async () => { const item = activeWorkItem(); if (!item) return; if (globalThis.workspaceDesktop?.exportWorkItem) { try { const result = await globalThis.workspaceDesktop.exportWorkItem(item); if (!result.canceled) showToast('작업표를 Excel로 저장했습니다.', 'success'); } catch (error) { showToast(`Excel을 저장하지 못했습니다: ${error.message}`, 'error'); } return; } const rows = [item.columns.map((column) => column.name), ...item.rows.map((row) => item.columns.map((column) => row.values[column.id] || ''))]; const csv = rows.map((row) => row.map((value) => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n'); downloadText(`${item.name}.csv`, `\ufeff${csv}`, 'text/csv;charset=utf-8'); });
     $('#addRoleButton').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
@@ -3935,7 +4505,7 @@
         const result = Ops.applyGoogleFormResponses(workingProject, workingLinked, payload);
         workingProject.data.forms.selectedFormId = formId; workingLinked.connectionId ||= connectionId;
         workingProject.data.forms.lastResponseSyncAt = new Date().toISOString(); workingLinked.lastSyncedAt = workingProject.data.forms.lastResponseSyncAt; workingLinked.responseCount = payload.responses.length; workingLinked.needsReview = Boolean(result.unmatched);
-        if (result.changed) markRosterDependenciesStale(workingProject, result.type === 'availability' ? '가능 시간 응답 반영 후 일정 재검토 필요' : '설문 신청 명단 반영 후 일정 재검토 필요');
+        if (result.changed) { clearRosterHistory(); markRosterDependenciesStale(workingProject, result.type === 'availability' ? '가능 시간 응답 반영 후 일정 재검토 필요' : '설문 신청 명단 반영 후 일정 재검토 필요'); }
         else state = Core.updateProject(state, projectId, { data: workingProject.data });
         state = Core.setModuleStatus(state, projectId, 'forms', result.unmatched ? 'needsReview' : 'inProgress', result.unmatched ? `${payload.responses.length}건 동기화 · ${result.unmatched}건 확인 필요` : `${payload.responses.length}건 동기화`);
         recordScheduleMergeImpact(projectId, null, { scheduleOnly: false });
@@ -4160,7 +4730,7 @@
         const person = project.data.people.find((item) => item.id === event.target.dataset.personActive); if (person) person.active = event.target.checked;
       }
       if (event.target.matches('[data-person-role-check], [data-person-active]')) {
-        markRosterDependenciesStale(project, '명단 배정 조건 변경 후 일정 재검토 필요'); await persist('명단 배정 조건 변경됨'); renderPeoplePage(); return;
+        clearRosterHistory(); markRosterDependenciesStale(project, '명단 배정 조건 변경 후 일정 재검토 필요'); await persist('명단 배정 조건 변경됨'); renderPeoplePage(); return;
       }
       if (event.target.matches('[data-availability-all]')) {
         pushScheduleHistory(project);
@@ -4234,12 +4804,8 @@
           project = projectById(projectId);
           if (!project || scheduleChangeSignature(project) !== confirmSignature || project.data.assignments.some((assignment) => assignment.personId === personId && scheduleRowLocked(project, assignment.slotId))) { showToast('확인하는 동안 다른 창의 명단 또는 일정이 바뀌었습니다. 다시 시도해주세요.'); renderAll(); return; }
           const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
-          clearScheduleHistory();
-          project.data.people = project.data.people.filter((item) => item.id !== personId);
-          delete project.data.availability[personId];
-          project.data.assignments = project.data.assignments.filter((assignment) => assignment.personId !== personId);
-          project.data.externalArtifacts.forEach((artifact) => { if (artifact.kind === 'gmailDraft' && artifact.personId === personId) { artifact.status = 'superseded'; artifact.replacedAt = new Date().toISOString(); } });
-          refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `명단 삭제 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact); recordScheduleMergeImpact(project.id, impact, { scheduleOnly: false }); await persist(); renderAll();
+          clearRosterHistory(); clearScheduleHistory();
+          removeRosterPeopleWithDependencies(project, new Set([personId]), beforeSnapshot); await persist(); renderAll();
         }
         return;
       }
@@ -4273,11 +4839,12 @@
         if (!await showConfirm(`“${version.name}” 상태로 일정을 복원할까요? 현재 상태는 먼저 별도 버전으로 저장하는 것을 권장합니다.`, { title: '일정 버전 복원', action: '복원', danger: false })) return;
         project = projectById(projectId); version = project?.data.versions.find((item) => (item.id || `${item.createdAt || ''}|${item.name || ''}`) === versionKey);
         if (!project || !version || scheduleChangeSignature(project) !== confirmSignature || lockedScheduleWouldChange(project, version)) { showToast('확인하는 동안 다른 창의 일정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 복원해주세요.'); renderSchedulePage(); return; }
-        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); const currentSlots = project.data.slots; const currentAvailability = project.data.availability; pushScheduleHistory(project); project.data.slots = JSON.parse(JSON.stringify(version.slots)); project.data.assignments = JSON.parse(JSON.stringify(version.assignments));
-        if (version.availability && typeof version.availability === 'object') project.data.availability = JSON.parse(JSON.stringify(version.availability));
-        else project.data.availability = Object.fromEntries(Object.entries(currentAvailability || {}).map(([personId, slotIds]) => { const selectedKeys = new Set((slotIds || []).map((slotId) => currentSlots.find((slot) => slot.id === slotId)).filter(Boolean).map(Ops.slotKey)); return [personId, project.data.slots.filter((slot) => selectedKeys.has(Ops.slotKey(slot))).map((slot) => slot.id)]; }));
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); const currentSlots = project.data.slots; const currentAvailability = project.data.availability; pushScheduleHistory(project); project.data.slots = JSON.parse(JSON.stringify(version.slots));
+        const validPersonIds = new Set(project.data.people.map((person) => person.id)); const validRoleIds = new Set(project.data.roles.map((role) => role.id)); const restoredSlotIds = new Set(project.data.slots.map((slot) => slot.id)); const versionAssignments = JSON.parse(JSON.stringify(version.assignments || [])); const validAssignments = versionAssignments.filter((assignment) => validPersonIds.has(assignment.personId) && restoredSlotIds.has(assignment.slotId) && (!assignment.roleId || validRoleIds.has(assignment.roleId))); const skippedAssignments = versionAssignments.length - validAssignments.length; project.data.assignments = validAssignments;
+        if (version.availability && typeof version.availability === 'object') project.data.availability = Object.fromEntries(Object.entries(version.availability).filter(([personId]) => validPersonIds.has(personId)).map(([personId, slotIds]) => [personId, (slotIds || []).filter((slotId) => restoredSlotIds.has(slotId))]));
+        else project.data.availability = Object.fromEntries(Object.entries(currentAvailability || {}).filter(([personId]) => validPersonIds.has(personId)).map(([personId, slotIds]) => { const selectedKeys = new Set((slotIds || []).map((slotId) => currentSlots.find((slot) => slot.id === slotId)).filter(Boolean).map(Ops.slotKey)); return [personId, project.data.slots.filter((slot) => selectedKeys.has(Ops.slotKey(slot))).map((slot) => slot.id)]; }));
         refreshScheduleConflicts(project);
-        const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 버전 복원 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderAll(); showToast('일정 버전을 복원했습니다.', 'success'); return;
+        const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 버전 복원 · 문제 ${project.data.conflicts.length}건`, impact); if (skippedAssignments) state = Core.setModuleStatus(state, project.id, 'schedule', 'needsReview', `일정 버전 복원 · 삭제된 명단/역할 배정 ${skippedAssignments}건 제외`); await persist(); renderAll(); showToast(skippedAssignments ? `일정 버전을 복원했고 현재 명단·역할과 맞지 않는 배정 ${skippedAssignments}건은 제외했습니다.` : '일정 버전을 복원했습니다.', skippedAssignments ? 'normal' : 'success'); return;
       }
       const navLink = event.target.closest('[data-nav-link]');
       if (navLink) { navigate(navLink.dataset.navLink); return; }

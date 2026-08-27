@@ -1427,6 +1427,13 @@ function updateCellSelection() {
   if (cellSelection.mode === 'all') $('#rosterHead [data-select-all]')?.classList.add('selected-selector');
 }
 
+function rosterPointerTarget(event) {
+  const hasViewportPoint = Number.isFinite(event.clientX) && Number.isFinite(event.clientY) && (event.clientX !== 0 || event.clientY !== 0);
+  if (!hasViewportPoint || typeof document.elementFromPoint !== 'function') return event.target;
+  const hit = document.elementFromPoint(event.clientX, event.clientY);
+  return hit?.closest?.('#rosterTable') ? hit : null;
+}
+
 function selectionBounds() {
   if (!cellSelection || !state.columns.length) return null;
   return {
@@ -2855,12 +2862,14 @@ function bindEvents() {
       startRow = endRow = Number(gridCell.dataset.sheetRow);
       startColumn = endColumn = Number(gridCell.dataset.sheetColumn);
     }
-    if (event.shiftKey && cellSelection && mode === 'cells') {
+    $('#rosterTable').classList.remove('range-selecting');
+    if (event.shiftKey && cellSelection && cellSelection.mode === mode && mode !== 'all') {
       cellSelection.endRow = endRow;
       cellSelection.endColumn = endColumn;
       cellSelection.dragging = true;
+      cellSelection.rangeDragging = false;
     } else {
-      cellSelection = { startRow, endRow, startColumn, endColumn, dragging: true, mode };
+      cellSelection = { startRow, endRow, startColumn, endColumn, dragging: true, rangeDragging: false, mode };
     }
     updateCellSelection();
 
@@ -2875,23 +2884,47 @@ function bindEvents() {
       event.preventDefault();
     }
   });
-  $('#rosterTable').addEventListener('mousemove', (event) => {
+  $('#rosterTable').addEventListener('dragstart', (event) => {
+    // When text inside an input is selected, Chromium starts a native text
+    // drag before the pointer can reach the next cell.  Cancel only that
+    // transient drag while a sheet selection gesture is active; ordinary
+    // click/caret and in-cell text selection remain native.
+    if (cellSelection?.dragging && event.target.closest('.cell-input')) event.preventDefault();
+  });
+  globalThis.addEventListener('mousemove', (event) => {
     if (!cellSelection?.dragging || !(event.buttons & 1)) return;
-    const gridCell = event.target.closest('[data-sheet-row][data-sheet-column]');
-    const columnSelector = event.target.closest('[data-select-column]');
-    const rowSelector = event.target.closest('[data-select-row]');
+    const pointerTarget = rosterPointerTarget(event);
+    if (!pointerTarget) return;
+    const gridCell = pointerTarget.closest('[data-sheet-row][data-sheet-column]');
+    const columnSelector = pointerTarget.closest('[data-select-column]');
+    const rowSelector = pointerTarget.closest('[data-select-row]');
+    let nextRow = cellSelection.endRow;
+    let nextColumn = cellSelection.endColumn;
     if (cellSelection.mode === 'column' && columnSelector) {
-      cellSelection.endColumn = Number(columnSelector.dataset.selectColumn);
+      nextColumn = Number(columnSelector.dataset.selectColumn);
     } else if (cellSelection.mode === 'row' && rowSelector) {
-      cellSelection.endRow = Number(rowSelector.dataset.selectRow);
+      nextRow = Number(rowSelector.dataset.selectRow);
     } else if (cellSelection.mode === 'cells' && gridCell) {
-      cellSelection.endRow = Number(gridCell.dataset.sheetRow);
-      cellSelection.endColumn = Number(gridCell.dataset.sheetColumn);
+      nextRow = Number(gridCell.dataset.sheetRow);
+      nextColumn = Number(gridCell.dataset.sheetColumn);
     } else return;
+    if (nextRow === cellSelection.endRow && nextColumn === cellSelection.endColumn) return;
+    cellSelection.endRow = nextRow;
+    cellSelection.endColumn = nextColumn;
+    if (!cellSelection.rangeDragging) {
+      cellSelection.rangeDragging = true;
+      $('#rosterTable').classList.add('range-selecting');
+      const input = document.activeElement;
+      if (input?.matches?.('.cell-input') && typeof input.selectionStart === 'number') input.setSelectionRange(input.selectionStart, input.selectionStart);
+      globalThis.getSelection?.()?.removeAllRanges();
+    }
     event.preventDefault();
     updateCellSelection();
+  }, true);
+  globalThis.addEventListener('mouseup', () => {
+    $('#rosterTable').classList.remove('range-selecting');
+    if (cellSelection) { cellSelection.dragging = false; cellSelection.rangeDragging = false; }
   });
-  globalThis.addEventListener('mouseup', () => { if (cellSelection) cellSelection.dragging = false; });
   $('#rosterBody').addEventListener('input', (event) => {
     const input = event.target.closest('.cell-input');
     if (!input) return;
