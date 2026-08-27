@@ -73,6 +73,7 @@
   let externalOperationIdleResolvers = [];
   const pendingScheduleMergeHints = new Map();
   let deferredWorkspaceState = null;
+  let pendingMergedSurfaceRender = false;
   let selectedSessionPersonId = null;
   let selectedSessionAssignmentId = null;
   let pendingSessionChange = null;
@@ -207,6 +208,7 @@
         const localAdvanced = requestSequence !== persistSequence || JSON.stringify(state) !== JSON.stringify(requestState); requestHadLocalAdvance = localAdvanced;
         acceptPersistedBaseline(normalized);
         state = localAdvanced ? Core.normalizeState(Core.threeWayMerge(requestState, normalized, state)) : normalized;
+        if (result.merged && (mergedRosterChanged || mergedArrangementChanged || mergedScheduleChanged)) pendingMergedSurfaceRender = true;
       }
       if (result?.merged) {
         // The save response may contain another window's edits without going
@@ -1891,6 +1893,7 @@
     $('#scheduleBoard')?.classList.remove('range-selecting');
     acceptPersistedBaseline(nextState);
     state = nextState;
+    pendingMergedSurfaceRender = false;
     if (state.preferences.storageMode === 'drive') scheduleDriveStateSync();
     if (mailEditorDirty && currentPage === 'gmailFlow') {
       showToast('다른 창의 변경사항을 받았습니다. 작성 중인 메일은 그대로 보호됩니다.');
@@ -1901,13 +1904,19 @@
 
   function applyDeferredWorkspaceState() {
     if (deferredWorkspaceState && persistReconcileNeeded) schedulePersistReconciliation();
-    if (!deferredWorkspaceState || persistSaving || persistDirty || externalOperationCount || schedulePersistBaseline || mailEditorDirty || hasFocusedWorkspaceDraft()) return;
-    const nextState = deferredWorkspaceState;
-    deferredWorkspaceState = null;
-    const nextRevision = Number(nextState._revision || 0);
-    const currentRevision = Number(state._revision || 0);
-    const newer = nextRevision > currentRevision || (nextRevision === currentRevision && String(nextState.updatedAt || '') > String(state.updatedAt || ''));
-    if (newer) applyIncomingWorkspaceState(nextState);
+    if ((!deferredWorkspaceState && !pendingMergedSurfaceRender) || persistSaving || persistDirty || externalOperationCount || schedulePersistBaseline || mailEditorDirty || hasFocusedWorkspaceDraft()) return;
+    if (deferredWorkspaceState) {
+      const nextState = deferredWorkspaceState;
+      deferredWorkspaceState = null;
+      const nextRevision = Number(nextState._revision || 0);
+      const currentRevision = Number(state._revision || 0);
+      const newer = nextRevision > currentRevision || (nextRevision === currentRevision && String(nextState.updatedAt || '') > String(state.updatedAt || ''));
+      if (newer) { applyIncomingWorkspaceState(nextState); return; }
+    }
+    if (pendingMergedSurfaceRender) {
+      pendingMergedSurfaceRender = false;
+      renderAll();
+    }
   }
 
   if (smokeDiagnostics) {
@@ -1918,6 +1927,7 @@
       persistDirty,
       persistReconcileNeeded,
       persistReconcileBlocked,
+      pendingMergedSurfaceRender,
       externalOperationCount,
       schedulePersistPending: Boolean(schedulePersistBaseline),
       mailEditorDirty,
@@ -5104,11 +5114,17 @@
     await waitForExternalOperations();
     try { await flushSchedulePersist(); } catch (_) {}
     if (mailEditorDirty) await saveMailEditorDraft();
+    for (let pass = 0; pass < 8; pass += 1) {
+      await waitForPersistIdle();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (persistSaving) continue;
+      clearTimeout(persistReconcileTimer); persistReconcileTimer = null;
+      if (schedulePersistBaseline) { await flushSchedulePersist(); continue; }
+      if (persistDirty || persistReconcileNeeded || pendingScheduleMergeHints.size) { await persist('종료 전 변경사항 저장됨'); continue; }
+      break;
+    }
     await waitForPersistIdle();
-    if (schedulePersistBaseline) await flushSchedulePersist();
-    if (persistDirty || pendingScheduleMergeHints.size) await persist('종료 전 변경사항 저장됨');
-    await waitForPersistIdle();
-    if (persistDirty || schedulePersistBaseline || pendingScheduleMergeHints.size) throw new Error('변경사항을 저장하지 못했습니다.');
+    if (persistSaving || persistDirty || persistReconcileNeeded || schedulePersistBaseline || pendingScheduleMergeHints.size) throw new Error('변경사항을 저장하지 못했습니다.');
     if (state.preferences.storageMode === 'drive' && !await flushDriveStateSync(false)) throw new Error(lastDriveSyncError?.message || 'Google Drive에 마지막 변경사항을 저장하지 못했습니다.');
     return true;
   };
