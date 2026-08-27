@@ -170,6 +170,11 @@ p { margin: 0; }
 button.compose-variable-chip { cursor: pointer; }
 .compose-variable-chip.valid { border: 1px solid #82aa96; background: #edf7f1; color: #236447; }
 .compose-variable-chip.invalid { border: 1px solid #cc8585; background: #fff0f0; color: #982929; text-decoration: underline wavy #b3261e; }
+.variable-autocomplete { position: fixed; z-index: 1200; min-width: 190px; max-width: min(360px, calc(100vw - 24px)); max-height: 220px; overflow-y: auto; border: 1px solid #9aa1a8; border-radius: 2px; background: #fff; box-shadow: 0 5px 14px rgba(0, 0, 0, .18); padding: 3px; }
+.variable-autocomplete button { display: flex; justify-content: space-between; gap: 14px; width: 100%; min-height: 31px; border: 0; border-radius: 1px; background: transparent; padding: 6px 9px; color: #222; text-align: left; font: 12px Consolas, "Malgun Gothic", monospace; cursor: pointer; }
+.variable-autocomplete button:hover, .variable-autocomplete button.active { background: #e8eef6; color: #173f6b; }
+.variable-autocomplete small { color: #777; font: 10px "Malgun Gothic", sans-serif; }
+.variable-autocomplete-empty { padding: 8px 9px; color: #777; font-size: 11px; }
 
 .list { display: grid; gap: 2px; }
 .list-row { display: flex; justify-content: space-between; align-items: center; width: 100%; border: 0; border-bottom: 1px solid #e7eaee; background: transparent; padding: 11px 5px; text-align: left; }

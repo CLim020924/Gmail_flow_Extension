@@ -1,6 +1,6 @@
 {
   "name": "cmoe-workspace",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "명단, 일정, 계정과 업무 모듈을 프로젝트 단위로 관리하는 Windows Workspace",
   "main": "desktop/main.js",
   "author": "CLim020924",

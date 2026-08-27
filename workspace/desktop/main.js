@@ -660,6 +660,14 @@ app.whenReady().then(async () => {
           const importEnd = Date.now() + 5000;
           while ((document.querySelector('#inputDialog')?.open || document.querySelector('#rosterBody input[data-row-index="0"][data-column-index="0"]')?.value !== '저장 명단 사용자') && Date.now() < importEnd) await new Promise((resolve) => setTimeout(resolve, 25));
           const savedRosterImported = document.querySelector('#rosterBody input[data-row-index="0"][data-column-index="0"]')?.value === '저장 명단 사용자';
+          document.querySelector('.nav-item[data-page="compose"]').click();
+          const subject = document.querySelector('#subject'); subject.value = '안녕하세요 {이'; subject.focus(); subject.setSelectionRange(subject.value.length, subject.value.length); subject.dispatchEvent(new Event('input', { bubbles: true }));
+          const autocompleteEnd = Date.now() + 3000;
+          while (document.querySelector('#variableAutocomplete')?.hidden && Date.now() < autocompleteEnd) await new Promise((resolve) => setTimeout(resolve, 25));
+          const autocompleteOffered = [...document.querySelectorAll('#variableAutocomplete [data-variable-autocomplete]')].some((button) => button.dataset.variableAutocomplete === '이름');
+          subject.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+          const autocompleteInserted = subject.value === '안녕하세요 {이름}';
+          document.querySelector('.nav-item[data-page="roster"]').click();
           const before = document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length;
           document.querySelector('#addRosterRow').click();
           const after = document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length;
@@ -673,6 +681,8 @@ app.whenReady().then(async () => {
             projectSourceOffered: Boolean(projectOption),
             savedSourceOffered: Boolean(savedOption),
             savedRosterImported,
+            autocompleteOffered,
+            autocompleteInserted,
             rowAdded: after === before + 1,
             pasted23Rows: document.querySelector('#rosterBody input[data-row-index="22"][data-column-index="0"]')?.value === '테스트23',
             extraBlankRows: document.querySelectorAll('#rosterBody tr:not(.sheet-add-row)').length >= 25,

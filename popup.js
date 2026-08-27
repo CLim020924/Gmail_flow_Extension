@@ -62,6 +62,7 @@ let rosterVisibleRowFloor = 5;
 let cloudSyncTimer = null;
 let cloudSyncBusy = false;
 let composeInsertionTarget = 'body';
+let variableAutocompleteState = null;
 let cloudSyncApplying = false;
 let cloudSyncDirty = false;
 let projectRosterSource = null;
@@ -603,6 +604,68 @@ function insertComposeVariable(name) {
   const target = $(`#${composeInsertionTarget}`) || $('#body'); const token = `{${name}}`;
   target.focus(); const start = target.selectionStart ?? target.value.length; const end = target.selectionEnd ?? start;
   target.setRangeText(token, start, end, 'end'); target.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function hideVariableAutocomplete() {
+  variableAutocompleteState = null;
+  const menu = $('#variableAutocomplete');
+  menu.hidden = true;
+  menu.replaceChildren();
+}
+
+function variableCaretPosition(target, caret) {
+  const rect = target.getBoundingClientRect();
+  const style = getComputedStyle(target);
+  const mirror = document.createElement('div');
+  const properties = ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'lineHeight', 'textTransform', 'wordSpacing', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'boxSizing'];
+  properties.forEach((property) => { mirror.style[property] = style[property]; });
+  Object.assign(mirror.style, {
+    position: 'fixed', visibility: 'hidden', pointerEvents: 'none', whiteSpace: target.tagName === 'INPUT' ? 'pre' : 'pre-wrap', overflowWrap: 'break-word',
+    left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, minHeight: `${rect.height}px`
+  });
+  mirror.textContent = target.value.slice(0, caret);
+  const marker = document.createElement('span'); marker.textContent = '\u200b'; mirror.append(marker); document.body.append(mirror);
+  const markerRect = marker.getBoundingClientRect(); const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.35;
+  const position = { left: markerRect.left - target.scrollLeft, top: markerRect.top - target.scrollTop + lineHeight + 3 };
+  mirror.remove();
+  return position;
+}
+
+function applyVariableAutocomplete(name) {
+  const current = variableAutocompleteState; if (!current) return;
+  const target = current.target; const end = target.selectionEnd ?? current.caret;
+  target.setRangeText(`{${name}}`, current.start, end, 'end');
+  hideVariableAutocomplete(); target.focus(); target.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function renderVariableAutocomplete(target) {
+  const menu = $('#variableAutocomplete');
+  const caret = target.selectionStart ?? target.value.length;
+  if ((target.selectionEnd ?? caret) !== caret) { hideVariableAutocomplete(); return; }
+  const match = target.value.slice(0, caret).match(/\{([^{}\r\n]*)$/);
+  if (!match) { hideVariableAutocomplete(); return; }
+  const query = match[1].trim().toLocaleLowerCase('ko-KR');
+  const available = GmailFlowCore.getVariableNames(state.columns);
+  const starts = available.filter((name) => name.toLocaleLowerCase('ko-KR').startsWith(query));
+  const contains = available.filter((name) => !starts.includes(name) && name.toLocaleLowerCase('ko-KR').includes(query));
+  const items = [...starts, ...contains];
+  variableAutocompleteState = { target, start: caret - match[0].length, caret, items, index: 0 };
+  if (items.length) {
+    menu.replaceChildren(...items.map((name, index) => {
+      const button = document.createElement('button'); button.type = 'button'; button.role = 'option'; button.dataset.variableAutocomplete = name; button.classList.toggle('active', index === 0); button.setAttribute('aria-selected', String(index === 0));
+      const token = document.createElement('span'); token.textContent = `{${name}}`; const hint = document.createElement('small'); hint.textContent = index === 0 ? 'Enter' : '선택'; button.append(token, hint); return button;
+    }));
+  } else menu.innerHTML = '<div class="variable-autocomplete-empty">일치하는 명단 컬럼이 없습니다.</div>';
+  const point = variableCaretPosition(target, caret); menu.hidden = false;
+  const width = Math.min(360, Math.max(190, menu.offsetWidth));
+  menu.style.left = `${Math.max(8, Math.min(point.left, innerWidth - width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(point.top, innerHeight - Math.min(menu.scrollHeight, 220) - 8))}px`;
+}
+
+function moveVariableAutocomplete(step) {
+  const current = variableAutocompleteState; if (!current?.items.length) return;
+  current.index = (current.index + step + current.items.length) % current.items.length;
+  $$('#variableAutocomplete [data-variable-autocomplete]').forEach((button, index) => { button.classList.toggle('active', index === current.index); button.setAttribute('aria-selected', String(index === current.index)); if (index === current.index) button.scrollIntoView({ block: 'nearest' }); });
 }
 
 function renderPreviewItem(index) {
@@ -1952,9 +2015,25 @@ function bindEvents() {
   $$('.nav-item').forEach((item) => item.addEventListener('click', () => showPage(item.dataset.page)));
   $('#sendMethod').addEventListener('change', updateComposeState);
   ['gmailLabel', 'scheduleDate', 'scheduleTime', 'subject', 'body', 'postscript'].forEach((id) => {
-    $(`#${id}`).addEventListener('input', updateComposeState);
+    $(`#${id}`).addEventListener('input', (event) => { updateComposeState(); if (['subject', 'body', 'postscript'].includes(id)) renderVariableAutocomplete(event.target); });
   });
-  ['subject', 'body', 'postscript'].forEach((id) => $(`#${id}`).addEventListener('focus', () => { composeInsertionTarget = id; }));
+  ['subject', 'body', 'postscript'].forEach((id) => {
+    const target = $(`#${id}`);
+    target.addEventListener('focus', () => { composeInsertionTarget = id; });
+    target.addEventListener('click', () => renderVariableAutocomplete(target));
+    target.addEventListener('keyup', (event) => { if (!['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(event.key)) renderVariableAutocomplete(target); });
+    target.addEventListener('keydown', (event) => {
+      if (!variableAutocompleteState || variableAutocompleteState.target !== target || $('#variableAutocomplete').hidden) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); moveVariableAutocomplete(event.key === 'ArrowDown' ? 1 : -1); }
+      else if ((event.key === 'Enter' || event.key === 'Tab') && variableAutocompleteState.items.length) { event.preventDefault(); applyVariableAutocomplete(variableAutocompleteState.items[variableAutocompleteState.index]); }
+      else if (event.key === 'Escape') { event.preventDefault(); hideVariableAutocomplete(); }
+    });
+    target.addEventListener('blur', () => setTimeout(() => { if (!$('#variableAutocomplete').matches(':hover')) hideVariableAutocomplete(); }, 100));
+  });
+  $('#variableAutocomplete').addEventListener('mousedown', (event) => event.preventDefault());
+  $('#variableAutocomplete').addEventListener('click', (event) => { const option = event.target.closest('[data-variable-autocomplete]'); if (option) applyVariableAutocomplete(option.dataset.variableAutocomplete); });
+  globalThis.addEventListener('resize', hideVariableAutocomplete);
+  document.addEventListener('scroll', hideVariableAutocomplete, true);
   $('#composeVariablePalette').addEventListener('click', (event) => { const button = event.target.closest('[data-insert-variable]'); if (button) insertComposeVariable(button.dataset.insertVariable); });
   $('#emptyDraftToggle').addEventListener('click', () => {
     state.emptyDraftEnabled = !state.emptyDraftEnabled;
