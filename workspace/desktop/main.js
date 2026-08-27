@@ -375,6 +375,28 @@ app.whenReady().then(async () => {
   gmailFlowHost = new GmailFlowHost({ app, BrowserWindow, ipcMain, safeStorage, shell, rootPath: gmailFlowRoot, showWindow: () => createProgramWindow('gmailFlow'), isSmokeTest });
   await gmailFlowHost.initialize();
   const preMigrationState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+  const centralRosterMigrationKey = 'workspaceCentralRosterMigrationV1';
+  if (!await gmailFlowHost.storage.get(centralRosterMigrationKey, false)) {
+    const legacyRosters = await gmailFlowHost.storage.get('savedRosters', []);
+    const existingIds = new Set(preMigrationState.library.rosters.map((roster) => roster.id));
+    let imported = 0;
+    for (const roster of Array.isArray(legacyRosters) ? legacyRosters : []) {
+      if (!roster?.id || String(roster.id).startsWith('workspace-') || existingIds.has(roster.id)) continue;
+      const columns = (roster.columns || []).map((column, index) => ({ id: column.id || `legacy-column-${index}`, name: String(column.name || `컬럼${index + 1}`), type: column.workspaceType || (column.role === 'email' ? 'email' : 'text') }));
+      const people = (roster.rows || []).filter((row) => columns.some((column) => String(row[column.id] || '').trim())).map((row, index) => {
+        const values = Object.fromEntries(columns.map((column) => [column.id, String(row[column.id] ?? '')]));
+        const valueFor = (type) => values[columns.find((column) => column.type === type)?.id] || '';
+        return { id: row.__workspacePersonId || `person-${Date.now().toString(36)}-${index}`, sourceOrder: index, values, name: valueFor('name'), email: valueFor('email'), phone: valueFor('phone'), group: valueFor('group'), roleIds: ['participant'], active: row.__workspaceActive !== false };
+      });
+      preMigrationState.library.rosters.push({ id: roster.id, name: roster.name || '이전 Gmail Flow 명단', columns, people, savedAt: roster.createdAt || new Date().toISOString(), updatedAt: roster.updatedAt || new Date().toISOString() });
+      existingIds.add(roster.id); imported += 1;
+    }
+    if (imported) {
+      preMigrationState.updatedAt = new Date().toISOString(); preMigrationState._revision = Number(preMigrationState._revision || 0) + 1; preMigrationState._baseRevision = preMigrationState._revision;
+      await storage.set('workspaceState', preMigrationState);
+    }
+    await gmailFlowHost.storage.set(centralRosterMigrationKey, true);
+  }
   await gmailFlowHost.importLegacyRosters(preMigrationState.library?.rosters || []);
   registerIpc();
   const initialProgram = requestedProgram();
