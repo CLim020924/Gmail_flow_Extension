@@ -910,8 +910,10 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#activeProjectName')?.textContent === 'Smoke Project B', 'second project');
             document.querySelector('[data-workflow-open="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'empty people page');
-            assert(document.querySelector('#openRosterManager')?.textContent.includes('명단 가져오기'), 'shared roster manager button');
-            assert(!document.querySelector('#rosterEditorTable'), 'duplicate roster editor must be removed');
+            assert(document.querySelector('#openRosterManager')?.textContent.includes('공용 명단 관리'), 'shared roster manager button');
+            assert(document.querySelector('#rosterEditorTable') && document.querySelector('#rosterCellValue'), 'inline roster spreadsheet and formula bar');
+            assert(document.querySelector('#rosterPasteInput') && document.querySelector('#chooseExcelRoster') && document.querySelector('#sharedRosterSelect'), 'inline roster paste, file import, and save-load controls');
+            assert(document.querySelector('.roster-editor-guide')?.textContent.includes('드래그로 범위 선택 · Ctrl+C/V · 제외 행 잠금'), 'persistent roster spreadsheet guide');
             document.querySelector('#page-people [data-nav-link="dashboard"]').click();
             const switcher = document.querySelector('#projectSwitcher');
             assert(switcher.options.length === 2, 'project switcher should list two projects');
@@ -948,27 +950,64 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'people page');
             assert(document.querySelector('#page-people h1')?.textContent === '명단 준비', 'people page purpose label');
             const smokeState = await globalThis.workspaceDesktop.loadState();
-            await globalThis.workspaceDesktop.saveWorkspaceRoster(smokeState.activeProjectId, {
+            const rosterPayload = {
               columns: [
                 { id: 'smoke-name', name: '이름', role: 'variable', workspaceType: 'name' },
                 { id: 'smoke-email', name: '이메일', role: 'email', workspaceType: 'email' },
                 { id: 'smoke-phone', name: '전화번호', role: 'variable', workspaceType: 'phone' }
               ],
               rows: [
-                { 'smoke-name': '송아라', 'smoke-email': 'one@example.com', 'smoke-phone': '010-1111-1111' },
-                { 'smoke-name': '조민지', 'smoke-email': 'two@example.com', 'smoke-phone': '010-2222-2222' }
+                { 'smoke-name': '송아라', 'smoke-email': 'one@example.com', 'smoke-phone': '010-1111-1111', __workspacePersonId: 'smoke-person-1', __workspaceActive: true },
+                { 'smoke-name': '조민지', 'smoke-email': 'two@example.com', 'smoke-phone': '010-2222-2222', __workspacePersonId: 'smoke-person-2', __workspaceActive: true }
               ]
-            });
+            };
+            await globalThis.workspaceDesktop.saveWorkspaceRoster(smokeState.activeProjectId, rosterPayload);
             await globalThis.workspaceDesktop.saveSharedRoster({
               name: '공용 저장 명단 테스트',
               columns: [
                 { id: 'saved-name', name: '이름', role: 'variable', workspaceType: 'name' },
                 { id: 'saved-email', name: '이메일', role: 'email', workspaceType: 'email' }
               ],
-              rows: [{ 'saved-name': '저장 명단 사용자', 'saved-email': 'saved@example.com' }]
+              rows: [
+                { 'saved-name': '저장 명단 사용자', 'saved-email': 'saved@example.com' },
+                { 'saved-name': '송아라 중복', 'saved-email': 'one@example.com' }
+              ]
             });
             await waitFor(() => document.querySelector('#rosterPeopleMetric')?.textContent === '2', 'shared roster reflected in workspace');
-            assert(!document.querySelector('#rosterPasteInput, #sharedRosterSelect'), 'legacy roster controls must be removed');
+            await waitFor(() => document.querySelectorAll('#rosterEditorTable tbody [data-sheet-row] input').length >= 6, 'inline roster rows rendered');
+            const rosterTable = document.querySelector('#rosterEditorTable');
+            const rosterDragStart = rosterTable.querySelector('[data-sheet-row="1"][data-sheet-col="0"]');
+            const rosterDragEnd = rosterTable.querySelector('[data-sheet-row="2"][data-sheet-col="1"]');
+            rosterDragStart.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1 }));
+            rosterDragEnd.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, buttons: 1 }));
+            document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }));
+            assert(document.querySelector('#rosterSelectionStatus').textContent === 'A2:B3' && rosterTable.querySelectorAll('.sheet-selected').length === 4, 'roster pointer drag selects a rectangular range');
+            rosterDragStart.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1 })); document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }));
+            rosterDragEnd.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1, shiftKey: true })); document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }));
+            assert(document.querySelector('#rosterSelectionStatus').textContent === 'A2:B3', 'roster Shift selection preserves the anchor');
+            const rosterCopy = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: rosterCopy, bubbles: true, cancelable: true }));
+            assert(rosterCopy.getData('text/plain') === '송아라\\tone@example.com\\r\\n조민지\\ttwo@example.com', 'roster range copy exports TSV');
+            const rosterAppendCell = rosterTable.querySelector('[data-sheet-row="3"][data-sheet-col="0"]');
+            rosterAppendCell.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, buttons: 1 })); document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }));
+            const rosterPaste = new DataTransfer(); rosterPaste.setData('text/plain', '김도윤\\tthree@example.com');
+            rosterTable.dispatchEvent(new ClipboardEvent('paste', { clipboardData: rosterPaste, bubbles: true, cancelable: true }));
+            await waitFor(() => document.querySelector('#rosterPeopleMetric')?.textContent === '3', 'roster paste auto-expands rows');
+            const expandedRosterState = await globalThis.workspaceDesktop.loadState(); const expandedRosterProject = expandedRosterState.projects.find((project) => project.id === expandedRosterState.activeProjectId);
+            assert(expandedRosterProject.data.people.some((person) => person.name === '김도윤' && person.email === 'three@example.com'), 'auto-expanded roster row persists');
+            await globalThis.workspaceDesktop.saveWorkspaceRoster(smokeState.activeProjectId, { ...rosterPayload, rows: [rosterPayload.rows[0], { ...rosterPayload.rows[1], __workspaceActive: false }] });
+            await waitFor(() => document.querySelector('[data-roster-inactive="smoke-person-2"]'), 'excluded roster row rendered as locked');
+            const lockedRosterInput = document.querySelector('[data-roster-inactive="smoke-person-2"] input');
+            assert(lockedRosterInput.readOnly && getComputedStyle(lockedRosterInput).textDecorationLine.includes('line-through'), 'excluded roster row is read-only and struck through');
+            assert(document.querySelector('[data-roster-inactive="smoke-person-2"]')?.getAttribute('aria-label')?.includes('제외됨') && document.querySelector('#rosterEditorTable')?.getAttribute('aria-describedby')?.includes('rosterSelectionStatus'), 'roster exclusion and range status are announced to assistive technology');
+            lockedRosterInput.value = '잠금 훼손 시도'; lockedRosterInput.dispatchEvent(new Event('input', { bubbles: true }));
+            assert(lockedRosterInput.value === '조민지', 'excluded roster row rejects inline edits');
+            document.querySelector('#saveSharedRoster').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'save inline roster without excluded rows');
+            document.querySelector('#nameInputValue').value = '인라인 제외 반영 명단'; document.querySelector('#nameInputForm').requestSubmit();
+            await waitFor(() => [...document.querySelector('#sharedRosterSelect').options].some((option) => option.textContent.includes('인라인 제외 반영 명단')), 'inline shared roster saved');
+            const excludedSavedState = await globalThis.workspaceDesktop.loadState(); const excludedSavedRoster = excludedSavedState.library.rosters.find((roster) => roster.name === '인라인 제외 반영 명단');
+            assert(excludedSavedRoster?.people.length === 1 && excludedSavedRoster.people[0].email === 'one@example.com' && excludedSavedRoster.people[0].active !== false && excludedSavedRoster.people[0].sourceOrder === 0, 'inline shared roster save omits excluded rows and reindexes active people');
+            await globalThis.workspaceDesktop.saveWorkspaceRoster(smokeState.activeProjectId, rosterPayload);
+            await waitFor(() => document.querySelector('#rosterPeopleMetric')?.textContent === '2' && !document.querySelector('[data-roster-inactive]'), 'active roster restored after inline spreadsheet checks');
             document.querySelector('#createRosterView').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'create derived roster name'); document.querySelector('#nameInputValue').value = '필기 응시자'; document.querySelector('#nameInputForm').requestSubmit();
             await waitFor(() => [...document.querySelector('#rosterViewSelect').options].some((option) => option.textContent === '필기 응시자'), 'derived roster created');
             document.querySelector('[data-roster-view-toggle]').click(); await waitFor(() => document.querySelector('.roster-view-person.excluded'), 'derived roster exclusion');
@@ -986,6 +1025,7 @@ app.whenReady().then(async () => {
             assert(document.querySelector('#arrangementBoard tbody [data-arrangement-row="0"][data-arrangement-col="0"] input').value === '그룹 1', 'sequential group draft');
             const arrangementCell = document.querySelector('#arrangementBoard [data-arrangement-row="0"][data-arrangement-col="0"]'); arrangementCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 })); globalThis.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
             const arrangementCopy = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: arrangementCopy, bubbles: true, cancelable: true }));
+            assert(arrangementCopy.getData('text/plain') === '그룹 1' && arrangementCopy.getData('text/html').includes('<table>'), 'arrangement copy remains independent from the roster spreadsheet');
             const focusedArrangementInput = arrangementCell.querySelector('input'); focusedArrangementInput.focus(); focusedArrangementInput.value = '종료 직전 저장'; focusedArrangementInput.dispatchEvent(new Event('input', { bubbles: true }));
             await globalThis.flushWorkspaceEdits();
             const flushedArrangementState = await globalThis.workspaceDesktop.loadState(); const flushedArrangementProject = flushedArrangementState.projects.find((project) => project.id === flushedArrangementState.activeProjectId);
@@ -993,20 +1033,45 @@ app.whenReady().then(async () => {
             document.querySelector('#page-arrange [data-nav-link="people"]').click();
             await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'back to people');
             document.querySelector('#rosterStartTask').click(); await waitFor(() => document.querySelector('[data-open-arrangement]'), 'saved arrangement listed'); document.querySelector('[data-open-arrangement]').click(); await waitFor(() => document.querySelector('#page-arrange').classList.contains('active'), 'reopen saved arrangement'); document.querySelector('#page-arrange [data-nav-link="people"]').click();
-            document.querySelector('#page-people [data-nav-link="dashboard"]').click();
+            document.querySelector('[data-nav="library"]').click();
+            await waitFor(() => document.querySelector('#page-library').classList.contains('active'), 'saved library page');
+            await waitFor(() => [...document.querySelectorAll('#libraryRosterList .version-item')].some((row) => row.textContent.includes('공용 저장 명단 테스트')), 'saved roster rendered in library');
+            assert(document.querySelector('#openLibraryRosterManager') && document.querySelector('#libraryRosterList [data-library-rename][data-library-kind="roster"]') && document.querySelector('#libraryRosterList [data-library-duplicate][data-library-kind="roster"]') && document.querySelector('#libraryRosterList [data-library-remove][data-library-kind="roster"]'), 'library should keep direct roster actions and the shared manager');
+            document.querySelector('[data-nav="dashboard"]').click();
+            await waitFor(() => document.querySelector('#page-dashboard').classList.contains('active'), 'dashboard after library');
             document.querySelector('[data-workflow-open="schedule"]').click();
             await waitFor(() => document.querySelector('#page-schedule').classList.contains('active'), 'schedule page');
             assert(document.querySelector('#page-schedule h1')?.textContent === '일정 편성' && document.querySelector('#generateScheduleButton')?.textContent.includes('일정표 만들기'), 'schedule page purpose labels');
+            document.querySelector('#page-schedule [data-related-program="people"]').click();
+            await waitFor(() => document.querySelector('#page-people').classList.contains('active'), 'schedule related roster opens the full people page');
+            assert(document.querySelector('#rosterEditorTable') && document.querySelector('#rosterViewSelect'), 'related roster route includes inline and derived rosters');
+            document.querySelector('#page-people [data-nav-link="dashboard"]').click(); await waitFor(() => document.querySelector('#page-dashboard').classList.contains('active'), 'dashboard after related roster');
+            document.querySelector('[data-workflow-open="schedule"]').click(); await waitFor(() => document.querySelector('#page-schedule').classList.contains('active'), 'return to schedule after related roster');
+            assert(document.querySelector('#scheduleRosterSelect') && document.querySelector('#scheduleMergeRoster')?.textContent.includes('중복 제외') && document.querySelector('#openScheduleRosterManager'), 'schedule direct saved-roster merge controls');
+            const scheduleSavedRosterOption = [...document.querySelector('#scheduleRosterSelect').options].find((option) => option.textContent.includes('공용 저장 명단 테스트'));
+            assert(scheduleSavedRosterOption, 'saved roster offered to schedule');
+            const scheduleDerivedViewOption = [...document.querySelector('#sessionRosterView').options].find((option) => option.textContent === '필기 합격자');
+            assert(scheduleDerivedViewOption, 'derived roster offered as the schedule candidate view');
+            document.querySelector('#sessionRosterView').value = scheduleDerivedViewOption.value; document.querySelector('#sessionRosterView').dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            const selectedScheduleViewState = await globalThis.workspaceDesktop.loadState();
+            assert(selectedScheduleViewState.projects.find((project) => project.id === smokeState.activeProjectId).data.scheduleRules.rosterViewId === scheduleDerivedViewOption.value, 'selected schedule candidate view persisted');
+            document.querySelector('#scheduleRosterSelect').value = scheduleSavedRosterOption.value; document.querySelector('#scheduleMergeRoster').click();
+            await waitFor(() => document.querySelector('#scheduleProjectRosterStatus')?.textContent.includes('외 2명'), 'additive saved-roster merge');
+            const mergedRosterState = await globalThis.workspaceDesktop.loadState(); const mergedRosterProject = mergedRosterState.projects.find((project) => project.id === smokeState.activeProjectId);
+            assert(mergedRosterProject.data.people.length === 3 && mergedRosterProject.data.people.filter((person) => person.email === 'one@example.com').length === 1 && mergedRosterProject.data.people.some((person) => person.email === 'saved@example.com'), 'schedule merge must add only the new person and deduplicate existing email');
+            const mergedScheduleView = mergedRosterProject.data.rosterViews.find((view) => view.id === scheduleDerivedViewOption.value); const mergedScheduleIds = new Set(mergedScheduleView?.personIds || []); const mergedExcludedIds = new Set(mergedScheduleView?.excludedPersonIds || []);
+            assert(mergedRosterProject.data.people.filter((person) => person.active !== false).every((person) => mergedScheduleIds.has(person.id) && !mergedExcludedIds.has(person.id)), 'schedule merge adds both new and deduplicated existing people to the selected candidate view');
             document.querySelector('#slotBulkInput').value = '2026-07-06 09:30-10:30 오전 세션';
             document.querySelector('#addSlotsButton').click();
-            await waitFor(() => document.querySelectorAll('[data-availability-all]').length === 2, 'availability matrix');
+            await waitFor(() => document.querySelectorAll('[data-availability-all]').length === 3, 'availability matrix');
             document.querySelectorAll('[data-availability-all]').forEach((checkbox) => { checkbox.checked = true; checkbox.dispatchEvent(new Event('change', { bubbles: true })); });
             await waitFor(() => [...document.querySelectorAll('[data-availability-person]')].every((checkbox) => checkbox.checked), 'all availability');
             document.querySelector('#generateScheduleButton').click();
             await waitFor(() => [...document.querySelectorAll('#scheduleBoard .schedule-role-cell input')].some((input) => input.value.split(',').filter(Boolean).length >= 1), 'generated assignments');
             assert(!document.querySelector('#scheduleSetupDetails').open, 'setup folds after initial schedule generation');
             assert(document.querySelectorAll('#sessionCalendarBoard [data-session-slot]').length === 1, 'session calendar card');
-            assert(document.querySelectorAll('#sessionPersonPool [data-session-person]').length === 2, 'session roster person pool');
+            assert(document.querySelectorAll('#sessionPersonPool [data-session-person]').length === 3, 'session roster person pool');
             const unassignedPerson = [...document.querySelectorAll('#sessionPersonPool [data-session-person]')].find((chip) => ![...document.querySelectorAll('[data-session-assignment]')].some((assignment) => assignment.dataset.sessionPerson === chip.dataset.sessionPerson));
             const beforePreviewState = await globalThis.workspaceDesktop.loadState(); const beforePreviewProject = beforePreviewState.projects.find((project) => project.id === beforePreviewState.activeProjectId); const beforePreviewAssignments = JSON.stringify(beforePreviewProject.data.assignments);
             unassignedPerson.click(); document.querySelector('[data-session-slot]').click();
@@ -1031,12 +1096,12 @@ app.whenReady().then(async () => {
             const scheduleCopied = new DataTransfer(); document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: scheduleCopied, bubbles: true, cancelable: true }));
             assert(scheduleCopied.getData('text/plain').includes('\t') && scheduleCopied.getData('text/html').includes('<table>'), 'schedule spreadsheet drag and Excel copy');
             scheduleCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 })); globalThis.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-            const schedulePaste = new DataTransfer(); schedulePaste.setData('text/plain', '날짜\\t시작\\t종료\\t세션명\\t참여자\\t운영 메모\\n2026-07-06\\t09:30\\t10:30\\t오전 세션\\t송아라, 조민지\\t확인 완료');
+            const schedulePaste = new DataTransfer(); schedulePaste.setData('text/plain', '날짜\\t시작\\t종료\\t세션명\\t참여자\\t운영 메모\\n2026-07-06\\t09:30\\t10:30\\t오전 세션\\t송아라, 조민지, 저장 명단 사용자\\t확인 완료');
             scheduleCell.querySelector('input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: schedulePaste, bubbles: true, cancelable: true }));
             await waitFor(() => document.querySelector('#confirmDialog').open, 'schedule paste replacement confirm'); document.querySelector('#confirmAction').click();
             await waitFor(() => [...document.querySelectorAll('[data-schedule-rename-column]')].some((button) => button.textContent === '운영 메모'), 'dynamic schedule column import');
             assert([...document.querySelectorAll('#scheduleBoard tbody input')].some((input) => input.value === '확인 완료'), 'custom schedule cell persisted in editor');
-            await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2, 'generic participant column mapped to assignments');
+            await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 3, 'generic participant column mapped to assignments');
             assert([...document.querySelectorAll('#sessionPersonPool [data-session-person]')].every((chip) => chip.textContent.includes('일정 1개')), 'customer counts, calendar cards, and spreadsheet assignments must stay consistent');
             document.querySelector('#saveScheduleVersion').click();
             await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1054,7 +1119,17 @@ app.whenReady().then(async () => {
             await waitFor(() => document.querySelector('#page-gmailFlow').classList.contains('active'), 'gmail page');
             assert(document.querySelector('#page-gmailFlow h1')?.textContent === '안내 메일 준비' && document.querySelector('#createGmailDrafts')?.textContent.includes('임시보관함'), 'gmail page purpose labels');
             assert(document.querySelector('#gmailFlowAccountButton') && document.querySelector('#openOriginalGmailFlow'), 'Gmail account and original app controls should be visible');
-            assert(document.querySelector('#openMailRosterManager')?.textContent.includes('명단 가져오기') && document.querySelectorAll('#mailRosterPeople .resource-chip').length === 2 && document.querySelector('#mailRosterSummary')?.textContent.trim(), 'gmail page should show the applied shared roster');
+            assert(document.querySelector('#openMailRosterManager')?.textContent.includes('명단 관리') && document.querySelectorAll('#mailRosterPeople .resource-chip').length === 3 && document.querySelector('#mailRosterSummary')?.textContent.trim(), 'gmail page should show the applied shared roster');
+            assert(document.querySelector('#gmailSharedRosterSelect') && [...document.querySelector('#gmailSharedRosterSelect').options].some((option) => option.textContent.includes('공용 저장 명단 테스트')) && document.querySelector('#loadGmailSharedRoster')?.textContent.includes('전체 교체') && document.querySelector('#gmailRosterPaste') && document.querySelector('#applyGmailRosterPaste'), 'gmail direct saved-roster and paste controls');
+            const gmailPeopleBeforeReplace = (await globalThis.workspaceDesktop.loadState()).projects.find((project) => project.id === smokeState.activeProjectId).data.people.map((person) => person.email).sort().join('|');
+            document.querySelector('#gmailSharedRosterSelect').value = [...document.querySelector('#gmailSharedRosterSelect').options].find((option) => option.textContent.includes('공용 저장 명단 테스트')).value;
+            document.querySelector('#loadGmailSharedRoster').click(); await waitFor(() => document.querySelector('#confirmDialog').open, 'saved Gmail roster replacement confirmation');
+            assert(document.querySelector('#confirmMessage').textContent.includes('전체 교체') && document.querySelector('#confirmMessage').textContent.includes('기존 일정 배정'), 'saved Gmail roster replacement explains its impact');
+            document.querySelector('#confirmDialog .dialog-footer [data-confirm-result="false"]').click(); await waitFor(() => !document.querySelector('#confirmDialog').open, 'cancel saved Gmail roster replacement');
+            assert((await globalThis.workspaceDesktop.loadState()).projects.find((project) => project.id === smokeState.activeProjectId).data.people.map((person) => person.email).sort().join('|') === gmailPeopleBeforeReplace, 'cancelled saved Gmail roster replacement preserves the project roster');
+            document.querySelector('#gmailRosterPaste').value = '이름\\t이메일\\n교체 취소\\tcancel@example.com'; document.querySelector('#applyGmailRosterPaste').click(); await waitFor(() => document.querySelector('#confirmDialog').open, 'pasted Gmail roster replacement confirmation');
+            document.querySelector('#confirmDialog .dialog-footer [data-confirm-result="false"]').click(); await waitFor(() => !document.querySelector('#confirmDialog').open, 'cancel pasted Gmail roster replacement');
+            assert(document.querySelector('#gmailRosterPaste').value.includes('cancel@example.com') && (await globalThis.workspaceDesktop.loadState()).projects.find((project) => project.id === smokeState.activeProjectId).data.people.map((person) => person.email).sort().join('|') === gmailPeopleBeforeReplace, 'cancelled pasted Gmail roster replacement preserves both text and project roster');
             const mailEditor = document.querySelector('#mailBodyEditor');
             const mailSubject = document.querySelector('#mailSubjectTemplate');
             mailSubject.value = '{전'; mailSubject.focus(); mailSubject.setSelectionRange(2, 2); mailSubject.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1073,7 +1148,7 @@ app.whenReady().then(async () => {
             mailEditor.dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true, cancelable: true }));
             assert(mailEditor.querySelector('table') && mailEditor.querySelector('td')?.style.backgroundColor && !mailEditor.querySelector('script') && !mailEditor.querySelector('[onclick]') && !mailEditor.textContent.includes('alert(2)'), 'rich paste should keep table/class styles and remove unsafe content: ' + mailEditor.innerHTML);
             document.querySelector('#prepareMailPackage').click();
-            await waitFor(() => document.querySelectorAll('[data-mail-edit]').length === 2, 'mail preview');
+            await waitFor(() => document.querySelectorAll('[data-mail-edit]').length === 3, 'mail preview');
             document.querySelector('[data-mail-edit]').click();
             await waitFor(() => document.querySelector('#mailEditDialog').open, 'personal mail editor');
             document.querySelector('#mailEditSubject').value += ' 개인수정'; document.querySelector('#mailEditSubject').focus(); document.querySelector('#mailEditSubject').dispatchEvent(new Event('input', { bubbles: true }));
@@ -1085,7 +1160,7 @@ app.whenReady().then(async () => {
             const persisted = await globalThis.workspaceDesktop.loadState();
             assert(persisted.projects.length === 2, 'projects persisted');
             const projectA = persisted.projects.find((project) => project.name === 'Smoke Project A');
-            assert(projectA.data.people.length === 2 && projectA.data.slots.length === 1 && projectA.data.workItems.length === 1, 'operational project data persisted: ' + JSON.stringify({ people: projectA.data.people.length, slots: projectA.data.slots.length, workItems: projectA.data.workItems.length }));
+            assert(projectA.data.people.length === 3 && projectA.data.slots.length === 1 && projectA.data.workItems.length === 1, 'operational project data persisted: ' + JSON.stringify({ people: projectA.data.people.length, slots: projectA.data.slots.length, workItems: projectA.data.workItems.length }));
             assert(projectA.data.communication.bodyHtmlTemplate.includes('<table') && !projectA.data.communication.bodyHtmlTemplate.includes('<script'), 'safe rich mail template persisted');
             assert(Object.keys(projectA.data.communication.mailEdits).length === 1, 'personal mail edit persisted');
             document.querySelector('[data-nav="dashboard"]').click();
@@ -1107,7 +1182,7 @@ app.whenReady().then(async () => {
           const waitFor = async (predicate, label) => { const end = Date.now() + 5000; while (!predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25)); if (!predicate()) throw new Error('Timed out waiting for ' + label); };
           document.querySelector('[data-workflow-open="schedule"]').click();
           await waitFor(() => document.querySelector('#page-schedule')?.classList.contains('active'), 'schedule screenshot page');
-          await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2 && document.querySelectorAll('[data-session-slot]').length === 1, 'consistent schedule screenshot state');
+          await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 3 && document.querySelectorAll('[data-session-slot]').length === 1, 'consistent schedule screenshot state');
           document.querySelector('#sessionAddEmptyTime').click();
           await waitFor(() => document.querySelector('#nameInputDialog').open, 'visual target slot dialog');
           document.querySelector('#nameInputValue').value = '2026-07-06 11:00-12:00 변경 후보'; document.querySelector('#nameInputForm').requestSubmit();
@@ -1317,7 +1392,8 @@ app.whenReady().then(async () => {
         const excludedProject = excludedState.projects.find((project) => project.id === smokeState.activeProjectId);
         if (excludedProject?.data.people[0]?.active !== false) throw new Error('Temporary roster exclusion was not applied to the project.');
         const centrallySavedRoster = excludedState.library.rosters.find((roster) => roster.name === '연기 테스트 선별 명단');
-        if (!centrallySavedRoster || centrallySavedRoster.people.length !== 1 || centrallySavedRoster.people.some((person) => person.active === false)) throw new Error('Named roster was not saved to the shared workspace library without excluded people.');
+        const includedProjectPeople = excludedProject?.data.people.filter((person) => person.active !== false).length || 0;
+        if (!centrallySavedRoster || centrallySavedRoster.people.length !== includedProjectPeople || centrallySavedRoster.people.some((person) => person.active === false)) throw new Error('Named roster was not saved to the shared workspace library without excluded people.');
         const rosterRestoreResult = await rosterManager.webContents.executeJavaScript(`(async () => {
           document.querySelector('[data-toggle-roster-row="0"]')?.click();
           const end = Date.now() + 5000;
@@ -1340,6 +1416,46 @@ app.whenReady().then(async () => {
         const appliedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
         const appliedProject = appliedState.projects.find((project) => project.id === smokeState.activeProjectId);
         if (appliedProject?.data.people[0]?.name !== '송아라 수정') throw new Error('Shared roster manager changes were not applied to the project.');
+        const replacementGuards = await mainWindow.webContents.executeJavaScript(`(async () => {
+          const waitFor = async (predicate, label, timeout = 5000) => { const end = Date.now() + timeout; while (!predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25)); if (!predicate()) throw new Error('Timed out waiting for ' + label); };
+          const openGmail = async () => {
+            document.querySelector('[data-nav="dashboard"]').click(); document.querySelector('[data-workflow-open="gmailFlow"]').click();
+            await waitFor(() => document.querySelector('#page-gmailFlow')?.classList.contains('active'), 'Gmail replacement page');
+          };
+          const chooseSavedRoster = () => {
+            const select = document.querySelector('#gmailSharedRosterSelect'); const option = [...select.options].find((item) => item.textContent.includes('공용 저장 명단 테스트'));
+            if (!option) throw new Error('Saved roster replacement option missing'); select.value = option.value; return option.value;
+          };
+          await openGmail();
+          let loaded = await globalThis.workspaceDesktop.loadState(); let project = loaded.projects.find((item) => item.id === loaded.activeProjectId); let saved = loaded.library.rosters.find((item) => item.name === '공용 저장 명단 테스트');
+          const savedId = chooseSavedRoster(); const projectPeopleBefore = project.data.people.map((person) => person.id).join('|');
+          document.querySelector('#loadGmailSharedRoster').click(); await waitFor(() => document.querySelector('#confirmDialog').open, 'source concurrency confirmation');
+          const savedColumns = saved.columns.map((column) => ({ id: column.id, name: column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' }));
+          const savedRows = saved.people.map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false }));
+          await globalThis.workspaceDesktop.saveSharedRoster({ id: saved.id, name: saved.name + ' 동시 수정', columns: savedColumns, rows: savedRows });
+          await new Promise((resolve) => setTimeout(resolve, 100)); document.querySelector('#confirmAction').click();
+          await waitFor(() => !document.querySelector('#confirmDialog').open && document.querySelector('#toastRegion').textContent.includes('저장 명단이 바뀌었습니다'), 'stale saved roster rejection');
+          loaded = await globalThis.workspaceDesktop.loadState(); project = loaded.projects.find((item) => item.id === loaded.activeProjectId);
+          const sourceGuarded = project.data.people.map((person) => person.id).join('|') === projectPeopleBefore;
+          await globalThis.workspaceDesktop.saveSharedRoster({ id: saved.id, name: saved.name, columns: savedColumns, rows: savedRows }); await new Promise((resolve) => setTimeout(resolve, 100));
+
+          chooseSavedRoster(); document.querySelector('#loadGmailSharedRoster').click(); await waitFor(() => document.querySelector('#confirmDialog').open, 'target concurrency confirmation');
+          loaded = await globalThis.workspaceDesktop.loadState(); project = loaded.projects.find((item) => item.id === loaded.activeProjectId);
+          const targetColumns = project.data.columns.map((column, index) => ({ id: column.id, name: index === 0 ? column.name + ' 동시 수정' : column.name, role: column.type === 'email' ? 'email' : 'variable', workspaceType: column.type || 'text' }));
+          const targetRows = project.data.people.map((person) => ({ ...person.values, __workspacePersonId: person.id, __workspaceActive: person.active !== false }));
+          await globalThis.workspaceDesktop.saveWorkspaceRoster(project.id, { columns: targetColumns, rows: targetRows }); await new Promise((resolve) => setTimeout(resolve, 100));
+          document.querySelector('#confirmAction').click(); await waitFor(() => !document.querySelector('#confirmDialog').open && document.querySelector('#toastRegion').textContent.includes('명단·일정'), 'stale project roster rejection');
+          loaded = await globalThis.workspaceDesktop.loadState(); project = loaded.projects.find((item) => item.id === loaded.activeProjectId);
+          const targetGuarded = project.data.columns[0].name.endsWith('동시 수정') && project.data.people.map((person) => person.id).join('|') === projectPeopleBefore;
+
+          const hadScheduleHistory = !document.querySelector('#scheduleUndo').disabled;
+          chooseSavedRoster(); document.querySelector('#loadGmailSharedRoster').click(); await waitFor(() => document.querySelector('#confirmDialog').open, 'accepted roster replacement confirmation'); document.querySelector('#confirmAction').click();
+          await waitFor(() => document.querySelectorAll('#mailRosterPeople .resource-chip').length === 2, 'accepted roster replacement');
+          document.querySelector('[data-nav="dashboard"]').click(); document.querySelector('[data-workflow-open="schedule"]').click(); await waitFor(() => document.querySelector('#page-schedule')?.classList.contains('active'), 'schedule after roster replacement');
+          loaded = await globalThis.workspaceDesktop.loadState(); project = loaded.projects.find((item) => item.id === loaded.activeProjectId);
+          return { sourceGuarded, targetGuarded, hadScheduleHistory, historyCleared: document.querySelector('#scheduleUndo').disabled && document.querySelector('#sessionUndo').disabled, assignmentsCleared: project.data.assignments.length === 0 && Object.keys(project.data.availability || {}).length === 0, savedIdStable: savedId === saved.id };
+        })()`);
+        if (!Object.values(replacementGuards).every(Boolean)) throw new Error(`Roster replacement guards failed: ${JSON.stringify(replacementGuards)}`);
         clearTimeout(timeout);
         console.log('Workspace smoke test passed.');
         writeSmokeResult('passed', { step: 'complete' });

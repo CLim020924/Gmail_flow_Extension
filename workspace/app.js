@@ -735,6 +735,7 @@
         actions.append(rename, duplicate, remove); row.append(copy, actions); container.append(row);
       });
     };
+    renderItems($('#libraryRosterList'), state.library.rosters, 'roster', '저장한 명단이 없습니다. 명단 화면에서 현재 명단을 이름 붙여 저장할 수 있습니다.');
     renderItems($('#libraryMailTemplateList'), state.library.mailTemplates, 'mailTemplate', '저장한 메일 양식이 없습니다. 메일 작성 화면에서 현재 내용을 저장할 수 있습니다.');
     const workflowList = $('#libraryWorkflowTemplateList'); workflowList.replaceChildren();
     state.library.workflowTemplates.slice().sort((a, b) => a.category.localeCompare(b.category, 'ko') || a.name.localeCompare(b.name, 'ko') || b.version - a.version).forEach((template) => {
@@ -841,16 +842,18 @@
   }
 
   function setSheetCellValue(project, row, column, value) {
-    const definition = project.data.columns[column]; if (!definition) return;
+    const definition = project.data.columns[column]; if (!definition) return false;
     if (row === 0) definition.name = String(value).trim() || definition.name;
     else {
       const existing = project.data.people[row - 1];
+      if (existing?.active === false) return false;
       if (existing || String(value ?? '').length) {
         const person = existing || ensureRosterPerson(project, row);
         person.values[definition.id] = String(value ?? '');
       }
     }
     syncPersonDerivedFields(project);
+    return true;
   }
 
   function updateRosterSelection(anchor, focus = anchor) {
@@ -865,7 +868,10 @@
     const from = `${spreadsheetColumnName(minCol)}${minRow + 1}`; const to = `${spreadsheetColumnName(maxCol)}${maxRow + 1}`;
     $('#rosterSelectionStatus').textContent = from === to ? from : `${from}:${to}`;
     $('#rosterCellAddress').textContent = `${spreadsheetColumnName(focus.col)}${focus.row + 1}`;
-    const project = activeProject(); const formula = $('#rosterCellValue'); formula.disabled = !project; formula.value = project ? sheetCellValue(project, focus.row, focus.col) : '';
+    const project = activeProject(); const formula = $('#rosterCellValue'); const locked = Boolean(project && focus.row > 0 && project.data.people[focus.row - 1]?.active === false);
+    formula.disabled = !project || locked; formula.value = project ? sheetCellValue(project, focus.row, focus.col) : '';
+    formula.placeholder = locked ? '제외 행은 공용 명단 관리자에서 다시 포함한 뒤 수정하세요' : '셀을 선택하세요';
+    formula.title = locked ? '제외된 행은 인라인 표에서 수정할 수 없습니다.' : '';
   }
 
   function selectedRosterMatrix(project) {
@@ -891,7 +897,6 @@
     const summary = $('#rosterColumnSummary');
     summary.replaceChildren(...project.data.columns.map((column) => element('span', 'tag', `${column.name} · ${column.type || '텍스트'}`)));
     renderRosterViews(project);
-    return;
 
     const rosterSelect = $('#sharedRosterSelect'); rosterSelect.replaceChildren(element('option', '', '저장한 명단 선택'));
     state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${roster.people?.length || 0}명`); option.value = roster.id; rosterSelect.append(option); });
@@ -939,13 +944,18 @@
     const visibleRows = Math.max(project.data.people.length + 2, 5);
     const rows = Array.from({ length: visibleRows }, (_, rowIndex) => {
       const person = project.data.people[rowIndex] || null;
-      const tr = element('tr'); tr.append(element('th', 'sheet-row-number', String(rowIndex + 2)));
+      const inactive = person?.active === false;
+      const tr = element('tr', inactive ? 'roster-inactive-row' : '');
+      if (inactive) { tr.dataset.rosterInactive = person.id; tr.title = '공용 명단 관리자에서 제외된 행입니다. 다시 포함한 뒤 수정할 수 있습니다.'; tr.setAttribute('aria-label', `${person.name || `${rowIndex + 2}행`} · 제외됨 · 읽기 전용`); }
+      tr.append(element('th', 'sheet-row-number', String(rowIndex + 2)));
       project.data.columns.forEach((column, columnIndex) => {
         const td = element('td');
         td.dataset.sheetRow = String(rowIndex + 1); td.dataset.sheetCol = String(columnIndex);
         const input = element('input');
         input.type = column.type === 'email' ? 'email' : 'text';
         input.value = person?.values?.[column.id] || '';
+        input.readOnly = inactive; input.setAttribute('aria-readonly', String(inactive));
+        if (inactive) input.setAttribute('aria-describedby', 'rosterEditorAccessibilityHelp');
         input.dataset.personRow = String(rowIndex);
         if (person) input.dataset.personValue = person.id;
         input.dataset.columnId = column.id;
@@ -1592,6 +1602,29 @@
     });
   }
 
+  function rosterReplacementSignature(project) {
+    return JSON.stringify({
+      schedule: scheduleChangeSignature(project),
+      rosterName: project.data.rosterName || '',
+      columns: project.data.columns,
+      people: project.data.people,
+      rosterViews: project.data.rosterViews,
+      activeRosterViewId: project.data.activeRosterViewId || null,
+      scheduleRosterViewId: project.data.scheduleRules.rosterViewId || null
+    });
+  }
+
+  function sharedRosterSignature(roster) {
+    return JSON.stringify(roster ? {
+      id: roster.id,
+      name: roster.name,
+      columns: roster.columns,
+      people: roster.people,
+      savedAt: roster.savedAt || null,
+      updatedAt: roster.updatedAt || null
+    } : null);
+  }
+
   function scheduleRowLocked(project, slotId) {
     const slot = project?.data.slots.find((item) => item.id === slotId);
     return Boolean(slot?.locked || project?.data.assignments.some((assignment) => assignment.slotId === slotId && assignment.locked));
@@ -1928,6 +1961,11 @@
     const generateButton = $('#generateScheduleButton'); generateButton.textContent = hasAssignments ? '전체 일정 다시 만들기' : '조건에 맞춰 일정표 만들기'; generateButton.className = hasAssignments ? 'secondary-button' : 'primary-button';
     const schedulePeople = project.data.people.filter((person) => person.active !== false);
     $('#scheduleProjectRosterStatus').textContent = schedulePeople.length ? `${schedulePeople[0].name || '첫 번째 사람'}${schedulePeople.length > 1 ? ` 외 ${schedulePeople.length - 1}명` : ''}이 배정 후보로 연결되어 있습니다.` : '명단 가져오기를 눌러 배정할 사람을 준비해주세요.';
+    const rosterSelect = $('#scheduleRosterSelect'); const selectedRosterId = rosterSelect.value;
+    rosterSelect.replaceChildren(element('option', '', state.library.rosters.length ? '저장한 명단 선택' : '저장한 명단 없음'));
+    state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${(roster.people || []).filter((person) => person.active !== false).length}명`); option.value = roster.id; rosterSelect.append(option); });
+    if (state.library.rosters.some((roster) => roster.id === selectedRosterId)) rosterSelect.value = selectedRosterId;
+    rosterSelect.disabled = state.library.rosters.length === 0; $('#scheduleMergeRoster').disabled = state.library.rosters.length === 0;
   }
 
   function scheduleHeaderKey(value, project) {
@@ -2042,11 +2080,57 @@
   }
 
   async function mergeScheduleRoster(rosterId) {
+    await flushSchedulePersist();
     const project = activeProject(); const roster = state.library.rosters.find((item) => item.id === rosterId); if (!project || !roster) { showToast('추가할 전역 저장 명단을 선택해주세요.', 'error'); return; }
-    const columnMap = new Map(); (roster.columns || []).forEach((sourceColumn) => { let target = project.data.columns.find((column) => column.name.trim().toLowerCase() === sourceColumn.name.trim().toLowerCase()); if (!target) { target = { ...JSON.parse(JSON.stringify(sourceColumn)), id: `column-${Date.now().toString(36)}-${project.data.columns.length}` }; project.data.columns.push(target); project.data.people.forEach((person) => { person.values[target.id] = ''; }); } columnMap.set(sourceColumn.id, target.id); });
-    const existing = new Set(project.data.people.map((person) => String(person.email || person.phone || person.name || '').trim().toLowerCase()).filter(Boolean)); let added = 0;
-    (roster.people || []).forEach((source) => { const key = String(source.email || source.phone || source.name || '').trim().toLowerCase(); if (key && existing.has(key)) return; const person = JSON.parse(JSON.stringify(source)); person.id = `person-${Date.now().toString(36)}-${added}`; person.sourceOrder = project.data.people.length; person.values = Object.fromEntries(project.data.columns.map((column) => [column.id, ''])); Object.entries(source.values || {}).forEach(([sourceId, value]) => { const targetId = columnMap.get(sourceId); if (targetId) person.values[targetId] = value; }); if (!person.roleIds?.length || !person.roleIds.some((id) => project.data.roles.some((role) => role.id === id))) person.roleIds = [project.data.roles[0]?.id || 'participant']; project.data.people.push(person); if (key) existing.add(key); added += 1; }); syncPersonDerivedFields(project);
-    markRosterDependenciesStale(project, '저장 명단 추가 후 일정 재검토 필요'); await persist('전역 명단 배정 후보 추가됨'); renderAll(); navigate('schedule'); showToast(`${roster.name}에서 중복을 제외한 ${added}명을 배정 후보에 추가했습니다.`, 'success');
+    const columnMap = new Map(); (roster.columns || []).forEach((sourceColumn) => {
+      const sourceName = String(sourceColumn.name || '').trim().toLowerCase();
+      const sourceType = sourceColumn.type || sourceColumn.workspaceType || (sourceColumn.role === 'email' ? 'email' : 'text');
+      let target = project.data.columns.find((column) => String(column.name || '').trim().toLowerCase() === sourceName && (column.type || 'text') === sourceType);
+      if (!target && sourceType !== 'text') target = project.data.columns.find((column) => column.type === sourceType);
+      if (!target) {
+        target = { ...JSON.parse(JSON.stringify(sourceColumn)), id: `column-${Date.now().toString(36)}-${project.data.columns.length}`, type: sourceType };
+        project.data.columns.push(target); project.data.people.forEach((person) => { person.values ||= {}; person.values[target.id] = ''; });
+      }
+      columnMap.set(sourceColumn.id, target.id);
+    });
+    const emails = new Map(); const phones = new Map(); const names = new Map();
+    const identity = (person) => ({
+      email: String(person?.email || '').trim().toLowerCase(),
+      phone: String(person?.phone || '').replace(/\D/g, ''),
+      name: String(person?.name || '').trim().toLowerCase().replace(/\s+/g, ' ')
+    });
+    const remember = (person) => {
+      const value = identity(person);
+      if (value.email && !emails.has(value.email)) emails.set(value.email, person);
+      if (value.phone && !phones.has(value.phone)) phones.set(value.phone, person);
+      if (value.name && !names.has(value.name)) names.set(value.name, person);
+    };
+    project.data.people.filter((person) => person.active !== false).forEach(remember);
+    const scheduleView = project.data.rosterViews.find((view) => view.id === project.data.scheduleRules.rosterViewId) || null;
+    const scheduleViewIds = new Set(scheduleView?.personIds || []); let scheduleViewChanged = false; let linkedExisting = 0;
+    const includeInScheduleView = (person, existing = false) => {
+      if (!scheduleView || !person || person.active === false) return;
+      const wasIncluded = scheduleViewIds.has(person.id) && !(scheduleView.excludedPersonIds || []).includes(person.id);
+      if (!scheduleViewIds.has(person.id)) { scheduleView.personIds.push(person.id); scheduleViewIds.add(person.id); scheduleViewChanged = true; }
+      const nextExcluded = (scheduleView.excludedPersonIds || []).filter((id) => id !== person.id);
+      if (nextExcluded.length !== (scheduleView.excludedPersonIds || []).length) { scheduleView.excludedPersonIds = nextExcluded; scheduleViewChanged = true; }
+      if (existing && !wasIncluded) linkedExisting += 1;
+    };
+    let added = 0;
+    (roster.people || []).filter((source) => source.active !== false).forEach((source) => {
+      const value = identity(source);
+      const duplicate = (value.email && emails.get(value.email)) || (value.phone && phones.get(value.phone)) || (!value.email && !value.phone && value.name && names.get(value.name)) || null;
+      if (duplicate) { includeInScheduleView(duplicate, true); return; }
+      const person = JSON.parse(JSON.stringify(source)); person.id = `person-${Date.now().toString(36)}-${added}`; person.sourceOrder = project.data.people.length; person.active = true; person.values = Object.fromEntries(project.data.columns.map((column) => [column.id, '']));
+      Object.entries(source.values || {}).forEach(([sourceId, cellValue]) => { const targetId = columnMap.get(sourceId); if (targetId) person.values[targetId] = cellValue; });
+      if (!person.roleIds?.length || !person.roleIds.some((id) => project.data.roles.some((role) => role.id === id))) person.roleIds = [project.data.roles[0]?.id || 'participant'];
+      project.data.people.push(person); remember(person); includeInScheduleView(person); added += 1;
+    });
+    if (scheduleViewChanged) scheduleView.updatedAt = new Date().toISOString();
+    syncPersonDerivedFields(project);
+    markRosterDependenciesStale(project, '저장 명단 추가 후 일정 재검토 필요'); await persist('전역 명단 배정 후보 추가됨'); renderAll(); navigate('schedule');
+    const linkedMessage = linkedExisting ? ` 기존 ${linkedExisting}명도 선택한 단계 명단에 포함했습니다.` : '';
+    showToast(`${roster.name}에서 중복을 제외한 ${added}명을 배정 후보에 추가했습니다.${linkedMessage}`, 'success');
   }
 
   async function deleteSelectedScheduleRows() {
@@ -2217,7 +2301,7 @@
 
   async function openRelatedProgram(targetId) {
     if (!state.installedExtensions.includes(targetId)) { showToast('해당 프로그램을 먼저 설치해주세요.', 'error'); if (!standaloneProgram) navigate('modules'); else await globalThis.workspaceDesktop.openWorkspace(); return; }
-    if (targetId === 'people') { await openRosterManager(); return; }
+    if (targetId === 'people') { if (standaloneProgram) await openRosterManager(); else navigate('people'); return; }
     if (!standaloneProgram) { navigate(targetId); return; }
     const source = activeProject(); const target = state.quickWorkspaces[targetId];
     if (source && target && source.id !== target.id) {
@@ -2352,6 +2436,11 @@
       $('#mailBodyTemplate').value = project.data.communication.bodyTemplate;
       $('#mailBodyEditor').innerHTML = sanitizeRichHtml(project.data.communication.bodyHtmlTemplate || plainToHtml(project.data.communication.bodyTemplate));
     }
+    const rosterSelect = $('#gmailSharedRosterSelect'); const selectedRosterId = rosterSelect.value;
+    rosterSelect.replaceChildren(element('option', '', state.library.rosters.length ? '저장한 명단 선택' : '저장한 명단 없음'));
+    state.library.rosters.forEach((roster) => { const option = element('option', '', `${roster.name} · ${(roster.people || []).filter((person) => person.active !== false).length}명`); option.value = roster.id; rosterSelect.append(option); });
+    if (state.library.rosters.some((roster) => roster.id === selectedRosterId)) rosterSelect.value = selectedRosterId;
+    rosterSelect.disabled = state.library.rosters.length === 0; $('#loadGmailSharedRoster').disabled = state.library.rosters.length === 0;
     const templateSelect = $('#sharedMailTemplateSelect'); templateSelect.replaceChildren(element('option', '', '저장한 메일 양식 선택'));
     state.library.mailTemplates.forEach((template) => { const option = element('option', '', template.name); option.value = template.id; templateSelect.append(option); });
     renderTemplateVariables(project);
@@ -2663,17 +2752,30 @@
     } catch (error) { showToast(error.message, 'error'); }
   }
 
+  function reconcileRosterViewsAfterReplacement(project) {
+    const personIds = new Set(project.data.people.map((person) => person.id));
+    project.data.rosterViews = (project.data.rosterViews || []).map((view) => ({
+      ...view,
+      personIds: (view.personIds || []).filter((id) => personIds.has(id)),
+      excludedPersonIds: (view.excludedPersonIds || []).filter((id) => personIds.has(id))
+    })).filter((view) => view.personIds.length);
+    const viewIds = new Set(project.data.rosterViews.map((view) => view.id));
+    if (!viewIds.has(project.data.activeRosterViewId)) project.data.activeRosterViewId = null;
+    if (!viewIds.has(project.data.scheduleRules.rosterViewId)) project.data.scheduleRules.rosterViewId = null;
+  }
+
   async function applyRosterMatrix(matrix) {
     let project = activeProject();
-    if (!project) return;
-    const projectId = project.id; const confirmationSignature = scheduleChangeSignature(project);
-    if (hasLockedSchedule(project)) { showToast('잠긴 일정 또는 배정이 있어 명단 전체 교체를 중단했습니다. 잠금을 해제한 뒤 다시 시도해주세요.', 'error'); return; }
-    if (project.data.people.length && !await showConfirm('현재 명단을 새 데이터로 교체할까요? 기존 일정 배정에서 연결이 끊길 수 있습니다.', { title: '명단 교체', action: '교체' })) return;
+    if (!project) return false;
+    const projectId = project.id; const confirmationSignature = rosterReplacementSignature(project);
+    if (hasLockedSchedule(project)) { showToast('잠긴 일정 또는 배정이 있어 명단 전체 교체를 중단했습니다. 잠금을 해제한 뒤 다시 시도해주세요.', 'error'); return false; }
+    if (project.data.people.length && !await showConfirm('현재 프로젝트의 원본 명단을 새 데이터로 전체 교체할까요? 기존 일정 배정은 해제되고 새 명단에 없는 사람의 단계·반별 명단은 정리됩니다.', { title: '명단 전체 교체', action: '전체 교체' })) return false;
     project = projectById(projectId);
-    if (!project || scheduleChangeSignature(project) !== confirmationSignature || hasLockedSchedule(project)) { showToast('확인하는 동안 다른 창의 명단 또는 일정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
+    if (!project || rosterReplacementSignature(project) !== confirmationSignature || hasLockedSchedule(project)) { showToast('확인하는 동안 다른 창의 명단 또는 일정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return false; }
     const beforeSnapshot = scheduleSnapshot(project);
     const result = Ops.matrixToRoster(matrix);
-    project.data.columns = result.columns; project.data.people = result.people; project.data.availability = {}; project.data.assignments = [];
+    clearScheduleHistory();
+    project.data.columns = result.columns; project.data.people = result.people; reconcileRosterViewsAfterReplacement(project); project.data.availability = {}; project.data.assignments = [];
     project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => artifact.kind === 'gmailDraft' ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString() } : artifact);
     refreshScheduleConflicts(project);
     const impact = applyScheduleMutationImpact(project, beforeSnapshot);
@@ -2685,6 +2787,34 @@
     $('#rosterImportWarnings').hidden = result.warnings.length === 0;
     $('#rosterImportWarnings').textContent = result.warnings.join('\n');
     showToast(`${result.people.length}명을 명단으로 가져왔습니다.`, 'success');
+    return true;
+  }
+
+  async function applySavedRoster(roster, returnPage = 'people') {
+    await flushSchedulePersist(); let project = activeProject();
+    if (!project || !roster) return false;
+    const projectId = project.id; const rosterId = roster.id; const confirmationSignature = rosterReplacementSignature(project); const confirmationRosterSignature = sharedRosterSignature(roster);
+    if (hasLockedSchedule(project)) { showToast('잠긴 일정 또는 배정이 있어 명단 전체 교체를 중단했습니다. 잠금을 해제한 뒤 다시 시도해주세요.', 'error'); return false; }
+    const incomingCount = (roster.people || []).filter((person) => person.active !== false).length;
+    if (project.data.people.length && !await showConfirm(`저장한 “${roster.name}” ${incomingCount}명으로 현재 프로젝트의 원본 명단을 전체 교체할까요? 기존 일정 배정은 해제되고 새 명단에 없는 사람의 단계·반별 명단은 정리됩니다.`, { title: '저장 명단으로 전체 교체', action: '전체 교체' })) return false;
+    project = projectById(projectId); const currentRoster = state.library.rosters.find((item) => item.id === rosterId);
+    if (!project || rosterReplacementSignature(project) !== confirmationSignature || hasLockedSchedule(project) || !currentRoster || sharedRosterSignature(currentRoster) !== confirmationRosterSignature) { showToast('확인하는 동안 다른 창의 명단·일정 또는 저장 명단이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return false; }
+    roster = currentRoster;
+    const beforeSnapshot = scheduleSnapshot(project);
+    clearScheduleHistory();
+    project.data.rosterName = roster.name;
+    project.data.columns = JSON.parse(JSON.stringify(roster.columns || []));
+    project.data.people = JSON.parse(JSON.stringify(roster.people || []));
+    project.data.people.forEach((person, index) => {
+      person.sourceOrder = index;
+      if (!person.roleIds?.some((roleId) => project.data.roles.some((role) => role.id === roleId))) person.roleIds = [project.data.roles[0]?.id || 'participant'];
+    });
+    syncPersonDerivedFields(project); reconcileRosterViewsAfterReplacement(project); project.data.availability = {}; project.data.assignments = [];
+    project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => artifact.kind === 'gmailDraft' ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString() } : artifact);
+    refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot);
+    syncScheduleProjectState(project, `명단 전체 교체 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact); recordScheduleMergeImpact(project.id, impact, { scheduleOnly: false });
+    const warnings = rosterWarnings(project); state = Core.setModuleStatus(state, project.id, 'people', warnings.length ? 'needsReview' : 'inProgress', `${incomingCount}명 가져옴`);
+    await persist('저장 명단으로 전체 교체됨'); renderAll(); navigate(returnPage); showToast(`“${roster.name}” ${incomingCount}명으로 원본 명단을 교체했습니다.`, 'success'); return true;
   }
 
   async function saveRoster() {
@@ -2815,6 +2945,7 @@
       const project = activeProject(); if (!project) return;
       const rowIndex = Number(event.target.dataset.personRow);
       const person = project.data.people[rowIndex] || (event.target.value.length ? ensureRosterPerson(project, rowIndex + 1) : null);
+      if (person?.active === false) { event.target.value = person.values[event.target.dataset.columnId] || ''; return; }
       if (person) person.values[event.target.dataset.columnId] = event.target.value;
       syncPersonDerivedFields(project);
     });
@@ -2862,20 +2993,21 @@
       const html = `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`;
       event.clipboardData.setData('text/plain', text); event.clipboardData.setData('text/html', html); event.preventDefault(); showToast(`${matrix.length}행 × ${matrix[0].length}열을 복사했습니다.`);
     });
-    document.addEventListener('copy', (event) => {
-      if (currentPage !== 'arrange' || !arrangementSelection) return; const item = activeWorkItem(); if (!item) return;
-      const matrix = selectedArrangementMatrix(item); if (!matrix.length) return; const text = matrix.map((row) => row.join('\t')).join('\r\n'); const html = `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`;
-      event.clipboardData.setData('text/plain', text); event.clipboardData.setData('text/html', html); event.preventDefault(); showToast(`${matrix.length}행 × ${matrix[0].length}열을 복사했습니다.`);
-    });
     rosterTable.addEventListener('paste', async (event) => {
       if (!rosterSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text.trim()) return;
       const project = activeProject(); if (!project) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return;
       if (!project.data.columns.length) { event.preventDefault(); await applyRosterMatrix(matrix); rosterSelection = { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } }; return; }
       if (!/[\t\r\n]/.test(text)) return; event.preventDefault();
       const start = rosterSelection.focus;
-      matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => { if (start.col + colOffset < project.data.columns.length) setSheetCellValue(project, start.row + rowOffset, start.col + colOffset, value); }));
+      let changed = 0; let locked = 0;
+      matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => {
+        if (start.col + colOffset >= project.data.columns.length) return;
+        if (setSheetCellValue(project, start.row + rowOffset, start.col + colOffset, value)) changed += 1; else locked += 1;
+      }));
       updateRosterSelection(start, { row: start.row + matrix.length - 1, col: Math.min(project.data.columns.length - 1, start.col + Math.max(...matrix.map((row) => row.length)) - 1) });
+      if (!changed) { showToast('제외된 행은 공용 명단 관리자에서 다시 포함한 뒤 수정해주세요.'); return; }
       markRosterDependenciesStale(project); await persist('셀 붙여넣기 저장됨'); renderPeoplePage();
+      if (locked) showToast(`붙여넣기는 완료했지만 제외 행의 ${locked}개 셀은 잠금 상태로 유지했습니다.`);
     });
     $('#rosterCellValue').addEventListener('input', (event) => {
       const project = activeProject(); if (!project || !rosterSelection) return; const point = rosterSelection.focus;
@@ -2891,6 +3023,12 @@
       if (event.target.closest('[data-empty-sheet-add-column], [data-roster-add-column]')) addRosterColumn(project);
     });
     }
+
+    document.addEventListener('copy', (event) => {
+      if (currentPage !== 'arrange' || !arrangementSelection) return; const item = activeWorkItem(); if (!item) return;
+      const matrix = selectedArrangementMatrix(item); if (!matrix.length) return; const text = matrix.map((row) => row.join('\t')).join('\r\n'); const html = `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>`).join('')}</tr>`).join('')}</table>`;
+      event.clipboardData.setData('text/plain', text); event.clipboardData.setData('text/html', html); event.preventDefault(); showToast(`${matrix.length}행 × ${matrix[0].length}열을 복사했습니다.`);
+    });
 
     const arrangementBoard = $('#arrangementBoard');
     arrangementBoard.addEventListener('mousedown', (event) => {
@@ -3013,6 +3151,7 @@
       }
       ['scheduleEditing', 'scheduleImpactBefore', 'scheduleEditRow', 'scheduleEditCol', 'scheduleEditValue'].forEach((key) => delete event.target.dataset[key]);
     });
+    $('#scheduleMergeRoster').addEventListener('click', () => void mergeScheduleRoster($('#scheduleRosterSelect').value));
     $('#openScheduleRosterManager').addEventListener('click', () => void openRosterManager());
     $('#sessionRosterView').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.scheduleRules.rosterViewId = event.target.value || null; selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null; refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 대상 명단 변경 · 문제 ${project.data.conflicts.length}건`); await persist('일정 단계 명단 변경됨'); renderSchedulePage(); });
     ['sessionRoleSelect', 'sessionGroupFilter', 'sessionDateFilter'].forEach((id) => $(`#${id}`).addEventListener('change', () => { pendingSessionChange = null; const project = activeProject(); if (project) renderSessionPlanner(project); }));
@@ -3202,15 +3341,19 @@
     $('#projectSettingsButton').addEventListener('click', openProjectSettings);
     $('#addConnectionButton').addEventListener('click', () => openDialog('connectionDialog'));
     $('#saveSharedRoster')?.addEventListener('click', async () => {
-      const project = activeProject(); if (!project?.data.people.length) { showToast('저장할 명단이 없습니다.', 'error'); return; }
+      const project = activeProject();
+      if (!(project?.data.people || []).some((person) => person.active !== false)) { showToast('저장할 활성 명단이 없습니다.', 'error'); return; }
+      const projectId = project.id;
       const name = await requestName('저장할 명단 이름', `${project.name} 명단`); if (!name) return;
-      state.library.rosters.push({ id: `roster-${Date.now().toString(36)}`, name, columns: JSON.parse(JSON.stringify(project.data.columns)), people: JSON.parse(JSON.stringify(project.data.people)), savedAt: new Date().toISOString() });
+      const currentProject = projectById(projectId);
+      const people = (currentProject?.data.people || []).filter((person) => person.active !== false).map((person, index) => ({ ...JSON.parse(JSON.stringify(person)), sourceOrder: index, active: true }));
+      if (!currentProject || !people.length) { showToast('이름을 입력하는 동안 명단이 바뀌어 저장할 활성 인원이 없습니다.', 'error'); return; }
+      state.library.rosters.push({ id: `roster-${Date.now().toString(36)}`, name, columns: JSON.parse(JSON.stringify(currentProject.data.columns)), people, savedAt: new Date().toISOString() });
       await persist(); renderPeoplePage(); showToast('나중에 다시 사용할 수 있도록 명단을 저장했습니다.', 'success');
     });
     $('#loadSharedRoster')?.addEventListener('click', async () => {
-      const project = activeProject(); const roster = state.library.rosters.find((item) => item.id === $('#sharedRosterSelect').value); if (!project || !roster) { showToast('불러올 명단을 먼저 선택해주세요.', 'error'); return; }
-      project.data.columns = JSON.parse(JSON.stringify(roster.columns)); project.data.people = JSON.parse(JSON.stringify(roster.people));
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast('저장한 명단을 현재 작업으로 불러왔습니다.', 'success');
+      const roster = state.library.rosters.find((item) => item.id === $('#sharedRosterSelect').value); if (!roster) { showToast('불러올 명단을 먼저 선택해주세요.', 'error'); return; }
+      await applySavedRoster(roster, 'people');
     });
     $('#saveSharedMailTemplate').addEventListener('click', async () => {
       const name = await requestName('저장할 메일 양식 이름', '안내 메일 양식'); if (!name) return;
@@ -3222,14 +3365,13 @@
       $('#mailSubjectTemplate').value = template.subject; $('#mailBodyEditor').innerHTML = sanitizeRichHtml(template.bodyHtml); showToast('저장한 메일 양식을 불러왔습니다.', 'success');
     });
     $('#loadGmailSharedRoster')?.addEventListener('click', async () => {
-      const project = activeProject(); const roster = state.library.rosters.find((item) => item.id === $('#gmailSharedRosterSelect').value); if (!project || !roster) { showToast('메일을 보낼 사람의 명단을 선택해주세요.', 'error'); return; }
-      project.data.columns = JSON.parse(JSON.stringify(roster.columns)); project.data.people = JSON.parse(JSON.stringify(roster.people));
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast(`${roster.people.length}명을 메일 작업에 불러왔습니다.`, 'success');
+      const roster = state.library.rosters.find((item) => item.id === $('#gmailSharedRosterSelect').value); if (!roster) { showToast('메일을 보낼 사람의 명단을 선택해주세요.', 'error'); return; }
+      await applySavedRoster(roster, 'gmailFlow');
     });
     $('#applyGmailRosterPaste')?.addEventListener('click', async () => {
       const text = $('#gmailRosterPaste').value.trim(); if (!text) { showToast('붙여넣은 명단 데이터가 없습니다.', 'error'); return; }
       const matrix = Ops.parseDelimited(text); if (!matrix.length) { showToast('명단 구조를 인식하지 못했습니다.', 'error'); return; }
-      await applyRosterMatrix(matrix); $('#gmailRosterPaste').value = ''; navigate('gmailFlow');
+      if (await applyRosterMatrix(matrix)) { $('#gmailRosterPaste').value = ''; navigate('gmailFlow'); }
     });
     $('#installExtensionFile').addEventListener('click', async () => {
       try {
@@ -3745,6 +3887,7 @@
       if (event.target.matches('[data-person-row]')) {
         const rowIndex = Number(event.target.dataset.personRow);
         const person = project.data.people[rowIndex] || (event.target.value.length ? ensureRosterPerson(project, rowIndex + 1) : null);
+        if (person?.active === false) { renderPeoplePage(); showToast('제외된 행은 공용 명단 관리자에서 다시 포함한 뒤 수정해주세요.'); return; }
         if (person) person.values[event.target.dataset.columnId] = event.target.value;
         syncPersonDerivedFields(project);
         if (rosterSelection) updateRosterSelection(rosterSelection.anchor, rosterSelection.focus);
