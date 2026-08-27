@@ -60,6 +60,9 @@
   let scheduleEditGeneration = 0;
   let persistSaving = 0;
   let persistSequence = 0;
+  let persistReconcileTimer = null;
+  let persistReconcileNeeded = false;
+  let persistReconcileBlocked = false;
   let persistIdleResolvers = [];
   let persistDirty = false;
   let externalOperationCount = 0;
@@ -160,7 +163,10 @@
     }, 2600);
   }
 
-  async function persist(message = '저장됨', { scheduleProjectId = null, externalCommit = null } = {}) {
+  async function persist(message = '저장됨', { scheduleProjectId = null, externalCommit = null, reconciliation = false } = {}) {
+    clearTimeout(persistReconcileTimer); persistReconcileTimer = null;
+    persistReconcileNeeded = false;
+    if (externalCommit) persistReconcileBlocked = true;
     persistDirty = true;
     const scheduleOnlyProjectIds = new Set([...pendingScheduleMergeHints.entries()].filter(([, impact]) => impact.scheduleOnly !== false).map(([projectId]) => projectId)); if (scheduleProjectId) scheduleOnlyProjectIds.add(scheduleProjectId);
     const autoCommitted = commitSchedulePersistState();
@@ -185,7 +191,10 @@
         state = localAdvanced ? Core.normalizeState(Core.threeWayMerge(requestState, normalized, state)) : normalized;
       }
       if (result?.merged) showToast('다른 창의 변경사항과 안전하게 병합했습니다.');
-      if (requestSequence === persistSequence && !schedulePersistBaseline && !requestHadLocalAdvance) persistDirty = false;
+      if (requestSequence === persistSequence && !schedulePersistBaseline && !requestHadLocalAdvance) {
+        persistDirty = false;
+        persistReconcileNeeded = false;
+      } else if (!externalCommit && !reconciliation) persistReconcileNeeded = true;
       if (state.preferences.storageMode === 'drive') {
         scheduleDriveStateSync();
       }
@@ -193,6 +202,7 @@
       saveTimer = setTimeout(() => { $('#saveStatus').textContent = '저장됨'; }, 1600);
       return result;
     } catch (error) {
+      persistReconcileBlocked = true;
       scheduleProjects.forEach(({ projectId, scheduleOnly, ...impact }) => recordScheduleMergeImpact(projectId, impact, { scheduleOnly }));
       $('#saveStatus').textContent = '저장 실패';
       showToast(error.message || '저장하지 못했습니다.', 'error');
@@ -202,6 +212,10 @@
       if (!persistSaving) {
         const resolvers = persistIdleResolvers; persistIdleResolvers = [];
         resolvers.forEach((resolve) => resolve());
+        const reconciliationBlocked = persistReconcileBlocked;
+        persistReconcileBlocked = false;
+        if (reconciliationBlocked) persistReconcileNeeded = false;
+        else if (persistReconcileNeeded) schedulePersistReconciliation();
         if (!schedulePersistBaseline) applyDeferredWorkspaceState();
       }
     }
@@ -210,6 +224,16 @@
   function waitForPersistIdle() {
     if (!persistSaving) return Promise.resolve();
     return new Promise((resolve) => persistIdleResolvers.push(resolve));
+  }
+
+  function schedulePersistReconciliation() {
+    if (persistReconcileTimer || persistSaving || !persistDirty || !persistReconcileNeeded || schedulePersistBaseline || rosterFormulaDraft || arrangementDrafts.size || externalOperationCount) return;
+    persistReconcileTimer = setTimeout(() => {
+      persistReconcileTimer = null;
+      if (persistSaving || !persistDirty || !persistReconcileNeeded || schedulePersistBaseline || rosterFormulaDraft || arrangementDrafts.size || externalOperationCount) return;
+      persistReconcileNeeded = false;
+      void persist('겹친 변경사항 저장됨', { reconciliation: true }).catch(() => {});
+    }, 0);
   }
 
   function beginExternalOperation() { externalOperationCount += 1; }
@@ -1448,7 +1472,12 @@
 
   function hasFocusedWorkspaceDraft() {
     const target = document.activeElement;
-    return Boolean(target?.matches?.('[data-person-row], [data-column-name], #rosterCellValue, [data-arrangement-input], #arrangementCellValue, [data-schedule-input], #scheduleCellValue, #mailSubjectTemplate, #mailBodyEditor, #mailEditSubject, #mailEditBody'));
+    if (!target?.matches?.('[data-person-row], [data-column-name], #rosterCellValue, [data-arrangement-input], #arrangementCellValue, [data-schedule-input], #scheduleCellValue, #mailSubjectTemplate, #mailBodyEditor, #mailEditSubject, #mailEditBody')) return false;
+    const dialog = target.closest('dialog');
+    if (dialog && !dialog.open) return false;
+    const page = target.closest('.page');
+    if (page && !page.classList.contains('active')) return false;
+    return target.isConnected && !target.closest('[hidden]');
   }
 
   function applyIncomingWorkspaceState(nextState) {
@@ -1464,6 +1493,7 @@
   }
 
   function applyDeferredWorkspaceState() {
+    if (deferredWorkspaceState && persistReconcileNeeded) schedulePersistReconciliation();
     if (!deferredWorkspaceState || persistSaving || persistDirty || externalOperationCount || schedulePersistBaseline || mailEditorDirty || hasFocusedWorkspaceDraft()) return;
     const nextState = deferredWorkspaceState;
     deferredWorkspaceState = null;
@@ -1471,6 +1501,27 @@
     const currentRevision = Number(state._revision || 0);
     const newer = nextRevision > currentRevision || (nextRevision === currentRevision && String(nextState.updatedAt || '') > String(state.updatedAt || ''));
     if (newer) applyIncomingWorkspaceState(nextState);
+  }
+
+  if (smokeDiagnostics) {
+    globalThis.__workspaceStateDeferral = () => ({
+      stateRevision: Number(state._revision || 0),
+      deferredRevision: Number(deferredWorkspaceState?._revision || 0),
+      persistSaving,
+      persistDirty,
+      persistReconcileNeeded,
+      persistReconcileBlocked,
+      externalOperationCount,
+      schedulePersistPending: Boolean(schedulePersistBaseline),
+      mailEditorDirty,
+      focusedDraft: hasFocusedWorkspaceDraft(),
+      activeElement: document.activeElement ? {
+        id: document.activeElement.id || '',
+        tag: document.activeElement.tagName || '',
+        dialogOpen: document.activeElement.closest('dialog')?.open ?? null,
+        page: document.activeElement.closest('.page')?.dataset.page || ''
+      } : null
+    });
   }
 
   function scheduleMutationImpact(before = {}, after = {}) {
@@ -4456,6 +4507,7 @@
           if (schedulePersistBaseline || persistSaving || persistDirty || externalOperationCount || mailEditorDirty || hasFocusedWorkspaceDraft()) {
             deferredWorkspaceState = normalized;
             if (schedulePersistBaseline && !persistSaving) void flushSchedulePersist();
+            else if (persistReconcileNeeded && !persistSaving) schedulePersistReconciliation();
             return;
           }
           applyIncomingWorkspaceState(normalized);

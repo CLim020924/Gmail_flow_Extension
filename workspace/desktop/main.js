@@ -1291,8 +1291,9 @@ app.whenReady().then(async () => {
             integrationState.library.mailTemplates = integrationState.library.mailTemplates.filter((template) => template.id !== 'smoke-mail-template');
             integrationState.library.mailTemplates.push({ id: 'smoke-mail-template', name: 'Smoke 저장 양식', subject: '저장 양식 제목', bodyHtml: '<p>저장 양식 본문</p>', savedAt: now });
             integrationState.updatedAt = now;
-            await globalThis.workspaceDesktop.saveState(integrationState);
-            await waitFor(() => document.querySelector('#activeProjectName')?.textContent === integrationProject.name, 'integration state applied');
+            const integrationSave = await globalThis.workspaceDesktop.saveState(integrationState);
+            await waitFor(() => document.querySelector('#activeProjectName')?.textContent === integrationProject.name
+              && Number(globalThis.__workspaceStateDeferral?.().stateRevision || 0) >= Number(integrationSave.state?._revision || 0), 'integration state applied');
 
             document.querySelector('#projectSettingsButton').click();
             await waitFor(() => document.querySelector('#projectSettingsDialog').open, 'project settings for route change');
@@ -1653,6 +1654,7 @@ app.whenReady().then(async () => {
             sessionAssignments: [...document.querySelectorAll('[data-session-assignment]')].map((item) => ({ id: item.dataset.sessionAssignment, person: item.dataset.sessionPerson, text: item.textContent })),
             scheduleSummary: document.querySelector('#scheduleBoardSummary')?.textContent || '',
             saveStatus: document.querySelector('#saveStatus')?.textContent || '',
+            stateDeferral: globalThis.__workspaceStateDeferral?.() || null,
             navigationTrace: globalThis.__workspaceNavigationTrace || []
           })`);
           const failedState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null)); const failedProject = failedState.projects.find((project) => project.id === failedState.activeProjectId);
