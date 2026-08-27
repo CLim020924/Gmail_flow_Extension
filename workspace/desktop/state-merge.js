@@ -1,3 +1,5 @@
+const { threeWayMerge } = require('../workspace-core');
+
 function newest(left, right) {
   if (!left) return right;
   if (!right) return left;
@@ -44,9 +46,8 @@ function overlayScheduleProjects(baseState, incomingState, scheduleProjects = []
     if (!baseProject || !incomingProject || !hints.has(incomingProject.id)) return baseProject;
     const impact = hints.get(incomingProject.id);
     const currentProject = impact.scheduleOnly && currentState ? (currentState.projects || []).find((item) => item.id === incomingProject.id) || Object.values(currentState.quickWorkspaces || {}).find((item) => item.id === incomingProject.id) : null;
-    const projectBase = currentProject || baseProject;
+    const projectBase = baseProject;
     const data = { ...projectBase.data };
-    scheduleKeys.forEach((key) => { data[key] = incomingProject.data?.[key]; });
     const changedSlotIds = new Set(impact.changedSlotIds || []);
     if (currentProject && impact.scheduleOnly && changedSlotIds.size) {
       const incomingSlots = new Map((incomingProject.data?.slots || []).map((slot) => [slot.id, slot]));
@@ -61,6 +62,8 @@ function overlayScheduleProjects(baseState, incomingState, scheduleProjects = []
       }));
       data.scheduleCustomValues = { ...(currentProject.data?.scheduleCustomValues || {}) };
       changedSlotIds.forEach((slotId) => { if (incomingProject.data?.scheduleCustomValues?.[slotId]) data.scheduleCustomValues[slotId] = incomingProject.data.scheduleCustomValues[slotId]; else delete data.scheduleCustomValues[slotId]; });
+    } else if (!currentProject || !impact.scheduleOnly) {
+      scheduleKeys.forEach((key) => { data[key] = incomingProject.data?.[key]; });
     }
     data.externalArtifacts = mergeScheduleArtifacts(projectBase.data?.externalArtifacts, incomingProject.data?.externalArtifacts, impact);
     const moduleState = { ...projectBase.moduleState, schedule: incomingProject.moduleState?.schedule || projectBase.moduleState?.schedule };
@@ -86,7 +89,27 @@ function overlayScheduleProjects(baseState, incomingState, scheduleProjects = []
   return { ...baseState, projects, quickWorkspaces };
 }
 
-function mergeWorkspaceState(current = {}, incoming = {}) {
+function applyDeletionTombstones(state = {}, current = {}, incoming = {}) {
+  const deletedConnectionIds = [...new Set([...(current.deletedConnectionIds || []), ...(incoming.deletedConnectionIds || [])])];
+  const deletedLibraryIds = [...new Set([...(current.deletedLibraryIds || []), ...(incoming.deletedLibraryIds || [])])];
+  const library = { ...(state.library || {}) };
+  ['rosters', 'mailTemplates', 'layoutTemplates', 'workflowTemplates'].forEach((key) => {
+    library[key] = (library[key] || []).filter((item) => !deletedLibraryIds.includes(item.id));
+  });
+  return {
+    ...state,
+    connections: (state.connections || []).filter((item) => !deletedConnectionIds.includes(item.id)),
+    library,
+    deletedConnectionIds,
+    deletedLibraryIds
+  };
+}
+
+function mergeWorkspaceState(current = {}, incoming = {}, baseState = null) {
+  // baseState is the full state last acknowledged to the saving renderer.
+  if (baseState && typeof baseState === 'object') {
+    return applyDeletionTombstones(threeWayMerge(baseState, current, incoming), current, incoming);
+  }
   const deletedConnectionIds = [...new Set([...(current.deletedConnectionIds || []), ...(incoming.deletedConnectionIds || [])])];
   const deletedLibraryIds = [...new Set([...(current.deletedLibraryIds || []), ...(incoming.deletedLibraryIds || [])])];
   const scalarSource = newest(current, incoming) || incoming;
@@ -98,7 +121,7 @@ function mergeWorkspaceState(current = {}, incoming = {}) {
   Object.entries(incoming.quickTasks || {}).forEach(([key, list]) => { quickTasks[key] = mergeById(quickTasks[key], list); });
   const library = {};
   ['rosters', 'mailTemplates', 'layoutTemplates', 'workflowTemplates'].forEach((key) => { library[key] = mergeById(current.library?.[key], incoming.library?.[key]).filter((item) => !deletedLibraryIds.includes(item.id)); });
-  return {
+  return applyDeletionTombstones({
     ...current,
     ...incoming,
     ...scalarSource,
@@ -109,7 +132,7 @@ function mergeWorkspaceState(current = {}, incoming = {}) {
     library,
     deletedConnectionIds,
     deletedLibraryIds
-  };
+  }, current, incoming);
 }
 
 module.exports = { mergeWorkspaceState, mergeScheduleArtifacts, overlayScheduleProjects };

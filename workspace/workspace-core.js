@@ -14,7 +14,8 @@
       description: 'Excel·한글 표·CSV 또는 일반 텍스트를 이름·이메일·전화번호가 구분된 명단으로 정리합니다.',
       category: 'core',
       core: true,
-      accent: 'blue'
+      accent: 'blue',
+      page: 'people'
     },
     {
       id: 'forms',
@@ -23,7 +24,8 @@
       description: '신청자 정보를 받거나 참여 가능한 시간을 조사하고 최신 응답을 가져옵니다.',
       category: 'source',
       core: false,
-      accent: 'violet'
+      accent: 'violet',
+      page: 'forms'
     },
     {
       id: 'schedule',
@@ -32,7 +34,8 @@
       description: '역할별 인원과 사람별 가능 시간을 기준으로 일정표를 만들고 직접 수정합니다.',
       category: 'core',
       core: true,
-      accent: 'green'
+      accent: 'green',
+      page: 'schedule'
     },
     {
       id: 'layout',
@@ -41,7 +44,8 @@
       description: '편성된 일정을 확인하고 Excel 또는 CSV 파일로 저장합니다.',
       category: 'core',
       core: true,
-      accent: 'amber'
+      accent: 'amber',
+      page: 'layout'
     },
     {
       id: 'zoom',
@@ -50,7 +54,8 @@
       description: '확정된 일정마다 Zoom 회의를 만들고 참가 링크를 일정에 연결합니다.',
       category: 'integration',
       core: false,
-      accent: 'cyan'
+      accent: 'cyan',
+      page: 'zoom'
     },
     {
       id: 'gmailFlow',
@@ -59,7 +64,8 @@
       description: '명단·일정·Zoom 링크로 받는 사람별 메일을 만들고 Gmail 임시보관함에 저장합니다.',
       category: 'integration',
       core: false,
-      accent: 'red'
+      accent: 'red',
+      page: 'gmailFlow'
     }
   ];
 
@@ -163,6 +169,140 @@
 
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
+  }
+
+  function isPlainObject(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  function cloneMergeValue(value) {
+    if (Array.isArray(value)) return value.map(cloneMergeValue);
+    if (isPlainObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneMergeValue(item)]));
+    return value;
+  }
+
+  function mergeValuesEqual(left, right) {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => mergeValuesEqual(item, right[index]));
+    }
+    if (!isPlainObject(left) || !isPlainObject(right)) return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key, index) => key === rightKeys[index] && mergeValuesEqual(left[key], right[key]));
+  }
+
+  function stableArrayItemKey(item) {
+    if (!isPlainObject(item)) return null;
+    if (item.id !== undefined && item.id !== null && String(item.id) !== '') return `id:${typeof item.id}:${String(item.id)}`;
+    if (item.kind !== undefined && item.externalId !== undefined && item.externalId !== null && String(item.externalId) !== '') {
+      return `artifact:${String(item.kind || 'artifact')}:${typeof item.externalId}:${String(item.externalId)}`;
+    }
+    return null;
+  }
+
+  function primitiveArrayToken(value) {
+    return `${typeof value}:${JSON.stringify(value)}`;
+  }
+
+  function mergePrimitiveArrays(base, current, incoming) {
+    const baseTokens = new Set(base.map(primitiveArrayToken));
+    const currentTokens = new Set(current.map(primitiveArrayToken));
+    const incomingTokens = new Set(incoming.map(primitiveArrayToken));
+    const values = new Map([...base, ...current, ...incoming].map((item) => [primitiveArrayToken(item), item]));
+    const orderedTokens = [...new Set([...current, ...incoming, ...base].map(primitiveArrayToken))];
+    return orderedTokens
+      .filter((token) => baseTokens.has(token)
+        ? currentTokens.has(token) && incomingTokens.has(token)
+        : currentTokens.has(token) || incomingTokens.has(token))
+      .map((token) => cloneMergeValue(values.get(token)));
+  }
+
+  function keyedArrayMap(items) {
+    const result = new Map();
+    for (const item of items) {
+      const key = stableArrayItemKey(item);
+      if (!key || result.has(key)) return null;
+      result.set(key, item);
+    }
+    return result;
+  }
+
+  function mergePresence(baseHas, baseValue, currentHas, currentValue, incomingHas, incomingValue) {
+    const currentUnchanged = currentHas === baseHas && (!currentHas || mergeValuesEqual(currentValue, baseValue));
+    const incomingUnchanged = incomingHas === baseHas && (!incomingHas || mergeValuesEqual(incomingValue, baseValue));
+    const branchesEqual = currentHas === incomingHas && (!currentHas || mergeValuesEqual(currentValue, incomingValue));
+
+    if (branchesEqual) return currentHas ? { present: true, value: cloneMergeValue(currentValue) } : { present: false };
+    if (incomingUnchanged) return currentHas ? { present: true, value: cloneMergeValue(currentValue) } : { present: false };
+    if (currentUnchanged) return incomingHas ? { present: true, value: cloneMergeValue(incomingValue) } : { present: false };
+    if (!incomingHas) return { present: false };
+    if (!currentHas) return { present: true, value: cloneMergeValue(incomingValue) };
+
+    if (isPlainObject(currentValue) && isPlainObject(incomingValue)) {
+      const objectBase = isPlainObject(baseValue) ? baseValue : {};
+      return { present: true, value: mergeObjectValues(objectBase, currentValue, incomingValue) };
+    }
+    if (Array.isArray(currentValue) && Array.isArray(incomingValue)) {
+      const arrayBase = Array.isArray(baseValue) ? baseValue : [];
+      return { present: true, value: mergeArrayValues(arrayBase, currentValue, incomingValue) };
+    }
+    return { present: true, value: cloneMergeValue(incomingValue) };
+  }
+
+  function mergeObjectValues(base, current, incoming) {
+    const result = {};
+    const keys = new Set([...Object.keys(base), ...Object.keys(current), ...Object.keys(incoming)]);
+    keys.forEach((key) => {
+      const merged = mergePresence(
+        Object.prototype.hasOwnProperty.call(base, key), base[key],
+        Object.prototype.hasOwnProperty.call(current, key), current[key],
+        Object.prototype.hasOwnProperty.call(incoming, key), incoming[key]
+      );
+      if (merged.present) result[key] = merged.value;
+    });
+    return result;
+  }
+
+  function mergeKeyedArrays(base, current, incoming, baseMap, currentMap, incomingMap) {
+    const orderedKeys = [...new Set([
+      ...current.map(stableArrayItemKey),
+      ...incoming.map(stableArrayItemKey),
+      ...base.map(stableArrayItemKey)
+    ])];
+    const result = [];
+    orderedKeys.forEach((key) => {
+      const merged = mergePresence(
+        baseMap.has(key), baseMap.get(key),
+        currentMap.has(key), currentMap.get(key),
+        incomingMap.has(key), incomingMap.get(key)
+      );
+      if (merged.present) result.push(merged.value);
+    });
+    return result;
+  }
+
+  function mergeArrayValues(base, current, incoming) {
+    const allItems = [...base, ...current, ...incoming];
+    if (allItems.every((item) => item === null || (typeof item !== 'object' && typeof item !== 'function'))) {
+      return mergePrimitiveArrays(base, current, incoming);
+    }
+    const baseMap = keyedArrayMap(base);
+    const currentMap = keyedArrayMap(current);
+    const incomingMap = keyedArrayMap(incoming);
+    if (baseMap && currentMap && incomingMap && allItems.every((item) => stableArrayItemKey(item))) {
+      return mergeKeyedArrays(base, current, incoming, baseMap, currentMap, incomingMap);
+    }
+    return cloneMergeValue(incoming);
+  }
+
+  function threeWayMerge(base, current, incoming) {
+    // Preserve changes made on either branch since the acknowledged base;
+    // when both branches change the same scalar, the incoming save wins.
+    return mergePresence(true, base, true, current, true, incoming).value;
   }
 
   function makeId(prefix = 'item') {
@@ -787,6 +927,7 @@
     TASK_TYPE_CATALOG,
     BUILTIN_WORKFLOW_TEMPLATES,
     configureExtensionCatalog,
+    threeWayMerge,
     createEmptyState,
     normalizeState,
     createProject,

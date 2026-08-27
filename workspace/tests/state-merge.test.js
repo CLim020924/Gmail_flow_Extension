@@ -1,5 +1,11 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { mergeWorkspaceState, mergeScheduleArtifacts, overlayScheduleProjects } = require('../desktop/state-merge');
+const { JsonStorage } = require('../desktop/storage');
+
+async function run() {
 
 const current = { updatedAt: '2026-01-01T00:00:06Z', installedExtensions: ['people'], deletedLibraryIds: ['gone'], projects: [{ id: 'a', updatedAt: '2026-01-01T00:00:01Z', name: 'A1' }], quickWorkspaces: { gmailFlow: { id: 'q', updatedAt: '2026-01-01T00:00:03Z', name: 'mail' } }, library: { rosters: [{ id: 'r', savedAt: '2026-01-01T00:00:01Z', name: 'old' }], mailTemplates: [{ id: 'gone', savedAt: '2026-01-01T00:00:01Z' }], layoutTemplates: [], workflowTemplates: [{ id: 'w', updatedAt: '2026-01-01T00:00:01Z', name: 'old workflow' }] } };
 const incoming = { projects: [{ id: 'b', updatedAt: '2026-01-01T00:00:02Z', name: 'B' }], quickWorkspaces: { schedule: { id: 's', updatedAt: '2026-01-01T00:00:04Z', name: 'schedule' } }, library: { rosters: [{ id: 'r', savedAt: '2026-01-01T00:00:05Z', name: 'new' }], mailTemplates: [], layoutTemplates: [], workflowTemplates: [{ id: 'w', updatedAt: '2026-01-01T00:00:05Z', name: 'new workflow' }] } };
@@ -51,7 +57,7 @@ const scheduleMerged = overlayScheduleProjects(
   [{ projectId: 'schedule-project', zoomReviewSlotIds: ['slot-1'], affectedPersonIds: ['person-1'], scheduleOnly: true }],
   { projects: [remoteProject], quickWorkspaces: {} }
 ).projects[0];
-assert.equal(scheduleMerged.data.slots[0].startTime, '10:00');
+assert.equal(scheduleMerged.data.slots[0].startTime, '09:00');
 assert.equal(scheduleMerged.data.communication.subjectTemplate, '다른 창의 최신 메일');
 assert.deepEqual(scheduleMerged.data.externalArtifacts.map((item) => item.status), ['stale', 'stale']);
 assert.equal(scheduleMerged.moduleState.zoom.status, 'stale');
@@ -66,4 +72,82 @@ const twoSlotMerged = overlayScheduleProjects(
   { projects: [currentTwoSlots], quickWorkspaces: {} }
 ).projects[0];
 assert.deepEqual(twoSlotMerged.data.slots.map((slot) => slot.startTime), ['10:00', '12:00']);
+
+const ancestorProject = {
+  id: 'concurrent-project', updatedAt: '2026-01-01T00:00:00Z', name: '동시 편집', counts: { sessions: 1, unresolved: 0 },
+  data: {
+    people: [{ id: 'person-1', name: '기존 이름', email: 'old@example.com', values: {} }],
+    roles: [{ id: 'role-1', name: '참여자' }],
+    slots: [{ id: 'slot-1', startTime: '09:00' }],
+    availability: { 'person-1': ['slot-1'] },
+    assignments: [{ id: 'assignment-1', personId: 'person-1', slotId: 'slot-1', roleId: 'role-1', locked: false }],
+    conflicts: [], scheduleRules: { avoidRepeatPairing: true }, scheduleSheetInitialized: true,
+    scheduleSheetColumns: [{ id: 'date', key: 'date' }], scheduleCustomValues: {}, versions: [],
+    communication: { subjectTemplate: '기존 제목' },
+    externalArtifacts: [{ kind: 'zoom', externalId: 'zoom-1', slotId: 'slot-1', status: 'created', joinUrl: 'old-link' }]
+  },
+  moduleState: { people: { status: 'complete' }, schedule: { status: 'complete' } },
+  workflow: [{ id: 'people-step', moduleId: 'people', status: 'complete' }, { id: 'schedule-step', moduleId: 'schedule', status: 'complete' }]
+};
+const ancestorState = {
+  updatedAt: '2026-01-01T00:00:00Z', activeProjectId: 'concurrent-project',
+  installedExtensions: ['people', 'schedule'], projects: [ancestorProject], quickWorkspaces: {}, connections: [],
+  library: { rosters: [], mailTemplates: [], layoutTemplates: [], workflowTemplates: [] },
+  deletedConnectionIds: [], deletedLibraryIds: []
+};
+const currentConcurrent = structuredClone(ancestorState);
+currentConcurrent.updatedAt = '2026-01-01T00:00:10Z';
+currentConcurrent.installedExtensions = ['people', 'zoom'];
+currentConcurrent.projects[0].updatedAt = currentConcurrent.updatedAt;
+currentConcurrent.projects[0].data.communication.subjectTemplate = '다른 창 제목';
+currentConcurrent.projects[0].data.externalArtifacts[0].joinUrl = 'latest-link';
+const incomingConcurrent = structuredClone(ancestorState);
+incomingConcurrent.updatedAt = '2026-01-01T00:00:11Z';
+incomingConcurrent.installedExtensions = ['people', 'schedule', 'gmailFlow'];
+incomingConcurrent.projects[0].updatedAt = incomingConcurrent.updatedAt;
+incomingConcurrent.projects[0].data.people[0].name = '로컬 수정 이름';
+incomingConcurrent.projects[0].data.people[0].email = 'new@example.com';
+incomingConcurrent.projects[0].data.people.push({ id: 'person-2', name: '추가 고객', email: 'new-person@example.com', values: {} });
+incomingConcurrent.projects[0].data.externalArtifacts[0].status = 'stale';
+
+const concurrentMerged = mergeWorkspaceState(currentConcurrent, incomingConcurrent, ancestorState);
+const concurrentProject = concurrentMerged.projects[0];
+assert.equal(concurrentProject.data.communication.subjectTemplate, '다른 창 제목');
+assert.equal(concurrentProject.data.people.find((person) => person.id === 'person-1').email, 'new@example.com');
+assert.equal(concurrentProject.data.people.some((person) => person.id === 'person-2'), true);
+assert.deepEqual(concurrentMerged.installedExtensions, ['people', 'zoom', 'gmailFlow']);
+assert.equal(concurrentProject.data.externalArtifacts[0].joinUrl, 'latest-link');
+assert.equal(concurrentProject.data.externalArtifacts[0].status, 'stale');
+
+const hintedPeopleMerge = overlayScheduleProjects(
+  { ...concurrentMerged, projects: [concurrentProject] },
+  incomingConcurrent,
+  [{ projectId: 'concurrent-project', changedSlotIds: [], scheduleOnly: true }],
+  currentConcurrent
+).projects[0];
+assert.equal(hintedPeopleMerge.data.people.find((person) => person.id === 'person-1').name, '로컬 수정 이름');
+assert.equal(hintedPeopleMerge.data.communication.subjectTemplate, '다른 창 제목');
+assert.equal(hintedPeopleMerge.data.slots[0].startTime, '09:00');
+
+const storageRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cmoe-storage-recovery-'));
+const blockingParent = path.join(storageRoot, 'blocked');
+const storagePath = path.join(blockingParent, 'workspace.json');
+try {
+  fs.writeFileSync(blockingParent, 'not a directory', 'utf8');
+  const storage = new JsonStorage(storagePath);
+  await assert.rejects(storage.set('workspaceState', { revision: 1 }));
+  fs.unlinkSync(blockingParent);
+  fs.mkdirSync(blockingParent);
+  await storage.set('workspaceState', { revision: 2 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(storagePath, 'utf8')).workspaceState, { revision: 2 });
+} finally {
+  fs.rmSync(storageRoot, { recursive: true, force: true });
+}
+
 console.log('state-merge tests passed');
+}
+
+run().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

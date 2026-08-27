@@ -34,7 +34,7 @@ class JsonStorage {
 
   async persist() {
     const snapshot = JSON.stringify(this.data, null, 2);
-    this.writeChain = this.writeChain.then(async () => {
+    const operation = this.writeChain.then(async () => {
       await fs.promises.mkdir(path.dirname(this.filePath), { recursive: true });
       const temporaryPath = `${this.filePath}.tmp`;
       await fs.promises.writeFile(temporaryPath, snapshot, 'utf8');
@@ -46,7 +46,8 @@ class JsonStorage {
         await fs.promises.rename(temporaryPath, this.filePath);
       }
     });
-    return this.writeChain;
+    this.writeChain = operation.catch(() => {});
+    return operation;
   }
 }
 

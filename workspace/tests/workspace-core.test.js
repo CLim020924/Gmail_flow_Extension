@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const Core = require('../workspace-core');
 
 function run() {
+  assert.equal(Core.MODULE_CATALOG.every((module) => module.page === module.id), true);
+
   let state = Core.createEmptyState();
   assert.equal(state.projects.length, 0);
 
