@@ -729,6 +729,99 @@
     return requests;
   }
 
+  function formAnswerValues(response, questionId) {
+    const answer = questionId ? response?.answers?.[questionId] : null;
+    return answer?.textAnswers?.answers?.map((item) => clean(item.value)).filter(Boolean) || [];
+  }
+
+  function formQuestionIndex(form) {
+    const byTitle = new Map();
+    (form?.items || []).forEach((item) => {
+      const id = item.questionItem?.question?.questionId;
+      if (id) byTitle.set(clean(item.title), id);
+    });
+    return byTitle;
+  }
+
+  function responseOrderKey(response) {
+    const submittedAt = Date.parse(response?.lastSubmittedTime || response?.createTime || '');
+    return [
+      Number.isFinite(submittedAt) ? submittedAt : 0,
+      clean(response?.responseId),
+      JSON.stringify(response?.answers || {})
+    ];
+  }
+
+  function compareResponseOrder(left, right) {
+    const leftKey = responseOrderKey(left);
+    const rightKey = responseOrderKey(right);
+    if (leftKey[0] !== rightKey[0]) return leftKey[0] - rightKey[0];
+    if (leftKey[1] !== rightKey[1]) return leftKey[1].localeCompare(rightKey[1]);
+    return leftKey[2].localeCompare(rightKey[2]);
+  }
+
+  function applyGoogleFormResponses(project, linked, payload) {
+    const questions = formQuestionIndex(payload?.form);
+    const responses = Array.isArray(payload?.responses) ? payload.responses : [];
+    if (linked?.type === 'registration') {
+      const headers = ['성함', '휴대폰 번호', '이메일 주소', '소속·분류'];
+      const matrix = [headers, ...responses.map((response) => headers.map((title) => formAnswerValues(response, questions.get(title))[0] || (title === '이메일 주소' ? clean(response.respondentEmail) : '')))];
+      const imported = matrixToRoster(matrix);
+      const existingByEmail = new Map(project.data.people.filter((person) => person.email).map((person) => [clean(person.email).toLowerCase(), person]));
+      const existingByName = new Map(project.data.people.filter((person) => person.name).map((person) => [clean(person.name).toLowerCase(), person]));
+      if (!project.data.columns.length) project.data.columns = imported.columns;
+      const columnByType = new Map(project.data.columns.map((column) => [column.type, column]));
+      const changedPeople = new Set();
+      imported.people.forEach((incoming) => {
+        const emailKey = clean(incoming.email).toLowerCase();
+        const nameKey = clean(incoming.name).toLowerCase();
+        let target = (emailKey && existingByEmail.get(emailKey)) || (nameKey && existingByName.get(nameKey));
+        if (target) {
+          ['name', 'phone', 'email', 'group'].forEach((type) => {
+            const column = columnByType.get(type);
+            if (column && incoming[type]) target.values[column.id] = incoming[type];
+            target[type] = incoming[type] || target[type];
+          });
+        } else {
+          const values = {};
+          project.data.columns.forEach((column) => { values[column.id] = incoming[column.type] || ''; });
+          target = { ...incoming, id: makeId('person'), sourceOrder: project.data.people.length, values };
+          project.data.people.push(target);
+        }
+        const targetEmailKey = clean(target.email).toLowerCase();
+        const targetNameKey = clean(target.name).toLowerCase();
+        if (targetEmailKey) existingByEmail.set(targetEmailKey, target);
+        if (targetNameKey) existingByName.set(targetNameKey, target);
+        changedPeople.add(target.id);
+      });
+      return { changed: changedPeople.size, unmatched: 0, type: 'registration', message: `${changedPeople.size}명의 신청자 정보를 병합했습니다.` };
+    }
+
+    const nameId = linked?.questionIds?.name || questions.get('성함');
+    const participantId = linked?.questionIds?.participantId || questions.get('참여자 고유번호');
+    const slotsId = linked?.questionIds?.slots || questions.get('참여 가능한 시간');
+    const latestByPerson = new Map();
+    let unmatched = 0;
+    responses.forEach((response) => {
+      const rawId = formAnswerValues(response, participantId)[0];
+      const name = formAnswerValues(response, nameId)[0];
+      const email = clean(response.respondentEmail).toLowerCase();
+      const person = project.data.people.find((item) => item.id === rawId)
+        || project.data.people.find((item) => email && clean(item.email).toLowerCase() === email)
+        || project.data.people.find((item) => clean(item.name) === name);
+      if (!person) { unmatched += 1; return; }
+      const current = latestByPerson.get(person.id);
+      if (!current || compareResponseOrder(current.response, response) < 0) latestByPerson.set(person.id, { person, response });
+    });
+    latestByPerson.forEach(({ person, response }) => {
+      project.data.availability[person.id] = formAnswerValues(response, slotsId)
+        .map((value) => value.match(/^\[([^\]]+)\]/)?.[1])
+        .filter((slotId) => project.data.slots.some((slot) => slot.id === slotId));
+    });
+    const changed = latestByPerson.size;
+    return { changed, unmatched, type: 'availability', message: `${changed}명의 가능 시간을 반영했습니다.${unmatched ? ` 일치하지 않은 응답 ${unmatched}건은 확인이 필요합니다.` : ''}` };
+  }
+
   function externalOperationFingerprint(project, kind, connections = []) {
     const data = project?.data || {};
     const sorted = (items) => items.slice().sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
@@ -770,7 +863,8 @@
       const assignments = project.data.assignments.filter((assignment) => assignment.personId === person.id && slotMap.has(assignment.slotId) && slotMap.get(assignment.slotId).status !== 'cancelled').map((assignment) => {
         const slot = slotMap.get(assignment.slotId);
         const peers = project.data.assignments.filter((candidate) => candidate.slotId === assignment.slotId && candidate.personId !== person.id).map((candidate) => personMap.get(candidate.personId)?.name).filter(Boolean);
-        const artifact = project.data.externalArtifacts.find((candidate) => candidate.kind === 'zoom' && candidate.slotId === assignment.slotId && candidate.status === 'created');
+        const zoomConnectionId = slot?.zoomConnectionId || project.settings?.defaultConnectionIds?.zoom || null;
+        const artifact = project.data.externalArtifacts.find((candidate) => candidate.kind === 'zoom' && candidate.slotId === assignment.slotId && candidate.connectionId === zoomConnectionId && candidate.status === 'created');
         return { date: slot?.date || '', startTime: slot?.startTime || '', endTime: slot?.endTime || '', label: slot?.label || '', role: roleMap.get(assignment.roleId)?.name || '', peers, zoomJoinUrl: artifact?.joinUrl || '' };
       }).sort((a, b) => `${a.date} ${a.startTime}`.localeCompare(`${b.date} ${b.startTime}`));
       const personalSchedule = assignments.map((item) => `${item.date} ${item.startTime}-${item.endTime}${item.label ? ` · ${item.label}` : ''}${item.peers.length ? ` · 함께: ${item.peers.join(', ')}` : ''}${item.zoomJoinUrl ? `\n${item.zoomJoinUrl}` : ''}`).join('\n\n');
@@ -815,6 +909,7 @@
     externalChangeApprovalRequired,
     buildGoogleFormDefinition,
     googleFormsApiRequests,
+    applyGoogleFormResponses,
     externalOperationFingerprint,
     buildMailPackage,
     mailPackageToCsv

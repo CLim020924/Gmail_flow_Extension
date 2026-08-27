@@ -1847,6 +1847,23 @@
       .sort((left, right) => String(right.updatedAt || right.createdAt || '').localeCompare(String(left.updatedAt || left.createdAt || '')))[0] || null;
   }
 
+  function supersedeArtifactsForRoute(project, kind, nextConnectionId, predicate = () => true, reason = '사용 계정 변경 후 새로 생성 필요') {
+    let changed = 0;
+    const targetConnectionId = nextConnectionId || null;
+    project.data.externalArtifacts = project.data.externalArtifacts.map((artifact) => {
+      if (artifact.kind !== kind || artifact.status === 'superseded' || !predicate(artifact) || artifact.connectionId === targetConnectionId) return artifact;
+      changed += 1;
+      return {
+        ...artifact,
+        status: 'superseded',
+        replacedAt: new Date().toISOString(),
+        replacementReason: reason,
+        replacementConnectionId: targetConnectionId
+      };
+    });
+    return changed;
+  }
+
   function retireArtifactsForConnection(connection, reason = '계정 변경 후 외부 항목 재확인 필요') {
     if (!connection) return 0;
     const artifactKind = connection.type === 'gmail' ? 'gmailDraft' : connection.type === 'zoom' ? 'zoom' : '';
@@ -1881,11 +1898,17 @@
   }
 
   function pendingZoomSlots(project) {
-    return project.data.slots.filter((slot) => slot.status !== 'cancelled' && project.data.assignments.some((assignment) => assignment.slotId === slot.id) && !project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created'));
+    return project.data.slots.filter((slot) => {
+      const connectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
+      return slot.status !== 'cancelled'
+        && project.data.assignments.some((assignment) => assignment.slotId === slot.id)
+        && !project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.connectionId === connectionId && item.status === 'created');
+    });
   }
 
   function pendingGmailEntries(project) {
-    return Ops.buildMailPackage(project).entries.filter((entry) => latestActiveExternalArtifact(project, 'gmailDraft', (artifact) => artifact.personId === entry.personId)?.status !== 'created');
+    const connectionId = defaultConnectionId(project, 'gmail');
+    return Ops.buildMailPackage(project).entries.filter((entry) => latestActiveExternalArtifact(project, 'gmailDraft', (artifact) => artifact.personId === entry.personId && artifact.connectionId === connectionId)?.status !== 'created');
   }
 
   function renderSessionChangePreview(project) {
@@ -2286,8 +2309,35 @@
     table.tBodies[0].replaceChildren(...output.rows.map((values) => { const row = element('tr'); values.forEach((value) => row.append(element('td', '', value))); return row; }));
   }
 
+  function selectedLinkedForm(project) {
+    const linkedForms = project?.data.forms?.linkedForms || [];
+    return linkedForms.find((item) => item.formId === project.data.forms.selectedFormId) || linkedForms.at(-1) || null;
+  }
+
   function renderFormsPage() {
     const project = activeProject(); if (!project) { navigate('dashboard'); return; }
+    const linkedForms = project.data.forms.linkedForms || [];
+    const selectedLinked = selectedLinkedForm(project);
+    const linkedSelect = $('#linkedFormSelect');
+    linkedSelect.replaceChildren();
+    if (!linkedForms.length) linkedSelect.append(element('option', '', '연결된 설문 없음'));
+    linkedForms.forEach((linked, index) => {
+      const option = element('option', '', linked.title || `${linked.type === 'availability' ? '가능 시간 조사' : '신청자 정보'} ${index + 1} · ${linked.formId}`);
+      option.value = linked.formId; option.selected = linked.formId === selectedLinked?.formId; linkedSelect.append(option);
+    });
+    linkedSelect.disabled = !linkedForms.length;
+    $('#syncFormResponses').disabled = !selectedLinked;
+    $('#removeLinkedForm').disabled = !selectedLinked;
+    if (!selectedLinked) $('#linkedFormStatus').textContent = '연결한 설문의 응답을 가져오면 명단이나 사람별 가능 시간에 반영됩니다.';
+    else {
+      const connection = state.connections.find((item) => item.id === selectedLinked.connectionId);
+      const details = [selectedLinked.type === 'availability' ? '가능 시간 조사' : '신청자 정보'];
+      if (connection) details.push(`${connection.label}${connection.account ? ` · ${connection.account}` : ''}`);
+      if (Number.isFinite(Number(selectedLinked.responseCount))) details.push(`마지막 응답 ${Number(selectedLinked.responseCount)}건`);
+      if (selectedLinked.lastSyncedAt) details.push(`동기화 ${formatUpdatedAt(selectedLinked.lastSyncedAt)}`);
+      if (selectedLinked.needsReview) details.push('확인 필요');
+      $('#linkedFormStatus').textContent = details.join(' · ');
+    }
     const definition = project.data.forms.definitions.at(-1);
     const preview = $('#formDefinitionPreview'); preview.replaceChildren();
     if (!definition) { preview.append(element('div', 'list-empty', '아직 미리 만든 설문이 없습니다. 위에서 받을 정보를 선택하고 “설문 내용 미리 만들기”를 누르세요.')); return; }
@@ -2325,9 +2375,11 @@
       const accountCell = element('td'); const select = element('select'); select.dataset.zoomSlotConnection = slot.id;
       const inherit = element('option', '', defaultConnection ? `기본값 · ${defaultConnection.label}` : '계정 선택 필요'); inherit.value = ''; select.append(inherit);
       zoomConnections.forEach((connection) => { const option = element('option', '', `${connection.label}${connection.status !== 'connected' ? ' · 로그인 필요' : ''}`); option.value = connection.id; option.selected = slot.zoomConnectionId === connection.id; select.append(option); }); accountCell.append(select); row.append(accountCell);
-      const artifact = project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created')
-        || project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id);
+      const slotConnectionId = slot.zoomConnectionId || defaultId;
+      const artifact = latestActiveExternalArtifact(project, 'zoom', (item) => item.slotId === slot.id && item.connectionId === slotConnectionId);
+      const replacedArtifact = project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id && (item.status === 'superseded' || item.connectionId !== slotConnectionId));
       const needsCleanup = Boolean(artifact && artifact.status !== 'superseded' && (artifact.status === 'stale' || slot.status === 'cancelled')); const status = element('td', '', needsCleanup ? '기존 회의 정리 필요' : artifact?.status === 'created' ? '만들기 완료' : '아직 만들지 않음');
+      if (!artifact && replacedArtifact) status.textContent = '선택한 계정으로 다시 만들기 필요';
       if (needsCleanup && artifact.externalId) { const resolved = element('button', 'text-button', '정리 완료 표시'); resolved.type = 'button'; resolved.dataset.zoomArtifactResolved = artifact.externalId; status.append(document.createTextNode(' '), resolved); }
       row.append(status, element('td', '', artifact?.joinUrl || ''));
       return row;
@@ -2518,16 +2570,25 @@
 
   function renderGmailPage() {
     const project = activeProject(); if (!project) { navigate('dashboard'); return; }
-    const workspaceGmail = state.connections.find((connection) => connection.type === 'gmail' && connection.status === 'connected');
-    const connectedEmail = gmailFlowSummary.email || workspaceGmail?.account || '';
+    const workspaceGmailId = defaultConnectionId(project, 'gmail');
+    const workspaceGmail = state.connections.find((connection) => connection.id === workspaceGmailId && connection.type === 'gmail');
+    const workspaceGmailReady = workspaceGmail?.status === 'connected';
+    const connectedEmail = workspaceGmail?.account || workspaceGmail?.label || '';
     const accountButton = $('#gmailFlowAccountButton');
-    accountButton.classList.toggle('connected', Boolean(connectedEmail));
-    accountButton.classList.toggle('needs-auth', !connectedEmail);
+    accountButton.classList.toggle('connected', workspaceGmailReady);
+    accountButton.classList.toggle('needs-auth', !workspaceGmailReady);
     $('#gmailFlowAccountAvatar').textContent = connectedEmail ? connectedEmail.slice(0, 1).toUpperCase() : 'G';
-    $('#gmailFlowAccountText').textContent = connectedEmail || 'Google 계정 연결 필요';
-    $('#gmailFlowAccountStatus').textContent = gmailFlowSummary.connected
-      ? '메일을 보낼 계정으로 연결되어 있습니다.'
-      : workspaceGmail ? 'Workspace Gmail 연결됨 · Gmail Flow에서 계정을 확인하세요' : 'Gmail Flow를 열어 Google 계정에 로그인하세요';
+    $('#gmailFlowAccountText').textContent = connectedEmail || '프로젝트 기본 Gmail 계정 필요';
+    $('#gmailFlowAccountStatus').textContent = !workspaceGmailId
+      ? '이 프로젝트에서 임시보관함을 만들 계정을 선택하세요.'
+      : !workspaceGmail
+        ? '선택한 Workspace Gmail 연결을 찾을 수 없습니다.'
+        : workspaceGmailReady
+          ? `Workspace 기본 계정 · ${workspaceGmail.label}`
+          : `Workspace 기본 계정 · ${workspaceGmail.label} 로그인 필요`;
+    $('#legacyGmailFlowStatus').textContent = gmailFlowSummary.connected
+      ? `기존 Gmail Flow · ${gmailFlowSummary.email || '연결됨'}`
+      : '기존 Gmail Flow 계정은 별도로 관리됩니다.';
     renderMailRosterResource(project);
     if (!mailEditorDirty) {
       mailEditorProjectId = project.id;
@@ -2546,17 +2607,22 @@
     const pkg = Ops.buildMailPackage(project);
     const empty = pkg.entries.filter((entry) => !entry.assignments.length).length;
     const missingZoom = pkg.entries.filter((entry) => entry.assignments.some((assignment) => !assignment.zoomJoinUrl)).length;
-    $('#mailReadinessText').textContent = !pkg.entries.length
+    const packageReadiness = !pkg.entries.length
       ? '받는 사람 명단을 먼저 가져와주세요.'
       : empty || missingZoom
         ? `${pkg.entries[0]?.name || '받는 사람'}${pkg.entries.length > 1 ? ` 외 ${pkg.entries.length - 1}명` : ''}에게 보낼 예정입니다.${empty ? ` 일정이 없는 사람 ${empty}명을 확인해주세요.` : ''}${missingZoom ? ` Zoom 링크가 없는 사람 ${missingZoom}명을 확인해주세요.` : ''}`
         : `${pkg.entries[0]?.name || '받는 사람'}${pkg.entries.length > 1 ? ` 외 ${pkg.entries.length - 1}명` : ''}의 명단과 일정 연결을 확인했습니다.`;
+    const accountReadiness = workspaceGmailReady
+      ? `Gmail 임시보관함은 ${connectedEmail} 계정에 저장됩니다.`
+      : 'Gmail 임시보관함을 만들려면 이 프로젝트의 Workspace Gmail 기본 계정을 연결해주세요.';
+    $('#mailReadinessText').textContent = `${accountReadiness} ${packageReadiness}`;
     $('#mailPackageStatus').textContent = project.data.communication.lastPreparedAt ? `마지막 준비: ${formatUpdatedAt(project.data.communication.lastPreparedAt)}` : '메일 데이터를 준비하기 전입니다.';
     const table = $('#mailPreviewTable'); const head = element('tr'); ['이름', '이메일', '제목', '일정 수', '본문 미리보기', '상태', '수정'].forEach((label) => head.append(element('th', '', label))); table.tHead.replaceChildren(head);
     const rows = pkg.entries.map((entry) => {
       const row = element('tr'); [entry.name, entry.email, entry.subject, String(entry.assignments.length), entry.body.slice(0, 180)].forEach((value) => row.append(element('td', '', value)));
-      const artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId);
-      row.append(element('td', '', artifact?.status === 'created' ? (entry.edited ? '개별 수정 반영됨' : 'Gmail 임시보관함에 저장됨') : artifact?.status === 'stale' ? 'Gmail 내용 다시 저장 필요' : entry.edited ? '이 사람만 수정됨' : '확인 가능'));
+      const artifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId && item.connectionId === workspaceGmailId);
+      const otherAccountArtifact = latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId && item.connectionId !== workspaceGmailId);
+      row.append(element('td', '', artifact?.status === 'created' ? (entry.edited ? '개별 수정 반영됨' : 'Gmail 임시보관함에 저장됨') : artifact?.status === 'stale' ? 'Gmail 내용 다시 저장 필요' : otherAccountArtifact ? '선택한 Gmail 계정으로 다시 저장 필요' : entry.edited ? '이 사람만 수정됨' : '확인 가능'));
       const actionCell = element('td'); const edit = element('button', 'secondary-button compact', '이 사람 메일 수정'); edit.type = 'button'; edit.dataset.mailEdit = entry.personId; actionCell.append(edit); row.append(actionCell); return row;
     });
     table.tBodies[0].replaceChildren(...rows);
@@ -2576,58 +2642,6 @@
     const chips = named.slice(0, 6).map((person) => element('span', 'resource-chip', person.name || person.email));
     if (named.length > 6) chips.push(element('span', 'resource-chip more', `＋${named.length - 6}`));
     preview.replaceChildren(...chips);
-  }
-
-  function formAnswerValues(response, questionId) {
-    const answer = response.answers?.[questionId];
-    return answer?.textAnswers?.answers?.map((item) => String(item.value || '').trim()).filter(Boolean) || [];
-  }
-
-  function formQuestionIndex(form) {
-    const byTitle = new Map();
-    (form.items || []).forEach((item) => {
-      const id = item.questionItem?.question?.questionId;
-      if (id) byTitle.set(String(item.title || '').trim(), id);
-    });
-    return byTitle;
-  }
-
-  function applyFormResponses(project, linked, payload) {
-    const questions = formQuestionIndex(payload.form);
-    if (linked.type === 'registration') {
-      const headers = ['성함', '휴대폰 번호', '이메일 주소', '소속·분류'];
-      const matrix = [headers, ...payload.responses.map((response) => headers.map((title) => formAnswerValues(response, questions.get(title))[0] || (title === '이메일 주소' ? response.respondentEmail || '' : '')))];
-      const imported = Ops.matrixToRoster(matrix);
-      const existingByEmail = new Map(project.data.people.filter((person) => person.email).map((person) => [person.email.toLowerCase(), person]));
-      const existingByName = new Map(project.data.people.filter((person) => person.name).map((person) => [person.name, person]));
-      if (!project.data.columns.length) project.data.columns = imported.columns;
-      const columnByType = new Map(project.data.columns.map((column) => [column.type, column]));
-      imported.people.forEach((incoming) => {
-        const target = existingByEmail.get(incoming.email.toLowerCase()) || existingByName.get(incoming.name);
-        if (target) {
-          ['name', 'phone', 'email', 'group'].forEach((type) => { const column = columnByType.get(type); if (column && incoming[type]) target.values[column.id] = incoming[type]; target[type] = incoming[type] || target[type]; });
-        } else {
-          const values = {};
-          project.data.columns.forEach((column) => { values[column.id] = incoming[column.type] || ''; });
-          project.data.people.push({ ...incoming, id: `person-${crypto.randomUUID()}`, sourceOrder: project.data.people.length, values });
-        }
-      });
-      return { changed: imported.people.length, unmatched: 0, type: 'registration', message: `${imported.people.length}명의 신청자 정보를 병합했습니다.` };
-    }
-    const nameId = linked.questionIds?.name || questions.get('성함');
-    const participantId = linked.questionIds?.participantId || questions.get('참여자 고유번호');
-    const slotsId = linked.questionIds?.slots || questions.get('참여 가능한 시간');
-    let changed = 0; let unmatched = 0;
-    payload.responses.forEach((response) => {
-      const rawId = formAnswerValues(response, participantId)[0];
-      const name = formAnswerValues(response, nameId)[0];
-      const email = String(response.respondentEmail || '').toLowerCase();
-      const person = project.data.people.find((item) => item.id === rawId) || project.data.people.find((item) => email && item.email.toLowerCase() === email) || project.data.people.find((item) => item.name === name);
-      if (!person) { unmatched += 1; return; }
-      project.data.availability[person.id] = formAnswerValues(response, slotsId).map((value) => value.match(/^\[([^\]]+)\]/)?.[1]).filter((slotId) => project.data.slots.some((slot) => slot.id === slotId));
-      changed += 1;
-    });
-    return { changed, unmatched, type: 'availability', message: `${changed}명의 가능 시간을 반영했습니다.${unmatched ? ` 일치하지 않은 응답 ${unmatched}건은 확인이 필요합니다.` : ''}` };
   }
 
   function downloadText(filename, text, type) {
@@ -2799,6 +2813,7 @@
     $$('[data-default-connection-type]').forEach((select) => { defaultConnectionIds[select.dataset.defaultConnectionType] = select.value || null; });
     try {
       const previousName = project.name;
+      const previousDefaultConnectionIds = { ...project.settings.defaultConnectionIds };
       const participantRole = project.data.roles.find((role) => role.id === 'participant');
       if (participantRole) { participantRole.minPerSession = participantMin; participantRole.maxPerSession = participantMax; }
       const coachRole = project.data.roles.find((role) => role.id === 'coach');
@@ -2829,10 +2844,29 @@
           if (artifact.kind === 'zoom') { artifact.status = 'stale'; zoomStale = true; }
         });
       }
+      if (previousDefaultConnectionIds.gmail !== defaultConnectionIds.gmail) {
+        gmailStale = supersedeArtifactsForRoute(
+          updatedProject,
+          'gmailDraft',
+          defaultConnectionIds.gmail,
+          () => true,
+          '프로젝트 기본 Gmail 계정 변경 후 새 계정으로 다시 생성 필요'
+        ) > 0 || gmailStale;
+      }
+      if (previousDefaultConnectionIds.zoom !== defaultConnectionIds.zoom) {
+        const inheritedSlotIds = new Set(updatedProject.data.slots.filter((slot) => !slot.zoomConnectionId).map((slot) => slot.id));
+        zoomStale = supersedeArtifactsForRoute(
+          updatedProject,
+          'zoom',
+          defaultConnectionIds.zoom,
+          (artifact) => inheritedSlotIds.has(artifact.slotId),
+          '프로젝트 기본 Zoom 계정 변경 후 새 계정으로 다시 생성 필요'
+        ) > 0 || zoomStale;
+      }
       state = Core.updateProject(state, updatedProject.id, { data: updatedProject.data });
       if (updatedProject.data.slots.length) state = Core.setModuleStatus(state, updatedProject.id, 'schedule', updatedProject.data.conflicts.length ? 'needsReview' : 'stale', updatedProject.data.conflicts.length ? `설정 변경 후 일정 문제 ${updatedProject.data.conflicts.length}건` : '프로젝트 설정 변경 후 일정 재검토 필요');
-      if (gmailStale && updatedProject.installedModules.includes('gmailFlow')) state = Core.setModuleStatus(state, updatedProject.id, 'gmailFlow', 'stale', '프로젝트 이름 변경 후 Gmail 확인 필요');
-      if (zoomStale && updatedProject.installedModules.includes('zoom')) state = Core.setModuleStatus(state, updatedProject.id, 'zoom', 'stale', '프로젝트 이름 변경 후 Zoom 확인 필요');
+      if (gmailStale && updatedProject.installedModules.includes('gmailFlow')) state = Core.setModuleStatus(state, updatedProject.id, 'gmailFlow', 'stale', previousDefaultConnectionIds.gmail !== defaultConnectionIds.gmail ? '기본 Gmail 계정 변경 후 새 계정으로 다시 생성 필요' : '프로젝트 이름 변경 후 Gmail 확인 필요');
+      if (zoomStale && updatedProject.installedModules.includes('zoom')) state = Core.setModuleStatus(state, updatedProject.id, 'zoom', 'stale', previousDefaultConnectionIds.zoom !== defaultConnectionIds.zoom ? '기본 Zoom 계정 변경 후 새 계정으로 다시 생성 필요' : '프로젝트 이름 변경 후 Zoom 확인 필요');
       recordScheduleMergeImpact(updatedProject.id, null, { scheduleOnly: false });
       await persist();
       closeDialog('projectSettingsDialog');
@@ -3489,9 +3523,14 @@
       state.library.mailTemplates.push({ id: `mail-template-${Date.now().toString(36)}`, name, subject: $('#mailSubjectTemplate').value, bodyHtml: sanitizeRichHtml($('#mailBodyEditor').innerHTML), savedAt: new Date().toISOString() });
       await persist(); renderGmailPage(); showToast('나중에 다시 사용할 수 있도록 메일 양식을 저장했습니다.', 'success');
     });
-    $('#loadSharedMailTemplate').addEventListener('click', () => {
+    $('#loadSharedMailTemplate').addEventListener('click', async () => {
       const template = state.library.mailTemplates.find((item) => item.id === $('#sharedMailTemplateSelect').value); if (!template) { showToast('불러올 메일 양식을 먼저 선택해주세요.', 'error'); return; }
-      $('#mailSubjectTemplate').value = template.subject; $('#mailBodyEditor').innerHTML = sanitizeRichHtml(template.bodyHtml); showToast('저장한 메일 양식을 불러왔습니다.', 'success');
+      const project = activeProject(); if (!project) return;
+      $('#mailSubjectTemplate').value = template.subject || ''; $('#mailBodyEditor').innerHTML = sanitizeRichHtml(template.bodyHtml || plainToHtml(template.body || ''));
+      mailEditorProjectId = project.id; mailEditorDirty = true;
+      await saveMailEditorDraft(project.id);
+      renderGmailPage(); renderDashboard();
+      showToast('저장한 메일 양식을 불러와 현재 프로젝트에 저장했습니다.', 'success');
     });
     $('#loadGmailSharedRoster')?.addEventListener('click', async () => {
       const roster = state.library.rosters.find((item) => item.id === $('#gmailSharedRosterSelect').value); if (!roster) { showToast('메일을 보낼 사람의 명단을 선택해주세요.', 'error'); return; }
@@ -3514,7 +3553,7 @@
     $('#openProgramLocation').addEventListener('click', () => void globalThis.workspaceDesktop.openProgramLocation());
     const openOriginalGmailFlow = () => void globalThis.workspaceDesktop?.openProgram?.('gmailFlow');
     $('#openOriginalGmailFlow').addEventListener('click', openOriginalGmailFlow);
-    $('#gmailFlowAccountButton').addEventListener('click', openOriginalGmailFlow);
+    $('#gmailFlowAccountButton').addEventListener('click', () => navigate('connections'));
     $('#newQuickTask').addEventListener('click', async () => {
       if (!standaloneProgram) return;
       const current = activeProject(); const hasData = current.data.people.length || current.data.slots.length || current.data.communication.mailEdits && Object.keys(current.data.communication.mailEdits).length;
@@ -3737,12 +3776,12 @@
     $('#createGoogleForm').addEventListener('click', async () => {
       let project = activeProject(); if (!project) return;
       let definition = project.data.forms.definitions.at(-1);
-      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.status === 'connected');
+      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.type === 'forms' && item.status === 'connected');
       if (!definition) { showToast('먼저 “설문 내용 미리 만들기”를 눌러 질문을 확인해주세요.', 'error'); return; }
       if (!connection) { showToast('설문을 만들 Google 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
       const projectId = project.id; const definitionId = definition.id; const confirmationSignature = externalOperationSignature(project, 'googleForm');
       if (!await showConfirm(`“${definition.title}” 설문을 ${connection.account || connection.label} 계정에 만들까요?`, { title: 'Google 설문 만들기', action: '설문 만들기' })) return;
-      project = projectById(projectId); definition = project?.data.forms.definitions.find((item) => item.id === definitionId); connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.status === 'connected');
+      project = projectById(projectId); definition = project?.data.forms.definitions.find((item) => item.id === definitionId); connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms') && item.type === 'forms' && item.status === 'connected');
       if (!project || !definition || !connection || externalOperationSignature(project, 'googleForm') !== confirmationSignature) { showToast('확인하는 동안 설문 내용이나 프로젝트 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       let reservation; let connectionReservation;
       try { reservation = await reserveExternalArtifacts(projectId, 'googleForm', ['forms']); }
@@ -3751,7 +3790,7 @@
       try { connectionReservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connection.id]); }
       catch (error) { await releaseExternalArtifacts(reservation.token); showToast(`Google 계정을 사용할 수 없습니다: ${error.message}`, 'error'); return; }
       if (!connectionReservation.ok) { await releaseExternalArtifacts(reservation.token); showToast('다른 창에서 같은 Google 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
-      project = projectById(projectId); definition = project?.data.forms.definitions.find((item) => item.id === definitionId); connection = state.connections.find((item) => item.id === connection.id && item.status === 'connected');
+      project = projectById(projectId); definition = project?.data.forms.definitions.find((item) => item.id === definitionId); connection = state.connections.find((item) => item.id === connection.id && item.type === 'forms' && item.status === 'connected');
       if (!project || !definition || !connection || externalOperationStateChanged(projectId, 'googleForm', confirmationSignature)) { await releaseExternalArtifacts(connectionReservation.token); await releaseExternalArtifacts(reservation.token); showToast('설문 생성 준비 중 관련 내용이나 계정이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       beginExternalOperation(); let created = null;
       try {
@@ -3762,6 +3801,7 @@
         const latestProject = latestKnownProject(projectId); if (!latestProject) throw new Error('생성한 설문을 연결할 프로젝트를 찾지 못했습니다.');
         const forms = cloneState(latestProject.data.forms);
         if (!forms.linkedForms.some((item) => item.formId === created.formId)) forms.linkedForms.push({ ...created, definitionId: definition.id, type: definition.type, title: definition.title, source: 'created', connectionId: connection.id, connectedAt: new Date().toISOString(), expectedConnectionIdentity, needsReview: changedDuringCreate });
+        forms.selectedFormId = created.formId;
         state = Core.updateProject(state, projectId, { data: { forms } });
         state = Core.setModuleStatus(state, projectId, 'forms', changedDuringCreate ? 'needsReview' : 'inProgress', changedDuringCreate ? `${definition.title} 생성됨 · 도중 변경사항 확인 필요` : `${definition.title} 생성됨`);
         recordScheduleMergeImpact(projectId, null, { scheduleOnly: false });
@@ -3793,15 +3833,35 @@
       const match = raw.match(/\/forms\/d\/([a-zA-Z0-9_-]+)/); const formId = match?.[1] || raw;
       if (!/^[a-zA-Z0-9_-]{10,}$/.test(formId)) { showToast('Google Form ID 형식을 확인해주세요.', 'error'); return; }
       if (!project.data.forms.linkedForms.some((item) => item.formId === formId)) project.data.forms.linkedForms.push({ formId, type: $('#formDefinitionType').value, source: 'manual', connectionId: defaultConnectionId(project, 'forms') || '', connectedAt: new Date().toISOString() });
+      project.data.forms.selectedFormId = formId;
       state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast('기존 Google Form을 프로젝트에 연결했습니다.', 'success');
+    });
+    $('#linkedFormSelect').addEventListener('change', async (event) => {
+      const project = activeProject(); if (!project) return;
+      project.data.forms.selectedFormId = event.target.value || null;
+      state = Core.updateProject(state, project.id, { data: project.data });
+      await persist('사용할 Google 설문 선택됨'); renderFormsPage();
+    });
+    $('#removeLinkedForm').addEventListener('click', async () => {
+      let project = activeProject(); const linked = selectedLinkedForm(project); if (!project || !linked) return;
+      const projectId = project.id; const formId = linked.formId; const signature = externalOperationSignature(project, 'googleForm');
+      if (!await showConfirm('선택한 Google 설문 연결을 이 프로젝트에서 해제할까요? Google 계정에 있는 실제 설문과 응답은 삭제하지 않습니다.', { title: 'Google 설문 연결 해제', action: '연결 해제' })) return;
+      project = projectById(projectId);
+      if (!project || externalOperationSignature(project, 'googleForm') !== signature || !project.data.forms.linkedForms.some((item) => item.formId === formId)) { showToast('확인하는 동안 설문 연결이 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderFormsPage(); return; }
+      project.data.forms.linkedForms = project.data.forms.linkedForms.filter((item) => item.formId !== formId);
+      project.data.forms.selectedFormId = project.data.forms.linkedForms.at(-1)?.formId || null;
+      state = Core.updateProject(state, project.id, { data: project.data });
+      if (project.installedModules.includes('forms')) state = Core.setModuleStatus(state, project.id, 'forms', 'inProgress', project.data.forms.linkedForms.length ? `연결된 설문 ${project.data.forms.linkedForms.length}개` : '연결된 설문 없음');
+      recordScheduleMergeImpact(project.id, null, { scheduleOnly: false });
+      await persist('Google 설문 연결 해제됨'); renderAll(); showToast('프로젝트 연결만 해제했습니다. Google 설문은 그대로 남아 있습니다.', 'success');
     });
     $('#syncFormResponses').addEventListener('click', async () => {
       let project = activeProject(); if (!project) return;
-      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'forms'));
-      if (!connection || connection.status !== 'connected') { showToast('응답을 가져올 Google 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
-      const connectionId = connection.id;
-      let linked = project.data.forms.linkedForms.at(-1);
+      let linked = selectedLinkedForm(project);
       if (!linked) { showToast('응답을 가져올 Google 설문을 먼저 이 프로젝트에 연결해주세요.', 'error'); return; }
+      let connection = state.connections.find((item) => item.id === (linked.connectionId || defaultConnectionId(project, 'forms')) && item.type === 'forms');
+      if (!connection || connection.status !== 'connected') { showToast('선택한 설문의 응답을 가져올 Google 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
+      const connectionId = connection.id;
       const projectId = project.id; const formId = linked.formId; const baseSignature = externalOperationSignature(project, 'googleForm');
       let reservation; let connectionReservation;
       try { reservation = await reserveExternalArtifacts(projectId, 'googleForm', ['forms']); }
@@ -3810,7 +3870,7 @@
       try { connectionReservation = await reserveExternalArtifacts('workspace-connections', 'connection', [connectionId]); }
       catch (error) { await releaseExternalArtifacts(reservation.token); showToast(`Google 계정을 사용할 수 없습니다: ${error.message}`, 'error'); return; }
       if (!connectionReservation.ok) { await releaseExternalArtifacts(reservation.token); showToast('다른 창에서 같은 Google 계정을 처리하고 있습니다. 완료된 뒤 다시 시도해주세요.'); return; }
-      project = projectById(projectId); linked = project?.data.forms.linkedForms.find((item) => item.formId === formId); connection = state.connections.find((item) => item.id === connectionId && item.status === 'connected' && defaultConnectionId(project, 'forms') === connectionId);
+      project = projectById(projectId); linked = project?.data.forms.linkedForms.find((item) => item.formId === formId); connection = state.connections.find((item) => item.id === connectionId && item.type === 'forms' && item.status === 'connected');
       if (!project || !linked || !connection || externalOperationStateChanged(projectId, 'googleForm', baseSignature)) { await releaseExternalArtifacts(connectionReservation.token); await releaseExternalArtifacts(reservation.token); showToast('응답을 가져오기 전에 설문·프로젝트 또는 계정 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
       beginExternalOperation();
       try {
@@ -3821,7 +3881,8 @@
         let conflictState = cloneState(latestKnownWorkspaceState());
         conflictState = Core.setModuleStatus(conflictState, projectId, 'forms', 'needsReview', 'Google 설문 응답을 가져온 뒤 프로젝트 또는 계정이 바뀌어 응답을 적용하지 않음');
         const workingProject = cloneState(latestProject); const workingLinked = workingProject.data.forms.linkedForms.find((item) => item.formId === formId); if (!workingLinked) throw new Error('연결된 Google 설문을 찾지 못했습니다.');
-        const result = applyFormResponses(workingProject, workingLinked, payload);
+        const result = Ops.applyGoogleFormResponses(workingProject, workingLinked, payload);
+        workingProject.data.forms.selectedFormId = formId; workingLinked.connectionId ||= connectionId;
         workingProject.data.forms.lastResponseSyncAt = new Date().toISOString(); workingLinked.lastSyncedAt = workingProject.data.forms.lastResponseSyncAt; workingLinked.responseCount = payload.responses.length; workingLinked.needsReview = Boolean(result.unmatched);
         if (result.changed) markRosterDependenciesStale(workingProject, result.type === 'availability' ? '가능 시간 응답 반영 후 일정 재검토 필요' : '설문 신청 명단 반영 후 일정 재검토 필요');
         else state = Core.updateProject(state, projectId, { data: workingProject.data });
@@ -3883,7 +3944,7 @@
           const latestBeforeCreate = projectById(projectId);
           if (!latestBeforeCreate || externalOperationStateChanged(projectId, 'zoom', baseSignature)) break;
           const connectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
-          const zoomConnection = state.connections.find((item) => item.id === connectionId && item.status === 'connected');
+          const zoomConnection = state.connections.find((item) => item.id === connectionId && item.type === 'zoom' && item.status === 'connected');
           const duration = Ops.timeToMinutes(slot.endTime) - Ops.timeToMinutes(slot.startTime);
           try {
             if (!zoomConnection) throw new Error('Zoom 계정의 최신 로그인 상태를 확인해주세요.');
@@ -3898,7 +3959,9 @@
         const artifacts = currentProject.data.externalArtifacts.map((item) => ({ ...item }));
         createdArtifacts.forEach(({ expectedConnectionIdentity, ...artifact }) => {
           const connectionChanged = !Core.connectionIdentityMatches(latestKnownConnection(artifact.connectionId), expectedConnectionIdentity);
-          if (!scheduleChanged && !connectionChanged) artifacts.filter((item) => item.kind === 'zoom' && item.slotId === artifact.slotId && !['created', 'superseded'].includes(item.status)).forEach((item) => { item.status = 'superseded'; item.replacedAt ||= new Date().toISOString(); });
+          if (!scheduleChanged && !connectionChanged) artifacts.filter((item) => item.kind === 'zoom' && item.slotId === artifact.slotId && item.status !== 'superseded').forEach((item) => {
+            item.status = 'superseded'; item.replacedAt ||= new Date().toISOString(); item.replacementReason ||= '선택한 Zoom 계정으로 새 회의가 생성됨'; item.replacementConnectionId = artifact.connectionId;
+          });
           artifacts.push(connectionChanged
             ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString(), replacementReason: 'Zoom 계정 변경 후 이전 계정에 생성된 회의' }
             : { ...artifact, status: scheduleChanged ? 'stale' : 'created' });
@@ -3939,18 +4002,16 @@
       mailEditorDirty = false; mailEditorProjectId = project.id;
       state = Core.updateProject(state, project.id, { data: project.data }); await persist('메일 편집 저장됨');
       project = projectById(project.id); if (!project) return;
-      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.status === 'connected');
+      let connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.type === 'gmail' && item.status === 'connected');
       let pending = pendingGmailEntries(project);
       if (!pending.length) { showToast('새로 Gmail 임시보관함에 만들 메일이 없습니다.'); return; }
-      let needsNewDraft = pending.some((entry) => !latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId));
-      if (needsNewDraft && !connection) { showToast('메일을 만들 Gmail 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
+      if (!connection) { showToast('이 프로젝트에서 사용할 기본 Gmail 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
       const projectId = project.id; const confirmationSignature = externalOperationSignature(project, 'gmailDraft');
       if (!await approveExternalChange(project, `${pending.length}명의 메일을 Gmail 임시보관함에 만들거나 기존 내용을 수정할까요? 아직 실제 발송은 하지 않습니다.`, { title: 'Gmail 임시보관함에 저장', action: '저장하기' })) return;
       project = projectById(projectId); pending = project ? pendingGmailEntries(project) : [];
       if (!project || externalOperationSignature(project, 'gmailDraft') !== confirmationSignature) { showToast('확인하는 동안 다른 창의 명단·일정 또는 메일 상태가 바뀌었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.', 'error'); renderAll(); return; }
-      connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.status === 'connected');
-      needsNewDraft = pending.some((entry) => !latestActiveExternalArtifact(project, 'gmailDraft', (item) => item.personId === entry.personId));
-      if (!pending.length || (needsNewDraft && !connection)) { showToast(needsNewDraft ? '최신 Gmail 로그인 상태를 다시 확인해주세요.' : '다른 창에서 메일 저장이 완료되어 새로 처리할 메일이 없습니다.', needsNewDraft ? 'error' : 'normal'); return; }
+      connection = state.connections.find((item) => item.id === defaultConnectionId(project, 'gmail') && item.type === 'gmail' && item.status === 'connected');
+      if (!pending.length || !connection) { showToast(!connection ? '프로젝트 기본 Gmail 계정의 최신 로그인 상태를 다시 확인해주세요.' : '다른 창에서 메일 저장이 완료되어 새로 처리할 메일이 없습니다.', !connection ? 'error' : 'normal'); return; }
       let reservation;
       try { reservation = await reserveExternalArtifacts(projectId, 'gmailDraft', pending.map((entry) => entry.personId)); }
       catch (error) { showToast(`Gmail 저장 작업을 시작하지 못했습니다: ${error.message}`, 'error'); return; }
@@ -3966,9 +4027,9 @@
           const entry = Ops.buildMailPackage(latestBeforeSave).entries.find((item) => item.personId === initialEntry.personId);
           if (!entry) break;
           try {
-            const artifact = latestActiveExternalArtifact(latestBeforeSave, 'gmailDraft', (item) => item.personId === entry.personId);
+            const artifact = latestActiveExternalArtifact(latestBeforeSave, 'gmailDraft', (item) => item.personId === entry.personId && item.connectionId === connection.id);
             if (artifact) {
-              const artifactConnection = state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected');
+              const artifactConnection = state.connections.find((item) => item.id === artifact.connectionId && item.type === 'gmail' && item.status === 'connected');
               if (!artifactConnection) throw new Error('기존 메일을 만든 Gmail 계정에 다시 로그인해야 합니다.');
               const draft = await globalThis.workspaceDesktop.updateGmailDraft(artifactConnection.id, artifact.externalId, entry, Core.connectionIdentity(artifactConnection));
               artifactUpdates.push({ ...artifact, messageId: draft.message?.id || artifact.messageId, status: 'created', updatedAt: new Date().toISOString(), expectedConnectionIdentity: Core.connectionIdentity(artifactConnection) }); updatedCount += 1;
@@ -3983,10 +4044,16 @@
         if (!currentProject) throw new Error('메일 생성 결과를 반영할 프로젝트를 찾지 못했습니다.');
         const scheduleChanged = externalOperationStateChanged(projectId, 'gmailDraft', baseSignature);
         let artifacts = currentProject.data.externalArtifacts.map((item) => ({ ...item }));
-        artifacts = mergeExternalArtifactUpdates(artifacts, artifactUpdates.map(({ expectedConnectionIdentity, ...item }) => {
+        const resolvedUpdates = artifactUpdates.map(({ expectedConnectionIdentity, ...item }) => {
           if (!Core.connectionIdentityMatches(latestKnownConnection(item.connectionId), expectedConnectionIdentity)) return { ...item, status: 'superseded', replacedAt: new Date().toISOString(), replacementReason: 'Gmail 계정 변경 후 이전 계정에 저장된 메일' };
           return scheduleChanged ? { ...item, status: 'stale' } : item;
-        }));
+        });
+        resolvedUpdates.filter((item) => item.status === 'created').forEach((item) => {
+          artifacts = artifacts.map((artifact) => artifact.kind === 'gmailDraft' && artifact.personId === item.personId && artifact.status !== 'superseded' && artifact.connectionId !== item.connectionId
+            ? { ...artifact, status: 'superseded', replacedAt: new Date().toISOString(), replacementReason: '프로젝트 기본 Gmail 계정 변경 후 새 계정에 다시 저장됨', replacementConnectionId: item.connectionId }
+            : artifact);
+        });
+        artifacts = mergeExternalArtifactUpdates(artifacts, resolvedUpdates);
         const communication = { ...currentProject.data.communication, lastPreparedAt: new Date().toISOString() };
         const unresolved = artifacts.some((item) => item.kind === 'gmailDraft' && item.status === 'stale');
         state = Core.updateProject(state, projectId, { data: { communication, externalArtifacts: artifacts } });
@@ -4073,8 +4140,25 @@
         const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLabel); if (slot && scheduleRowLocked(project, slot.id)) { showToast('잠긴 일정은 잠금을 해제한 뒤 세션명을 변경해주세요.', 'error'); renderSchedulePage(); return; } const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); if (slot) slot.label = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `세션명 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
       }
       if (event.target.matches('[data-zoom-slot-connection]')) {
-        const slot = project.data.slots.find((item) => item.id === event.target.dataset.zoomSlotConnection); if (slot) slot.zoomConnectionId = event.target.value || null;
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist();
+        const slot = project.data.slots.find((item) => item.id === event.target.dataset.zoomSlotConnection);
+        if (!slot) return;
+        const previousConnectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
+        slot.zoomConnectionId = event.target.value || null;
+        const nextConnectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
+        const routeChanged = previousConnectionId !== nextConnectionId;
+        const superseded = routeChanged ? supersedeArtifactsForRoute(
+          project,
+          'zoom',
+          nextConnectionId,
+          (artifact) => artifact.slotId === slot.id,
+          '일정별 Zoom 계정 변경 후 새 계정으로 다시 생성 필요'
+        ) : 0;
+        state = Core.updateProject(state, project.id, { data: project.data });
+        if (superseded && project.installedModules.includes('zoom')) state = Core.setModuleStatus(state, project.id, 'zoom', 'stale', '일정별 Zoom 계정 변경 후 새 계정으로 다시 생성 필요');
+        recordScheduleMergeImpact(project.id, null, { scheduleOnly: false });
+        await persist(routeChanged ? '일정별 Zoom 계정 변경됨' : '일정별 Zoom 계정 저장됨');
+        renderZoomPage(); renderDashboard();
+        return;
       }
       if (event.target.matches('[data-role-field], #ruleAvoidRepeat, #ruleAvoidPast, #ruleGroupPreference, #ruleUnmarkedAvailable')) {
         await persistScheduleData();

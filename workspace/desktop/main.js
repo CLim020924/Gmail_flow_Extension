@@ -12,6 +12,7 @@ const { createTransactionQueue, createKeyedOperationCoordinator } = require('./t
 const { mergeSelectedWorkspaceState, resolveExternalCommit } = require('./external-commit');
 const { GmailFlowHost } = require('./gmail-flow-host');
 const { DriveSyncGuardStore, connectionGuardKey, drivePayloadsEqual, isUsableDriveEtag } = require('./drive-sync-guard');
+const { fetchAllFormResponses } = require('./google-forms');
 const WorkspaceCore = require('../workspace-core');
 const OperationsCore = require('../operations-core');
 
@@ -710,8 +711,8 @@ function registerIpc() {
     await assertExpectedConnection(connectionId, expectedIdentity);
     const id = encodeURIComponent(formId);
     const form = await authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${id}`);
-    const responseData = await authManager.request(connectionId, `https://forms.googleapis.com/v1/forms/${id}/responses`);
-    return { form, responses: responseData.responses || [] };
+    const responseData = await fetchAllFormResponses((url) => authManager.request(connectionId, url), formId);
+    return { form, responses: responseData.responses, pagesFetched: responseData.pagesFetched };
   }));
   ipcMain.handle('zoom:create', (_event, connectionId, meeting, expectedIdentity) => connectionOperations.run(connectionId, async () => {
     await assertExpectedConnection(connectionId, expectedIdentity);
@@ -1252,6 +1253,104 @@ app.whenReady().then(async () => {
             return { passed: true };
           })()
         `);
+        const integrationResult = await mainWindow.webContents.executeJavaScript(`
+          (async () => {
+            const waitFor = async (predicate, label, timeout = 5000) => {
+              const end = Date.now() + timeout;
+              while (!await predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 25));
+              if (!await predicate()) throw new Error('timeout: ' + label);
+            };
+            const assert = (condition, label) => { if (!condition) throw new Error(label); };
+            await globalThis.flushWorkspaceEdits();
+            let integrationState = await globalThis.workspaceDesktop.loadState();
+            let integrationProject = integrationState.projects.find((project) => project.id === integrationState.activeProjectId);
+            const now = new Date().toISOString();
+            const connections = [
+              { id: 'smoke-gmail-a', type: 'gmail', label: 'Workspace Gmail A', account: 'workspace-a@example.com', status: 'connected', createdAt: now, updatedAt: now },
+              { id: 'smoke-gmail-b', type: 'gmail', label: 'Workspace Gmail B', account: 'workspace-b@example.com', status: 'connected', createdAt: now, updatedAt: now },
+              { id: 'smoke-zoom-a', type: 'zoom', label: 'Zoom A', account: 'zoom-a@example.com', status: 'connected', createdAt: now, updatedAt: now },
+              { id: 'smoke-zoom-b', type: 'zoom', label: 'Zoom B', account: 'zoom-b@example.com', status: 'connected', createdAt: now, updatedAt: now }
+            ];
+            integrationState.connections = [...integrationState.connections.filter((connection) => !connection.id.startsWith('smoke-')), ...connections];
+            integrationProject.settings.defaultConnectionIds.gmail = 'smoke-gmail-a';
+            integrationProject.settings.defaultConnectionIds.zoom = 'smoke-zoom-a';
+            integrationProject.installedModules = [...new Set([...integrationProject.installedModules, 'forms', 'zoom', 'gmailFlow'])];
+            if (!integrationProject.workflow.some((step) => step.moduleId === 'zoom')) integrationProject.workflow.push({ id: 'smoke-zoom-step', type: 'zoom', moduleId: 'zoom', name: 'Zoom 회의', order: integrationProject.workflow.length, status: 'complete', notes: '', checklist: [], updatedAt: now });
+            const smokePersonId = integrationProject.data.people[0].id;
+            const smokeSlotId = integrationProject.data.slots[0].id;
+            integrationProject.data.externalArtifacts = integrationProject.data.externalArtifacts.filter((artifact) => !String(artifact.externalId || '').startsWith('smoke-route-'));
+            integrationProject.data.externalArtifacts.push(
+              { kind: 'gmailDraft', personId: smokePersonId, connectionId: 'smoke-gmail-a', status: 'created', externalId: 'smoke-route-gmail-a', createdAt: now },
+              { kind: 'zoom', slotId: smokeSlotId, connectionId: 'smoke-zoom-a', status: 'created', externalId: 'smoke-route-zoom-a', joinUrl: 'https://zoom.example/a', createdAt: now }
+            );
+            integrationProject.data.forms.linkedForms = [
+              { formId: 'smoke-form-first', type: 'registration', title: '신청 설문', connectionId: '', connectedAt: now },
+              { formId: 'smoke-form-second', type: 'availability', title: '가능 시간 설문', connectionId: '', connectedAt: now }
+            ];
+            integrationProject.data.forms.selectedFormId = 'smoke-form-first';
+            integrationState.library.mailTemplates = integrationState.library.mailTemplates.filter((template) => template.id !== 'smoke-mail-template');
+            integrationState.library.mailTemplates.push({ id: 'smoke-mail-template', name: 'Smoke 저장 양식', subject: '저장 양식 제목', bodyHtml: '<p>저장 양식 본문</p>', savedAt: now });
+            integrationState.updatedAt = now;
+            await globalThis.workspaceDesktop.saveState(integrationState);
+            await waitFor(() => document.querySelector('#activeProjectName')?.textContent === integrationProject.name, 'integration state applied');
+
+            document.querySelector('#projectSettingsButton').click();
+            await waitFor(() => document.querySelector('#projectSettingsDialog').open, 'project settings for route change');
+            document.querySelector('[data-default-connection-type="gmail"]').value = 'smoke-gmail-b';
+            document.querySelector('[data-default-connection-type="zoom"]').value = 'smoke-zoom-b';
+            document.querySelector('#projectSettingsForm').requestSubmit();
+            await waitFor(() => !document.querySelector('#projectSettingsDialog').open, 'route settings saved');
+            await waitFor(async () => {
+              const saved = await globalThis.workspaceDesktop.loadState();
+              const project = saved.projects.find((item) => item.id === saved.activeProjectId);
+              return project.settings.defaultConnectionIds.gmail === 'smoke-gmail-b'
+                && project.data.externalArtifacts.find((artifact) => artifact.externalId === 'smoke-route-gmail-a')?.status === 'superseded'
+                && project.data.externalArtifacts.find((artifact) => artifact.externalId === 'smoke-route-zoom-a')?.status === 'superseded';
+            }, 'default route artifacts superseded');
+            const defaultRouteState = await globalThis.workspaceDesktop.loadState();
+            const defaultRouteProject = defaultRouteState.projects.find((project) => project.id === defaultRouteState.activeProjectId);
+            assert(defaultRouteProject.moduleState.gmailFlow.status === 'stale' && defaultRouteProject.moduleState.zoom.status === 'stale', 'default Gmail and Zoom changes mark modules stale');
+
+            document.querySelector('[data-workflow-open="forms"]').click();
+            await waitFor(() => document.querySelector('#page-forms').classList.contains('active'), 'forms linked list page');
+            assert(document.querySelector('#linkedFormSelect').options.length === 2 && document.querySelector('#linkedFormSelect').value === 'smoke-form-first', 'linked Forms list restores the selected form');
+            document.querySelector('#linkedFormSelect').value = 'smoke-form-second';
+            document.querySelector('#linkedFormSelect').dispatchEvent(new Event('change', { bubbles: true }));
+            await waitFor(async () => (await globalThis.workspaceDesktop.loadState()).projects.find((project) => project.id === defaultRouteState.activeProjectId).data.forms.selectedFormId === 'smoke-form-second', 'selected Form persisted');
+            assert(document.querySelector('#syncFormResponses').textContent.includes('선택한 설문') && document.querySelector('#removeLinkedForm'), 'selected Form sync and management controls');
+
+            document.querySelector('#page-forms [data-nav-link="dashboard"]').click();
+            document.querySelector('[data-workflow-open="zoom"]').click();
+            await waitFor(() => document.querySelector('#page-zoom').classList.contains('active'), 'zoom route page');
+            let zoomRouteState = await globalThis.workspaceDesktop.loadState();
+            let zoomRouteProject = zoomRouteState.projects.find((project) => project.id === zoomRouteState.activeProjectId);
+            zoomRouteProject.data.externalArtifacts.push({ kind: 'zoom', slotId: smokeSlotId, connectionId: 'smoke-zoom-b', status: 'created', externalId: 'smoke-route-zoom-b', joinUrl: 'https://zoom.example/b', createdAt: new Date().toISOString() });
+            await globalThis.workspaceDesktop.saveState(zoomRouteState);
+            await waitFor(() => document.querySelector('[data-zoom-slot-connection="' + smokeSlotId + '"]') && document.querySelector('#zoomPlanTable').textContent.includes('만들기 완료'), 'per-slot Zoom route control');
+            const zoomRouteSelect = document.querySelector('[data-zoom-slot-connection="' + smokeSlotId + '"]');
+            zoomRouteSelect.value = 'smoke-zoom-a'; zoomRouteSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            await waitFor(async () => {
+              const saved = await globalThis.workspaceDesktop.loadState();
+              const project = saved.projects.find((item) => item.id === saved.activeProjectId);
+              return project.data.slots.find((slot) => slot.id === smokeSlotId)?.zoomConnectionId === 'smoke-zoom-a'
+                && project.data.externalArtifacts.find((artifact) => artifact.externalId === 'smoke-route-zoom-b')?.status === 'superseded';
+            }, 'per-slot Zoom route artifact superseded');
+
+            document.querySelector('#page-zoom [data-nav-link="dashboard"]').click();
+            document.querySelector('[data-workflow-open="gmailFlow"]').click();
+            await waitFor(() => document.querySelector('#page-gmailFlow').classList.contains('active'), 'Gmail integration page');
+            assert(document.querySelector('#gmailFlowAccountText').textContent.includes('workspace-b@example.com'), 'Gmail account chip uses the project default Workspace connection');
+            assert(document.querySelector('#legacyGmailFlowStatus').textContent.includes('기존 Gmail Flow'), 'legacy Gmail Flow account is shown separately');
+            document.querySelector('#sharedMailTemplateSelect').value = 'smoke-mail-template'; document.querySelector('#loadSharedMailTemplate').click();
+            await waitFor(async () => (await globalThis.workspaceDesktop.loadState()).projects.find((project) => project.id === defaultRouteState.activeProjectId).data.communication.subjectTemplate === '저장 양식 제목', 'loaded mail template persisted');
+            document.querySelector('#page-gmailFlow [data-nav-link="dashboard"]').click();
+            document.querySelector('[data-workflow-open="gmailFlow"]').click();
+            await waitFor(() => document.querySelector('#mailSubjectTemplate').value === '저장 양식 제목' && document.querySelector('#mailBodyEditor').textContent.includes('저장 양식 본문'), 'loaded mail template survives navigation');
+            document.querySelector('#page-gmailFlow [data-nav-link="dashboard"]').click();
+            return { passed: true };
+          })()
+        `);
+        if (!result?.passed || !integrationResult?.passed) throw new Error('Workspace renderer smoke did not return success.');
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#toastRegion').replaceChildren(); document.querySelector('#dashboardContent').scrollIntoView({block:'start'});`);
         await new Promise((resolve) => setTimeout(resolve, 350));
         await captureSmokePreview(mainWindow.webContents, 'cmoe-workspace-workflow-smoke.png', 'Workspace workflow preview');

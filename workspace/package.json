@@ -9,7 +9,7 @@
   "scripts": {
     "postinstall": "npm --prefix vendor ci --omit=dev",
     "desktop": "electron .",
-    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node tests/drive-sync-guard.test.js && node tests/transaction-queue.test.js && node tests/gmail-flow-host.test.js && node tests/external-commit.test.js && node ../tests/cloud-sync-revision.test.js && node ../tests/oauth-optional-secret.test.js && node ../tests/background-attachment.test.js && node ../tests/oauth-login-hint.test.js && node ../tests/desktop-storage.test.js",
+    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/google-forms.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node tests/drive-sync-guard.test.js && node tests/transaction-queue.test.js && node tests/gmail-flow-host.test.js && node tests/external-commit.test.js && node ../tests/cloud-sync-revision.test.js && node ../tests/oauth-optional-secret.test.js && node ../tests/background-attachment.test.js && node ../tests/oauth-login-hint.test.js && node ../tests/desktop-storage.test.js",
     "smoke": "node scripts/run-smoke.js",
     "preflight:build": "node scripts/preflight-build.js",
     "prebuild:windows": "npm run preflight:build",

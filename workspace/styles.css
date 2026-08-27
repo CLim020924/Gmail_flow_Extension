@@ -356,6 +356,8 @@ body.standalone .module-workbench .back-link { display: none; }
 .resource-empty { color: var(--muted); font-size: 11px; }
 .account-resource { align-items: stretch; }
 .account-resource .gmail-account-chip { flex: 1; min-width: 0; }
+.legacy-gmail-flow-resource { display: flex; max-width: 220px; flex-direction: column; align-items: stretch; justify-content: center; gap: 4px; }
+.legacy-gmail-flow-resource small { color: var(--muted); font-size: 9px; line-height: 1.35; text-align: right; }
 .readiness-text { margin: 14px 0 8px; padding: 12px; border-left: 3px solid #6f879b; background: #f4f6f8; color: #44515e; line-height: 1.65; }
 .spreadsheet-table .empty-sheet-cell { color: #7a8794; font-size: 11px; }
 .spreadsheet-table .empty-sheet-header { height: 46px; padding: 0; background: #edf0f3; }

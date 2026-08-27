@@ -315,6 +315,16 @@ assert.equal(mail.assignments.length, 1);
 assert.match(mail.variables.개인일정, /진행 일정/);
 assert.doesNotMatch(mail.variables.개인일정, /취소 일정/);
 
+const routedZoomMailProject = JSON.parse(JSON.stringify(mailProject));
+routedZoomMailProject.settings = { defaultConnectionIds: { zoom: 'zoom-selected' } };
+routedZoomMailProject.data.externalArtifacts = [
+  { kind: 'zoom', slotId: 'mail-active', connectionId: 'zoom-old', status: 'created', joinUrl: 'https://zoom.example/old' },
+  { kind: 'zoom', slotId: 'mail-active', connectionId: 'zoom-selected', status: 'created', joinUrl: 'https://zoom.example/selected' }
+];
+const routedZoomMail = Ops.buildMailPackage(routedZoomMailProject).entries[0];
+assert.match(routedZoomMail.variables.개인일정, /zoom\.example\/selected/, 'mail packages use the Zoom artifact from the selected slot/default route');
+assert.doesNotMatch(routedZoomMail.variables.개인일정, /zoom\.example\/old/, 'mail packages do not leak a prior Zoom account link after rerouting');
+
 const zoomFingerprint = Ops.externalOperationFingerprint(mailProject, 'zoom');
 const renamedProject = JSON.parse(JSON.stringify(mailProject));
 renamedProject.name = '이름이 바뀐 프로젝트';
@@ -338,5 +348,58 @@ const formsConnections = [{ id: 'forms-main', type: 'forms', status: 'connected'
 const formsFingerprint = Ops.externalOperationFingerprint(formsProject, 'googleForm', formsConnections);
 formsProject.data.forms.definitions[0].title = '수정된 신청';
 assert.notEqual(Ops.externalOperationFingerprint(formsProject, 'googleForm', formsConnections), formsFingerprint, 'editing a form definition must invalidate a pending Google Forms operation');
+
+const registrationProject = { data: { columns: [], people: [], availability: {}, slots: [] } };
+const registrationPayload = {
+  form: { items: [
+    { title: '성함', questionItem: { question: { questionId: 'registration-name' } } },
+    { title: '휴대폰 번호', questionItem: { question: { questionId: 'registration-phone' } } },
+    { title: '이메일 주소', questionItem: { question: { questionId: 'registration-email' } } },
+    { title: '소속·분류', questionItem: { question: { questionId: 'registration-group' } } }
+  ] },
+  responses: [
+    { responseId: 'registration-1', answers: {
+      'registration-name': { textAnswers: { answers: [{ value: '김중복' }] } },
+      'registration-phone': { textAnswers: { answers: [{ value: '010-1111-1111' }] } },
+      'registration-email': { textAnswers: { answers: [{ value: 'duplicate@example.com' }] } }
+    } },
+    { responseId: 'registration-2', answers: {
+      'registration-name': { textAnswers: { answers: [{ value: '김중복' }] } },
+      'registration-phone': { textAnswers: { answers: [{ value: '010-2222-2222' }] } },
+      'registration-email': { textAnswers: { answers: [{ value: 'duplicate@example.com' }] } },
+      'registration-group': { textAnswers: { answers: [{ value: '최신 분류' }] } }
+    } }
+  ]
+};
+const registrationResult = Ops.applyGoogleFormResponses(registrationProject, { type: 'registration' }, registrationPayload);
+assert.equal(registrationResult.changed, 1, 'duplicate registrations in one fetched batch count as one merged person');
+assert.equal(registrationProject.data.people.length, 1, 'duplicate registrations in one fetched batch do not create duplicate roster rows');
+assert.equal(registrationProject.data.people[0].phone, '010-2222-2222', 'later duplicate registration data updates the same roster row');
+
+const availabilityForm = { items: [
+  { title: '참여자 고유번호', questionItem: { question: { questionId: 'availability-person' } } },
+  { title: '참여 가능한 시간', questionItem: { question: { questionId: 'availability-slots' } } }
+] };
+const availabilityResponse = (responseId, submittedAt, slotId) => ({
+  responseId,
+  lastSubmittedTime: submittedAt,
+  answers: {
+    'availability-person': { textAnswers: { answers: [{ value: 'availability-person-1' }] } },
+    'availability-slots': { textAnswers: { answers: [{ value: `[${slotId}] 선택 시간` }] } }
+  }
+});
+const availabilityProject = () => ({ data: {
+  columns: [], people: [{ id: 'availability-person-1', name: '반복 응답자', email: '', values: {} }],
+  slots: [{ id: 'slot-old' }, { id: 'slot-latest' }], availability: {}
+} });
+const olderAvailability = availabilityResponse('response-old', '2026-08-01T01:00:00.000Z', 'slot-old');
+const latestAvailability = availabilityResponse('response-latest', '2026-08-01T02:00:00.000Z', 'slot-latest');
+const reverseOrderedAvailabilityProject = availabilityProject();
+const availabilityResult = Ops.applyGoogleFormResponses(reverseOrderedAvailabilityProject, { type: 'availability' }, { form: availabilityForm, responses: [latestAvailability, olderAvailability] });
+assert.equal(availabilityResult.changed, 1, 'repeat availability submissions count one changed person');
+assert.deepEqual(reverseOrderedAvailabilityProject.data.availability['availability-person-1'], ['slot-latest'], 'the latest submission wins even when API response order is reversed');
+const forwardOrderedAvailabilityProject = availabilityProject();
+Ops.applyGoogleFormResponses(forwardOrderedAvailabilityProject, { type: 'availability' }, { form: availabilityForm, responses: [olderAvailability, latestAvailability] });
+assert.deepEqual(forwardOrderedAvailabilityProject.data.availability['availability-person-1'], ['slot-latest'], 'latest-submission selection is deterministic across page/order changes');
 
 console.log('operations-core tests passed');

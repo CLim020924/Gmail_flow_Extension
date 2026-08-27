@@ -249,8 +249,10 @@
           <section class="workbench-panel">
             <h2>이미 만든 Google 설문 사용</h2>
             <label class="form-field">설문 편집 주소<input id="linkedFormId" type="text" placeholder="https://docs.google.com/forms/d/.../edit"></label>
-            <div class="button-row"><button id="saveLinkedForm" class="secondary-button" type="button">이 프로젝트에 설문 연결</button><button id="syncFormResponses" class="primary-button" type="button">최신 응답 가져오기</button></div>
-            <p class="field-help">연결한 설문의 응답을 가져오면 명단이나 사람별 가능 시간에 반영됩니다.</p>
+            <div class="button-row"><button id="saveLinkedForm" class="secondary-button" type="button">이 프로젝트에 설문 연결</button></div>
+            <label class="form-field">응답을 가져올 연결된 설문<select id="linkedFormSelect" aria-label="연결된 Google 설문"><option value="">연결된 설문 없음</option></select></label>
+            <div class="button-row"><button id="syncFormResponses" class="primary-button" type="button">선택한 설문의 최신 응답 가져오기</button><button id="removeLinkedForm" class="text-button danger-text" type="button">프로젝트에서 연결 해제</button></div>
+            <p id="linkedFormStatus" class="field-help">연결한 설문의 응답을 가져오면 명단이나 사람별 가능 시간에 반영됩니다.</p>
           </section>
         </div>
         <section class="workbench-panel table-panel"><div class="section-heading"><div><h2>설문 내용 미리보기</h2><p>실제 Google 설문을 만들기 전에 질문과 선택지를 확인하세요.</p></div></div><div id="formDefinitionPreview" class="form-preview"></div></section>
@@ -275,7 +277,7 @@
         <div class="settings-layout">
           <section class="workbench-panel">
             <div class="applied-resource"><div><span class="resource-label">적용된 명단</span><strong id="mailRosterSummary">받는 사람 명단이 없습니다.</strong><div id="mailRosterPeople" class="resource-preview"></div></div><details class="action-menu"><summary class="secondary-button compact">받는 사람 불러오기 ▾</summary><div class="action-menu-panel wide"><button id="openMailRosterManager" type="button">명단 관리 창에서 가져오기</button><p class="field-help action-menu-help">아래 두 기능은 현재 프로젝트의 원본 명단 전체를 교체하며, 적용 전에 한 번 더 확인합니다.</p><label>저장한 명단<select id="gmailSharedRosterSelect" aria-label="메일용 저장 명단"><option value="">명단 선택</option></select></label><button id="loadGmailSharedRoster" type="button">선택한 명단으로 전체 교체</button><details class="nested-action"><summary>명단 직접 붙여넣기</summary><textarea id="gmailRosterPaste" rows="6" placeholder="Excel·한글 표 또는 이름/이메일/전화번호 데이터를 붙여넣으세요."></textarea><button id="applyGmailRosterPaste" type="button">붙여넣은 명단으로 전체 교체</button></details></div></details></div>
-            <div class="applied-resource account-resource"><button id="gmailFlowAccountButton" class="gmail-account-chip" type="button"><span id="gmailFlowAccountAvatar">G</span><span><strong id="gmailFlowAccountText">보내는 Google 계정 확인 중</strong><small id="gmailFlowAccountStatus">클릭하여 계정 확인</small></span></button><button id="openOriginalGmailFlow" class="secondary-button" type="button">Gmail Flow 열기</button></div>
+            <div class="applied-resource account-resource"><button id="gmailFlowAccountButton" class="gmail-account-chip" type="button"><span id="gmailFlowAccountAvatar">G</span><span><strong id="gmailFlowAccountText">Workspace Gmail 계정 확인 중</strong><small id="gmailFlowAccountStatus">클릭하여 프로젝트 기본 계정 확인</small></span></button><div class="legacy-gmail-flow-resource"><button id="openOriginalGmailFlow" class="secondary-button" type="button">기존 Gmail Flow 열기</button><small id="legacyGmailFlowStatus">기존 Gmail Flow 계정은 별도로 관리됩니다.</small></div></div>
             <label class="form-field">메일 제목<input id="mailSubjectTemplate" type="text"></label>
             <label class="form-field">메일 본문</label>
             <div class="rich-toolbar" data-editor-toolbar="mailBodyEditor" role="toolbar" aria-label="메일 서식">

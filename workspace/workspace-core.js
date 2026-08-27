@@ -564,6 +564,7 @@
         forms: {
           definitions: Array.isArray(data.forms?.definitions) ? data.forms.definitions : [],
           linkedForms: Array.isArray(data.forms?.linkedForms) ? data.forms.linkedForms : [],
+          selectedFormId: data.forms?.selectedFormId || null,
           lastResponseSyncAt: data.forms?.lastResponseSyncAt || null
         },
         communication: {
@@ -784,7 +785,7 @@
       assignments: [],
       conflicts: [],
         versions: [],
-        forms: { definitions: [], linkedForms: [], lastResponseSyncAt: null },
+        forms: { definitions: [], linkedForms: [], selectedFormId: null, lastResponseSyncAt: null },
         communication: { subjectTemplate: '[{프로젝트}] 일정 안내', bodyTemplate: '{이름}님, 아래 일정으로 안내드립니다.\n\n{개인일정}', bodyHtmlTemplate: '', mailEdits: {}, lastPreparedAt: null },
       externalArtifacts: []
     };
