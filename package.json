@@ -8,7 +8,7 @@
   "private": true,
   "scripts": {
     "desktop": "electron .",
-    "test": "node tests/oauth-login-hint.test.js && node tests/background-attachment.test.js",
+    "test": "node tests/oauth-login-hint.test.js && node tests/oauth-optional-secret.test.js && node tests/background-attachment.test.js",
     "build:windows": "electron-builder --win portable --x64",
     "build:installer": "electron-builder --win nsis --x64"
   },
@@ -31,6 +31,7 @@
       "styles.css",
       "desktop-shim.js",
       "desktop/**/*",
+      "!desktop/oauth-credentials.local.js",
       "icons/**/*"
     ],
     "win": {

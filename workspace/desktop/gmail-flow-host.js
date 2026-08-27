@@ -14,8 +14,8 @@ class GmailFlowHost {
   async initialize() {
     if (!fs.existsSync(this.pagePath)) throw new Error(`Gmail Flow 모듈 파일을 찾지 못했습니다: ${this.pagePath}`);
     const { JsonStorage } = require(path.join(this.rootPath, 'desktop', 'storage.js'));
-    const { DesktopOAuth } = require(path.join(this.rootPath, 'desktop', 'oauth.js'));
-    const { clientSecret } = require(path.join(this.rootPath, 'desktop', 'oauth-credentials.local.js'));
+    const { DesktopOAuth, loadDesktopOAuthClientSecret } = require(path.join(this.rootPath, 'desktop', 'oauth.js'));
+    const clientSecret = loadDesktopOAuthClientSecret(path.join(this.rootPath, 'desktop', 'oauth-credentials.local.js'));
     const accountRoot = this.isSmokeTest ? path.join(this.app.getPath('userData'), 'gmail-flow-desktop') : path.join(this.app.getPath('appData'), 'gmail-flow-desktop');
     await fs.promises.mkdir(accountRoot, { recursive: true });
     if (this.isSmokeTest) for (const name of ['gmail-flow-data.json', 'gmail-flow-oauth.json']) { try { await fs.promises.unlink(path.join(accountRoot, name)); } catch (error) { if (error.code !== 'ENOENT') throw error; } }

@@ -3,10 +3,10 @@ const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, Tray } = require('electron');
 const { JsonStorage } = require('./storage');
-const { DesktopOAuth } = require('./oauth');
-const { clientSecret: DESKTOP_OAUTH_CLIENT_SECRET } = require('./oauth-credentials.local');
+const { DesktopOAuth, loadDesktopOAuthClientSecret } = require('./oauth');
 
 const DESKTOP_OAUTH_CLIENT_ID = '1055778436707-kcjul780j0o7m4pu29bkpj2v6bn0e2r8.apps.googleusercontent.com';
+const DESKTOP_OAUTH_CLIENT_SECRET = loadDesktopOAuthClientSecret();
 const timers = new Map();
 const alarmListeners = new Set();
 const runtimeListeners = new Set();

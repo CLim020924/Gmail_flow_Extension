@@ -11,10 +11,16 @@ const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 
 const base64Url = (value) => Buffer.from(value).toString('base64url');
 
+function loadDesktopOAuthClientSecret(credentialsPath = require('node:path').join(__dirname, 'oauth-credentials.local.js')) {
+  if (!fs.existsSync(credentialsPath)) return '';
+  const credentials = require(credentialsPath);
+  return String(credentials?.clientSecret || '').trim();
+}
+
 class DesktopOAuth {
   constructor({ clientId, clientSecret, authFile, openExternal, protect = (value) => value, unprotect = (value) => value }) {
     this.clientId = clientId;
-    this.clientSecret = clientSecret;
+    this.clientSecret = String(clientSecret || '').trim();
     this.authFile = authFile;
     this.openExternal = openExternal;
     this.protect = protect;
@@ -181,22 +187,22 @@ class DesktopOAuth {
   async exchangeCode(code, redirectUri, verifier) {
     const body = new URLSearchParams({
       client_id: this.clientId,
-      client_secret: this.clientSecret,
       code,
       code_verifier: verifier,
       grant_type: 'authorization_code',
       redirect_uri: redirectUri
     });
+    if (this.clientSecret) body.set('client_secret', this.clientSecret);
     return this.tokenRequest(body);
   }
 
   async refreshToken() {
     const body = new URLSearchParams({
       client_id: this.clientId,
-      client_secret: this.clientSecret,
       refresh_token: this.auth.refreshToken,
       grant_type: 'refresh_token'
     });
+    if (this.clientSecret) body.set('client_secret', this.clientSecret);
     const tokens = await this.tokenRequest(body);
     this.auth.accessToken = tokens.access_token;
     this.auth.expiresAt = Date.now() + Number(tokens.expires_in || 3600) * 1000;
@@ -252,4 +258,4 @@ class DesktopOAuth {
   }
 }
 
-module.exports = { DesktopOAuth };
+module.exports = { DesktopOAuth, loadDesktopOAuthClientSecret };

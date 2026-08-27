@@ -1,17 +1,20 @@
 {
   "name": "cmoe-workspace",
-  "version": "1.1.10",
+  "version": "1.1.11",
   "description": "명단, 일정, 계정과 업무 모듈을 프로젝트 단위로 관리하는 Windows Workspace",
   "main": "desktop/main.js",
   "author": "CLim020924",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "postinstall": "npm --prefix vendor install --omit=dev",
+    "postinstall": "npm --prefix vendor ci --omit=dev",
     "desktop": "electron .",
-    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js",
+    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node ../tests/oauth-optional-secret.test.js",
     "smoke": "set CMOE_SMOKE=1&& electron . --smoke-test",
+    "preflight:build": "node scripts/preflight-build.js",
+    "prebuild:windows": "npm run preflight:build",
     "build:windows": "electron-builder --win portable --x64",
+    "prebuild:installer": "npm run preflight:build",
     "build:installer": "electron-builder --win nsis --x64"
   },
   "devDependencies": {
@@ -59,7 +62,6 @@
           "desktop/preload.js",
           "desktop/storage.js",
           "desktop/oauth.js",
-          "desktop/oauth-credentials.local.js",
           "icons/**/*"
         ]
       }
