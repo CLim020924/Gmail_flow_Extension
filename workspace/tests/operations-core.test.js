@@ -28,6 +28,171 @@ assert.equal(generated.assignments.length, 2);
 assert.equal(generated.conflicts.length, 0);
 assert.equal(Ops.validateAssignments({ assignments: generated.assignments, people, roles, slots }).length, 0);
 
+const cancelledGenerationSlots = [
+  { id: 'slot-cancelled', date: '2026-07-06', startTime: '08:30', endTime: '09:30', label: '취소 일정', status: 'cancelled', locked: true },
+  { id: 'slot-active', date: '2026-07-06', startTime: '09:30', endTime: '10:30', label: '진행 일정', status: 'draft', locked: false }
+];
+const generatedWithoutCancelled = Ops.generateSchedule({
+  people: [people[0]],
+  roles: [{ ...roles[0], minPerSession: 1, maxPerSession: 1 }],
+  slots: cancelledGenerationSlots,
+  availability: { p1: cancelledGenerationSlots.map((slot) => slot.id) },
+  existingAssignments: [{ id: 'locked-cancelled', slotId: 'slot-cancelled', personId: 'p1', roleId: 'participant', locked: true }],
+  rules: {}
+});
+assert.equal(generatedWithoutCancelled.assignments.length, 1);
+assert.equal(generatedWithoutCancelled.assignments[0].slotId, 'slot-active');
+assert(!generatedWithoutCancelled.assignments.some((assignment) => assignment.slotId === 'slot-cancelled'), 'cancelled slots must not retain or receive generated assignments');
+
+const rescheduleSlots = [
+  { id: 'slot-a', date: '2026-07-06', startTime: '09:30', endTime: '10:30', label: '오전', status: 'confirmed', locked: false },
+  { id: 'slot-b', date: '2026-07-06', startTime: '10:30', endTime: '11:30', label: '오후', status: 'confirmed', locked: false }
+];
+const rescheduleAssignments = [
+  { id: 'a1', slotId: 'slot-a', personId: 'p1', roleId: 'participant', locked: false },
+  { id: 'a2', slotId: 'slot-a', personId: 'p2', roleId: 'participant', locked: false }
+];
+const assignmentsBeforePreview = JSON.parse(JSON.stringify(rescheduleAssignments));
+const sameDependencyDiff = Ops.diffScheduleDependencies({ beforeSlots: rescheduleSlots, afterSlots: rescheduleSlots.map((slot) => ({ ...slot, locked: !slot.locked })), beforeAssignments: rescheduleAssignments, afterAssignments: rescheduleAssignments.map((assignment, index) => ({ ...assignment, id: `replacement-${index}` })) });
+assert.deepEqual(sameDependencyDiff, { changedSlotIds: [], zoomReviewSlotIds: [], affectedPersonIds: [] }, 'assignment ids and locks do not change external payloads');
+const participantDependencyDiff = Ops.diffScheduleDependencies({ beforeSlots: rescheduleSlots, afterSlots: rescheduleSlots, beforeAssignments: rescheduleAssignments, afterAssignments: [{ ...rescheduleAssignments[0], id: 'replacement-p1' }, { ...rescheduleAssignments[1], id: 'replacement-p3', personId: 'p3' }] });
+assert.deepEqual(participantDependencyDiff.changedSlotIds, ['slot-a']);
+assert.deepEqual(participantDependencyDiff.zoomReviewSlotIds, [], 'participant replacement keeps an already-used Zoom meeting');
+assert.deepEqual(new Set(participantDependencyDiff.affectedPersonIds), new Set(['p1', 'p2', 'p3']));
+const timeDependencyDiff = Ops.diffScheduleDependencies({ beforeSlots: rescheduleSlots, afterSlots: [{ ...rescheduleSlots[0], startTime: '09:45' }, rescheduleSlots[1]], beforeAssignments: rescheduleAssignments, afterAssignments: rescheduleAssignments });
+assert.deepEqual(timeDependencyDiff.zoomReviewSlotIds, ['slot-a']);
+assert.deepEqual(new Set(timeDependencyDiff.affectedPersonIds), new Set(['p1', 'p2']));
+const cancelledDependencyDiff = Ops.diffScheduleDependencies({ beforeSlots: rescheduleSlots, afterSlots: [{ ...rescheduleSlots[0], status: 'cancelled' }, rescheduleSlots[1]], beforeAssignments: rescheduleAssignments, afterAssignments: rescheduleAssignments });
+assert.deepEqual(cancelledDependencyDiff.zoomReviewSlotIds, ['slot-a']);
+const emptyDependencyDiff = Ops.diffScheduleDependencies({ beforeSlots: rescheduleSlots, afterSlots: rescheduleSlots, beforeAssignments: [rescheduleAssignments[0]], afterAssignments: [] });
+assert.deepEqual(emptyDependencyDiff.zoomReviewSlotIds, ['slot-a']);
+
+const reschedulePlan = Ops.planScheduleChange({
+  people,
+  roles,
+  slots: rescheduleSlots,
+  assignments: rescheduleAssignments,
+  availability: { p1: ['slot-b'], p2: ['slot-a'] },
+  rules: {},
+  change: { action: 'move', assignmentId: 'a1', personId: 'p1', toSlotId: 'slot-b' }
+});
+assert.equal(reschedulePlan.canApply, true);
+assert.equal(reschedulePlan.nextAssignments.find((item) => item.id === 'a1').slotId, 'slot-b');
+assert.deepEqual(reschedulePlan.impact.changedSlotIds, ['slot-a', 'slot-b']);
+assert.deepEqual(new Set(reschedulePlan.impact.affectedPersonIds), new Set(['p1', 'p2']));
+assert.deepEqual(reschedulePlan.impact.zoomReviewSlotIds, ['slot-b']);
+assert.match(reschedulePlan.warnings.find((item) => item.code === 'slotMinimum').message, /최소 인원/);
+assert(!reschedulePlan.warnings.some((item) => item.slotId === 'slot-b' && item.code === 'slotMinimum'), 'an improving pre-existing target shortage should not be reported as a new warning');
+assert.deepEqual(rescheduleAssignments, assignmentsBeforePreview, 'preview must not mutate current assignments');
+
+const lockedPlan = Ops.planScheduleChange({
+  people,
+  roles,
+  slots: [{ ...rescheduleSlots[0], locked: true }, rescheduleSlots[1]],
+  assignments: rescheduleAssignments,
+  availability: { p1: ['slot-b'] },
+  rules: {},
+  change: { action: 'move', assignmentId: 'a1', personId: 'p1', toSlotId: 'slot-b' }
+});
+assert.equal(lockedPlan.canApply, false);
+assert.equal(lockedPlan.blockers[0].code, 'lockedSource');
+
+const warningPlan = Ops.planScheduleChange({
+  people: [{ ...people[0], roleIds: [] }, people[1]],
+  roles: [{ ...roles[0], minPerSession: 1, maxPerSession: 1 }],
+  slots: rescheduleSlots,
+  assignments: [rescheduleAssignments[0], { ...rescheduleAssignments[1], slotId: 'slot-b' }],
+  availability: { p1: [], p2: ['slot-b'] },
+  rules: {},
+  change: { action: 'move', assignmentId: 'a1', personId: 'p1', toSlotId: 'slot-b' }
+});
+assert.equal(warningPlan.canApply, true, 'warnings require confirmation but do not block an explicit exception');
+assert.deepEqual(new Set(warningPlan.warnings.map((item) => item.code)), new Set(['roleEligibility', 'unavailable', 'slotMaximum', 'slotMinimum']));
+assert.equal(new Set(warningPlan.warnings.map((item) => item.message)).size, warningPlan.warnings.length, 'the preview should not repeat equivalent warnings');
+
+const cancelledPlan = Ops.planScheduleChange({
+  people,
+  roles,
+  slots: [rescheduleSlots[0], { ...rescheduleSlots[1], status: 'cancelled' }],
+  assignments: rescheduleAssignments,
+  availability: { p1: ['slot-b'] },
+  rules: {},
+  change: { action: 'move', assignmentId: 'a1', personId: 'p1', toSlotId: 'slot-b' }
+});
+assert.equal(cancelledPlan.canApply, false);
+assert(cancelledPlan.blockers.some((item) => item.code === 'cancelledTarget'));
+const cancelledOverlapSlot = { id: 'slot-cancelled-overlap', date: '2026-07-06', startTime: '10:45', endTime: '11:15', label: '취소 겹침', status: 'cancelled', locked: false };
+const cancelledOverlapAssignments = [{ id: 'a-cancelled', slotId: cancelledOverlapSlot.id, personId: 'p1', roleId: 'participant', locked: false }, rescheduleAssignments[0]];
+assert.equal(Ops.validateAssignments({ assignments: cancelledOverlapAssignments, people, roles, slots: [...rescheduleSlots, cancelledOverlapSlot] }).length, 0, 'cancelled slots do not create overlap errors');
+const cancelledOverlapPlan = Ops.planScheduleChange({ people, roles, slots: [...rescheduleSlots, cancelledOverlapSlot], assignments: cancelledOverlapAssignments, availability: { p1: ['slot-a', 'slot-b'] }, rules: {}, change: { action: 'move', assignmentId: 'a1', personId: 'p1', toSlotId: 'slot-b' } });
+assert(!cancelledOverlapPlan.warnings.some((item) => item.code === 'newConflict'), 'cancelled overlaps are not new move conflicts');
+const cancelledNoise = Ops.validateScheduleConstraints({ people: [{ ...people[0], roleIds: [] }, people[1]], roles, slots: [...rescheduleSlots, cancelledOverlapSlot], assignments: [cancelledOverlapAssignments[0]], availability: { p1: [] }, rules: {} }).filter((item) => item.personId === 'p1' && item.slotId === cancelledOverlapSlot.id);
+assert.deepEqual(cancelledNoise.map((item) => item.type), ['cancelledSlot'], 'cancelled assignments suppress irrelevant eligibility and availability noise');
+
+const duplicatePlan = Ops.planScheduleChange({
+  people,
+  roles,
+  slots: rescheduleSlots,
+  assignments: [...rescheduleAssignments, { id: 'a3', slotId: 'slot-b', personId: 'p1', roleId: 'participant', locked: false }],
+  availability: { p1: ['slot-b'] },
+  rules: {},
+  change: { action: 'move', assignmentId: 'a1', personId: 'p1', toSlotId: 'slot-b' }
+});
+assert.equal(duplicatePlan.canApply, false);
+assert(duplicatePlan.blockers.some((item) => item.code === 'duplicateTarget'));
+
+const addPlan = Ops.planScheduleChange({
+  people,
+  roles,
+  slots: rescheduleSlots,
+  assignments: rescheduleAssignments,
+  availability: { p1: ['slot-b'] },
+  rules: {},
+  change: { action: 'add', personId: 'p1', roleId: 'participant', toSlotId: 'slot-b', nextAssignmentId: 'a-new' }
+});
+assert.equal(addPlan.nextAssignments.find((item) => item.id === 'a-new').slotId, 'slot-b');
+assert.deepEqual(addPlan.impact.zoomReviewSlotIds, ['slot-b']);
+assert(addPlan.warnings.some((item) => item.code === 'personTargetMaximum'), 'adding beyond the target session count requires review');
+
+const removePlan = Ops.planScheduleChange({
+  people,
+  roles,
+  slots: rescheduleSlots,
+  assignments: [rescheduleAssignments[0]],
+  availability: { p1: ['slot-a'] },
+  rules: {},
+  targetPersonIds: ['p1'],
+  change: { action: 'remove', assignmentId: 'a1', personId: 'p1' }
+});
+assert.equal(removePlan.nextAssignments.length, 0);
+assert.deepEqual(removePlan.impact.zoomReviewSlotIds, ['slot-a']);
+assert(removePlan.warnings.some((item) => item.code === 'personTarget' && item.personId === 'p1'), 'removing the last assignment should surface the newly missed person target');
+assert(!removePlan.warnings.some((item) => item.code === 'personTarget' && item.personId === 'p2'), 'targetPersonIds should exclude out-of-scope people from preview warnings');
+assert(!removePlan.warnings.some((item) => item.slotId === 'slot-b'), 'unchanged pre-existing slot constraints should not be repeated');
+
+const constraintIssues = Ops.validateScheduleConstraints({
+  people: [{ ...people[0], roleIds: [] }, people[1]],
+  roles: [{ ...roles[0], minPerSession: 1, maxPerSession: 1 }],
+  slots: rescheduleSlots,
+  assignments: [rescheduleAssignments[0], { ...rescheduleAssignments[1], slotId: 'slot-a' }],
+  availability: { p1: [], p2: ['slot-a'] },
+  rules: {}
+});
+assert(constraintIssues.some((item) => item.type === 'roleEligibility'));
+assert(constraintIssues.some((item) => item.type === 'unavailable'));
+assert(constraintIssues.some((item) => item.type === 'slotMaximum'));
+
+const selectedRosterIssues = Ops.validateScheduleConstraints({
+  people,
+  roles,
+  slots: rescheduleSlots,
+  assignments: [rescheduleAssignments[0]],
+  availability: { p1: ['slot-a'], p2: ['slot-a'] },
+  rules: {},
+  targetPersonIds: ['p1']
+});
+assert(!selectedRosterIssues.some((item) => item.type === 'personTarget' && item.personId === 'p2'), 'people excluded from the schedule roster should not receive target-count warnings');
+
 const project = { data: { people, roles, slots, assignments: generated.assignments } };
 assert.match(Ops.scheduleToCsv(project), /날짜,시작,종료/);
 assert.match(Ops.scheduleToExcelXml(project), /<Workbook/);
@@ -38,8 +203,14 @@ const mailProject = {
     columns: roster.columns,
     people: [{ ...people[0], values: { ...people[0].values, [roster.columns.find((column) => column.name === '전화번호').id]: '010-1234-5678' } }],
     roles,
-    slots: [],
-    assignments: [],
+    slots: [
+      { id: 'mail-active', date: '2026-07-07', startTime: '09:00', endTime: '10:00', label: '진행 일정', status: 'confirmed' },
+      { id: 'mail-cancelled', date: '2026-07-08', startTime: '09:00', endTime: '10:00', label: '취소 일정', status: 'cancelled' }
+    ],
+    assignments: [
+      { id: 'mail-a1', slotId: 'mail-active', personId: 'p1', roleId: 'participant' },
+      { id: 'mail-a2', slotId: 'mail-cancelled', personId: 'p1', roleId: 'participant' }
+    ],
     externalArtifacts: [],
     communication: { subjectTemplate: '{이름} {전화번호}', bodyTemplate: '{전화번호}', bodyHtmlTemplate: '<p>{전화번호}</p>', mailEdits: {} }
   }
@@ -47,5 +218,8 @@ const mailProject = {
 const mail = Ops.buildMailPackage(mailProject).entries[0];
 assert.match(mail.subject, /010-1234-5678/);
 assert.equal(mail.variables.전화번호, '010-1234-5678');
+assert.equal(mail.assignments.length, 1);
+assert.match(mail.variables.개인일정, /진행 일정/);
+assert.doesNotMatch(mail.variables.개인일정, /취소 일정/);
 
 console.log('operations-core tests passed');

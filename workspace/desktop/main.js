@@ -6,7 +6,7 @@ const { readWorkbookSheets, exportProjectWorkbook, exportWorkItemWorkbook } = re
 const { AuthManager } = require('./auth-manager');
 const { ExtensionManager } = require('./extension-manager');
 const { mimeDraft } = require('./mail-mime');
-const { mergeWorkspaceState } = require('./state-merge');
+const { mergeWorkspaceState, overlayScheduleProjects } = require('./state-merge');
 const { GmailFlowHost } = require('./gmail-flow-host');
 const WorkspaceCore = require('../workspace-core');
 
@@ -24,6 +24,8 @@ let authManager;
 let extensionManager;
 let gmailFlowHost;
 let isQuitting = false;
+let quitReady = false;
+let quitFlushInProgress = false;
 
 function jsonBody(value) {
   return { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) };
@@ -47,6 +49,40 @@ function showWindow() {
   mainWindow.focus();
 }
 
+function flushWorkspaceWindow(targetWindow, timeoutMs = 10_000) {
+  if (!targetWindow || targetWindow.isDestroyed()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('변경사항 저장 시간이 초과되었습니다.')), timeoutMs);
+    targetWindow.webContents.executeJavaScript('globalThis.flushWorkspaceEdits?.()').then((result) => {
+      clearTimeout(timeout);
+      if (result === false) reject(new Error('변경사항을 저장하지 못했습니다.')); else resolve();
+    }, (error) => { clearTimeout(timeout); reject(error); });
+  });
+}
+
+function protectWorkspaceWindowClose(targetWindow) {
+  let closeReady = false;
+  let flushing = false;
+  targetWindow.on('close', (event) => {
+    if (isQuitting || closeReady || targetWindow.isDestroyed()) return;
+    event.preventDefault();
+    if (flushing) return;
+    flushing = true;
+    targetWindow.setEnabled(false);
+    flushWorkspaceWindow(targetWindow).then(() => {
+      if (targetWindow.isDestroyed()) return;
+      closeReady = true;
+      targetWindow.close();
+    }).catch((error) => {
+      if (targetWindow.isDestroyed()) return;
+      flushing = false;
+      targetWindow.setEnabled(true);
+      targetWindow.show(); targetWindow.focus();
+      void dialog.showMessageBox(targetWindow, { type: 'warning', title: '변경사항 저장 필요', message: '아직 저장하지 못한 변경사항이 있어 창을 닫지 않았습니다.', detail: error?.message || '잠시 후 다시 시도해주세요.' });
+    });
+  });
+}
+
 function createProgramWindow(programId, options = {}) {
   const existing = programWindows.get(programId);
   if (existing && !existing.isDestroyed()) {
@@ -56,6 +92,7 @@ function createProgramWindow(programId, options = {}) {
   const legacyGmail = (programId === 'gmailFlow' || programId === 'people') && gmailFlowHost;
   const window = new BrowserWindow({ width: legacyGmail ? 1040 : 1220, height: 820, minWidth: legacyGmail ? 760 : 900, minHeight: 640, show: false, backgroundColor: legacyGmail ? '#f5f5f3' : '#f3f4f6', title: legacyGmail ? 'Gmail Flow' : `CMOE · ${programId}`, webPreferences: { preload: legacyGmail ? gmailFlowHost.preloadPath : path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
   window.setMenuBarVisibility(false);
+  if (!legacyGmail) protectWorkspaceWindowClose(window);
   window.once('ready-to-show', () => window.show());
   window.on('closed', () => programWindows.delete(programId));
   if (programId === 'people') window.loadFile(gmailFlowHost.pagePath, { query: { mode: 'window', desktop: '1', workspace: '1', rosterManager: '1', page: 'roster', projectId: options.projectId || '' } });
@@ -114,21 +151,26 @@ function createWindow() {
     }
   });
   mainWindow.setMenuBarVisibility(false);
+  protectWorkspaceWindowClose(mainWindow);
   mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     if (level >= 2 || isSmokeTest) console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
   });
   mainWindow.once('ready-to-show', () => mainWindow.show());
-  mainWindow.on('close', () => { if (isQuitting) mainWindow = null; });
+  mainWindow.on('closed', () => { mainWindow = null; });
   mainWindow.loadFile(path.join(__dirname, '..', 'index.html'));
 }
 
 function registerIpc() {
   ipcMain.handle('workspace:load', () => storage.get('workspaceState', null));
   ipcMain.handle('workspace:save', async (_event, incoming) => {
+    const mergeHints = incoming?._mergeHints && typeof incoming._mergeHints === 'object' ? incoming._mergeHints : {};
+    const cleanIncoming = { ...(incoming || {}) };
+    delete cleanIncoming._mergeHints;
     const current = await storage.get('workspaceState', null);
     const currentRevision = Number(current?._revision || 0);
-    const baseRevision = Number(incoming?._baseRevision ?? currentRevision);
-    const next = baseRevision === currentRevision ? { ...incoming } : mergeWorkspaceState(current || {}, incoming || {});
+    const baseRevision = Number(cleanIncoming._baseRevision ?? currentRevision);
+    let next = baseRevision === currentRevision ? cleanIncoming : mergeWorkspaceState(current || {}, cleanIncoming);
+    if (baseRevision !== currentRevision && Array.isArray(mergeHints.scheduleProjects)) next = overlayScheduleProjects(next, cleanIncoming, mergeHints.scheduleProjects, current || {});
     next._revision = currentRevision + 1; next._baseRevision = next._revision;
     await storage.set('workspaceState', next);
     return { ok: true, state: next, merged: baseRevision !== currentRevision };
@@ -345,7 +387,20 @@ function registerIpc() {
 }
 
 app.setAppUserModelId('kr.co.cmoe.workspace');
-app.on('before-quit', () => { isQuitting = true; });
+app.on('before-quit', (event) => {
+  if (quitReady) { isQuitting = true; return; }
+  event.preventDefault();
+  if (quitFlushInProgress) return;
+  quitFlushInProgress = true;
+  const windows = [...new Set([mainWindow, ...programWindows.values()].filter((window) => window && !window.isDestroyed()))];
+  Promise.all(windows.map((window) => flushWorkspaceWindow(window, 15_000))).then(() => {
+    quitReady = true; isQuitting = true; app.quit();
+  }).catch((error) => {
+    quitFlushInProgress = false; isQuitting = false;
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+    void dialog.showMessageBox(parent, { type: 'warning', title: '변경사항 저장 필요', message: '아직 저장하지 못한 변경사항이 있어 앱을 종료하지 않았습니다.', detail: error?.message || '잠시 후 다시 시도해주세요.' });
+  });
+});
 app.on('activate', () => { if (!mainWindow && !programWindows.size) showWindow(); });
 app.on('second-instance', (_event, argv) => {
   const programId = requestedProgram(argv);
@@ -512,13 +567,25 @@ app.whenReady().then(async () => {
             await waitFor(() => [...document.querySelectorAll('[data-availability-person]')].every((checkbox) => checkbox.checked), 'all availability');
             document.querySelector('#generateScheduleButton').click();
             await waitFor(() => [...document.querySelectorAll('#scheduleBoard .schedule-role-cell input')].some((input) => input.value.split(',').filter(Boolean).length >= 1), 'generated assignments');
+            assert(!document.querySelector('#scheduleSetupDetails').open, 'setup folds after initial schedule generation');
             assert(document.querySelectorAll('#sessionCalendarBoard [data-session-slot]').length === 1, 'session calendar card');
             assert(document.querySelectorAll('#sessionPersonPool [data-session-person]').length === 2, 'session roster person pool');
             const unassignedPerson = [...document.querySelectorAll('#sessionPersonPool [data-session-person]')].find((chip) => ![...document.querySelectorAll('[data-session-assignment]')].some((assignment) => assignment.dataset.sessionPerson === chip.dataset.sessionPerson));
-            unassignedPerson.click(); document.querySelector('[data-session-slot]').click(); await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2, 'click person into session');
-            document.querySelector('[data-session-edit]').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'reschedule session dialog'); document.querySelector('#nameInputValue').value = '2026-07-06 10:00-11:00 변경 세션'; document.querySelector('#nameInputForm').requestSubmit(); await waitFor(() => document.querySelector('[data-session-slot]')?.textContent.includes('10:00–11:00'), 'session time changed');
+            const beforePreviewState = await globalThis.workspaceDesktop.loadState(); const beforePreviewProject = beforePreviewState.projects.find((project) => project.id === beforePreviewState.activeProjectId); const beforePreviewAssignments = JSON.stringify(beforePreviewProject.data.assignments);
+            unassignedPerson.click(); document.querySelector('[data-session-slot]').click();
+            await waitFor(() => !document.querySelector('#sessionChangePreview').hidden, 'click assignment preview');
+            assert(document.querySelectorAll('[data-session-assignment]').length === beforePreviewProject.data.assignments.length, 'preview does not mutate calendar');
+            const duringPreviewState = await globalThis.workspaceDesktop.loadState(); assert(JSON.stringify(duringPreviewState.projects.find((project) => project.id === duringPreviewState.activeProjectId).data.assignments) === beforePreviewAssignments, 'preview does not persist assignments');
+            document.querySelector('#sessionCancelChange').click(); await waitFor(() => document.querySelector('#sessionChangePreview').hidden, 'cancel assignment preview');
+            document.querySelector('[data-session-slot]').click(); await waitFor(() => !document.querySelector('#sessionChangePreview').hidden, 'reopen assignment preview'); document.querySelector('#sessionApplyChange').click();
+            await waitFor(() => document.querySelectorAll('[data-session-assignment]').length === 2, 'apply person into session');
+            document.querySelector('[data-session-edit]').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'reschedule session dialog'); document.querySelector('#nameInputValue').value = '2026-07-06 10:00-11:00 변경 세션'; document.querySelector('#nameInputForm').requestSubmit(); await waitFor(() => document.querySelector('#confirmDialog').open, 'session time impact confirm'); document.querySelector('#confirmAction').click(); await waitFor(() => document.querySelector('[data-session-slot]')?.textContent.includes('10:00–11:00'), 'session time changed');
             document.querySelector('#sessionAddEmptyTime').click(); await waitFor(() => document.querySelector('#nameInputDialog').open, 'add another session dialog'); document.querySelector('#nameInputValue').value = '2026-07-06 11:00-12:00 추가 세션'; document.querySelector('#nameInputForm').requestSubmit(); await waitFor(() => document.querySelectorAll('[data-session-slot]').length === 2, 'another session added');
-            const moveChip = document.querySelector('[data-session-assignment]'); const moveTransfer = new DataTransfer(); moveChip.dispatchEvent(new DragEvent('dragstart', { dataTransfer: moveTransfer, bubbles: true })); const targetSession = document.querySelectorAll('[data-session-slot]')[1]; targetSession.dispatchEvent(new DragEvent('drop', { dataTransfer: moveTransfer, bubbles: true, cancelable: true })); await waitFor(() => document.querySelectorAll('[data-session-slot]')[1]?.querySelector('[data-session-assignment]'), 'assignment moved between sessions');
+            const moveChip = document.querySelector('[data-session-assignment]'); const movedAssignmentId = moveChip.dataset.sessionAssignment; const moveTransfer = new DataTransfer(); moveChip.dispatchEvent(new DragEvent('dragstart', { dataTransfer: moveTransfer, bubbles: true })); const targetSession = document.querySelectorAll('[data-session-slot]')[1]; targetSession.dispatchEvent(new DragEvent('drop', { dataTransfer: moveTransfer, bubbles: true, cancelable: true }));
+            await waitFor(() => !document.querySelector('#sessionChangePreview').hidden, 'drag assignment preview'); assert(!document.querySelectorAll('[data-session-slot]')[1]?.querySelector('[data-session-assignment="' + movedAssignmentId + '"]'), 'drag preview does not move assignment'); document.querySelector('#sessionApplyChange').click();
+            await waitFor(() => document.querySelectorAll('[data-session-slot]')[1]?.querySelector('[data-session-assignment="' + movedAssignmentId + '"]'), 'assignment moved between sessions');
+            document.querySelector('#sessionUndo').click(); await waitFor(() => document.querySelectorAll('[data-session-slot]')[0]?.querySelector('[data-session-assignment="' + movedAssignmentId + '"]'), 'session undo without spreadsheet selection');
+            document.querySelector('#sessionRedo').click(); await waitFor(() => document.querySelectorAll('[data-session-slot]')[1]?.querySelector('[data-session-assignment="' + movedAssignmentId + '"]'), 'session redo without spreadsheet selection');
             const scheduleCell = document.querySelector('#scheduleBoard [data-schedule-row="0"][data-schedule-col="0"]');
             scheduleCell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, buttons: 1 }));
             const scheduleSecondCell = document.querySelector('#scheduleBoard [data-schedule-row="0"][data-schedule-col="1"]');

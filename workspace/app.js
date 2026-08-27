@@ -42,7 +42,22 @@
   let scheduleHistory = [];
   let scheduleFuture = [];
   let schedulePersistTimer = null;
+  let schedulePersistBaseline = null;
+  let schedulePersistProjectId = null;
+  let schedulePersistMessage = '일정 셀 편집 저장됨';
+  let scheduleAssignmentSequence = 0;
+  let scheduleEditGeneration = 0;
+  let persistSaving = 0;
+  let persistSequence = 0;
+  let persistIdleResolvers = [];
+  let persistDirty = false;
+  let externalOperationCount = 0;
+  let externalOperationIdleResolvers = [];
+  const pendingScheduleMergeHints = new Map();
+  let deferredWorkspaceState = null;
   let selectedSessionPersonId = null;
+  let selectedSessionAssignmentId = null;
+  let pendingSessionChange = null;
   let sheetChoiceResolver = null;
   let templateInsertionTarget = 'body';
   let templateAutocompleteState = null;
@@ -57,10 +72,11 @@
       try { return JSON.parse(localStorage.getItem('cmoeWorkspaceState') || 'null'); }
       catch (_) { return null; }
     },
-    async save(nextState) {
+    async save(nextState, { scheduleProjects = [] } = {}) {
       if (globalThis.workspaceDesktop) {
         nextState._baseRevision = Number(nextState._baseRevision ?? nextState._revision ?? 0);
-        return globalThis.workspaceDesktop.saveState(nextState);
+        const payload = scheduleProjects.length ? { ...nextState, _mergeHints: { scheduleProjects } } : nextState;
+        return globalThis.workspaceDesktop.saveState(payload);
       }
       localStorage.setItem('cmoeWorkspaceState', JSON.stringify(nextState));
       return { ok: true };
@@ -93,6 +109,10 @@
     return Core.getActiveProject(state);
   }
 
+  function projectById(projectId) {
+    return state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId) || null;
+  }
+
   function defaultConnectionId(project, type) {
     return project?.settings?.defaultConnectionIds?.[type] || (standaloneProgram ? state.connections.find((connection) => connection.type === type && connection.status === 'connected')?.id : null);
   }
@@ -107,14 +127,40 @@
     }, 2600);
   }
 
-  async function persist(message = '저장됨') {
+  async function persist(message = '저장됨', { scheduleProjectId = null, scheduleGeneration = null } = {}) {
+    persistDirty = true;
+    const scheduleOnlyProjectIds = new Set([...pendingScheduleMergeHints.entries()].filter(([, impact]) => impact.scheduleOnly !== false).map(([projectId]) => projectId)); if (scheduleProjectId) scheduleOnlyProjectIds.add(scheduleProjectId);
+    const autoCommitted = commitSchedulePersistState();
+    const scheduleProjects = [...pendingScheduleMergeHints.entries()].map(([projectId, impact]) => ({ projectId, ...impact, scheduleOnly: scheduleOnlyProjectIds.has(projectId) }));
+    pendingScheduleMergeHints.clear();
+    [scheduleProjectId, autoCommitted?.projectId].filter(Boolean).forEach((projectId) => { if (!scheduleProjects.some((item) => item.projectId === projectId)) scheduleProjects.push({ projectId, changedSlotIds: [], zoomReviewSlotIds: [], affectedPersonIds: [], scheduleOnly: scheduleOnlyProjectIds.has(projectId) }); });
+    const scheduleProjectIds = new Set(scheduleProjects.map((item) => item.projectId));
+    const guardedProjectId = scheduleProjectId || autoCommitted?.projectId || scheduleProjects[0]?.projectId || activeProject()?.id || null;
+    const guardedGeneration = scheduleGeneration ?? autoCommitted?.generation ?? scheduleEditGeneration;
+    const requestSequence = ++persistSequence;
+    persistSaving += 1;
     clearTimeout(saveTimer);
     $('#saveStatus').textContent = '저장 중…';
     try {
-      state.updatedAt = new Date().toISOString();
-      const result = await storage.save(state);
-      if (result?.state) state = Core.normalizeState(result.state);
+      const currentStamp = Number.isNaN(Date.parse(state.updatedAt)) ? 0 : Date.parse(state.updatedAt);
+      const requestUpdatedAt = new Date(Math.max(Date.now(), currentStamp + 1)).toISOString(); state.updatedAt = requestUpdatedAt;
+      const result = await storage.save(state, { scheduleProjects });
+      if (result?.state) {
+        const normalized = Core.normalizeState(result.state);
+        const localAdvanced = requestSequence !== persistSequence || state.updatedAt !== requestUpdatedAt;
+        const scheduleAdvanced = guardedProjectId && scheduleEditGeneration !== guardedGeneration;
+        if (!localAdvanced && !scheduleAdvanced) state = normalized;
+        else if (!localAdvanced && scheduleAdvanced) {
+          const localProject = state.projects.find((item) => item.id === guardedProjectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === guardedProjectId);
+          const advancedImpact = localProject && schedulePersistProjectId === guardedProjectId && schedulePersistBaseline ? scheduleMutationImpact(JSON.parse(schedulePersistBaseline), { slots: localProject.data.slots, assignments: localProject.data.assignments }) : null;
+          state = localProject ? overlayLocalScheduleState(normalized, guardedProjectId, localProject, advancedImpact) : normalized;
+        } else {
+          state._revision = Math.max(Number(state._revision || 0), Number(normalized._revision || 0));
+          state._baseRevision = Math.max(Number(state._baseRevision || 0), Number(normalized._baseRevision || normalized._revision || 0));
+        }
+      }
       if (result?.merged) showToast('다른 창의 변경사항과 안전하게 병합했습니다.');
+      if (requestSequence === persistSequence && !schedulePersistBaseline) persistDirty = false;
       if (state.preferences.storageMode === 'drive') {
         clearTimeout(driveSyncTimer);
         driveSyncTimer = setTimeout(() => void pushStateToDrive(false), 1500);
@@ -122,10 +168,33 @@
       $('#saveStatus').textContent = message;
       saveTimer = setTimeout(() => { $('#saveStatus').textContent = '저장됨'; }, 1600);
     } catch (error) {
+      scheduleProjects.forEach(({ projectId, scheduleOnly, ...impact }) => recordScheduleMergeImpact(projectId, impact, { scheduleOnly }));
       $('#saveStatus').textContent = '저장 실패';
       showToast(error.message || '저장하지 못했습니다.', 'error');
       throw error;
+    } finally {
+      persistSaving = Math.max(0, persistSaving - 1);
+      if (!persistSaving) {
+        const resolvers = persistIdleResolvers; persistIdleResolvers = [];
+        resolvers.forEach((resolve) => resolve());
+        if (!schedulePersistBaseline) applyDeferredWorkspaceState();
+      }
     }
+  }
+
+  function waitForPersistIdle() {
+    if (!persistSaving) return Promise.resolve();
+    return new Promise((resolve) => persistIdleResolvers.push(resolve));
+  }
+
+  function beginExternalOperation() { externalOperationCount += 1; }
+  function endExternalOperation() {
+    externalOperationCount = Math.max(0, externalOperationCount - 1);
+    if (!externalOperationCount) { const resolvers = externalOperationIdleResolvers; externalOperationIdleResolvers = []; resolvers.forEach((resolve) => resolve()); }
+  }
+  function waitForExternalOperations() {
+    if (!externalOperationCount) return Promise.resolve();
+    return new Promise((resolve) => externalOperationIdleResolvers.push(resolve));
   }
 
   function connectedDrive() {
@@ -981,7 +1050,7 @@
   function roleCandidates(project, role) {
     const active = project.data.people.filter((person) => person.active !== false); const filter = role.candidateFilter || 'manual';
     if (filter === 'all') return active;
-    if (filter.startsWith('column:')) { const [, columnId, encoded = ''] = filter.split(':'); const expected = decodeURIComponent(encoded); return active.filter((person) => String(person.values[columnId] || '').trim() === expected); }
+    if (filter.startsWith('column:')) { const [, columnId, encoded = ''] = filter.split(':'); let expected = encoded; try { expected = decodeURIComponent(encoded); } catch (_) {} return active.filter((person) => String(person.values[columnId] || '').trim() === expected); }
     return active.filter((person) => (person.roleIds || []).includes(role.id));
   }
 
@@ -1075,21 +1144,28 @@
   }
 
   function refreshScheduleConflicts(project) {
-    project.data.conflicts = [
+    const scheduleView = project.data.rosterViews.find((item) => item.id === project.data.scheduleRules.rosterViewId) || null;
+    const conflicts = [
       ...scheduleSheetConflicts(project),
-      ...Ops.validateAssignments({ assignments: project.data.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots }).map((message) => ({ type: 'validation', message }))
+      ...Ops.validateAssignments({ assignments: project.data.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots }).map((message) => ({ type: 'validation', message })),
+      ...Ops.validateScheduleConstraints({ assignments: project.data.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots, availability: project.data.availability, rules: project.data.scheduleRules, targetPersonIds: rosterViewIncludedIds(scheduleView, project) })
     ];
+    const unique = new Map();
+    conflicts.forEach((conflict) => unique.set([conflict.type || '', conflict.personId || '', conflict.slotId || '', conflict.roleId || '', conflict.message].join('|'), conflict));
+    project.data.conflicts = [...unique.values()];
   }
 
-  function setScheduleCellValue(project, rowIndex, columnIndex, value) {
-    const slot = ensureScheduleRow(project, rowIndex); const column = scheduleSheetColumns(project)[columnIndex]; if (!column) return;
+  function setScheduleCellValue(project, rowIndex, columnIndex, value, { lockedSlotIds = null } = {}) {
+    const column = scheduleSheetColumns(project)[columnIndex]; if (!column) return false;
     const text = String(value ?? '').trim();
+    let slot = project.data.slots[rowIndex]; if (!slot && !text) return true; if (!slot) slot = ensureScheduleRow(project, rowIndex);
+    if (lockedSlotIds?.has(slot.id) || (slot.locked && column.key !== 'locked')) return false;
     if (column.kind === 'role' && column.role) {
       project.data.assignments = project.data.assignments.filter((item) => !(item.slotId === slot.id && item.roleId === column.role.id));
       peopleTokens(text).forEach((name, position) => {
         const lowered = name.toLowerCase();
         const person = project.data.people.find((item) => [item.name, item.email, item.phone].some((candidate) => String(candidate || '').toLowerCase() === lowered));
-        project.data.assignments.push({ id: `assignment-${Date.now().toString(36)}-${rowIndex}-${position}`, slotId: slot.id, personId: person?.id || '', personName: person?.name || name, roleId: column.role.id, roleName: column.role.name, locked: Boolean(slot.locked), source: 'manual-sheet' });
+        project.data.assignments.push({ id: `assignment-${Date.now().toString(36)}-${rowIndex}-${scheduleAssignmentSequence++}-${position}`, slotId: slot.id, personId: person?.id || '', personName: person?.name || name, roleId: column.role.id, roleName: column.role.name, locked: Boolean(slot.locked), source: 'manual-sheet' });
       });
     } else if (column.kind === 'custom') {
       project.data.scheduleCustomValues[slot.id] ||= {}; project.data.scheduleCustomValues[slot.id][column.id] = String(value ?? '');
@@ -1099,27 +1175,216 @@
     } else if (column.key === 'locked') {
       slot.locked = /^(예|y|yes|true|1|잠금)$/i.test(text); project.data.assignments.filter((item) => item.slotId === slot.id).forEach((item) => { item.locked = slot.locked; });
     } else slot[column.key] = text;
+    scheduleEditGeneration += 1;
     refreshScheduleConflicts(project);
+    return true;
   }
 
   function scheduleSnapshot(project) {
-    return JSON.stringify({ slots: project.data.slots, assignments: project.data.assignments, conflicts: project.data.conflicts, scheduleSheetInitialized: project.data.scheduleSheetInitialized, scheduleSheetColumns: project.data.scheduleSheetColumns, scheduleCustomValues: project.data.scheduleCustomValues });
+    return JSON.stringify({ slots: project.data.slots, assignments: project.data.assignments, availability: project.data.availability, scheduleSheetInitialized: project.data.scheduleSheetInitialized, scheduleSheetColumns: project.data.scheduleSheetColumns, scheduleCustomValues: project.data.scheduleCustomValues });
   }
 
   function restoreScheduleSnapshot(project, snapshot) {
-    const data = JSON.parse(snapshot); project.data.slots = data.slots; project.data.assignments = data.assignments; project.data.conflicts = data.conflicts; project.data.scheduleSheetInitialized = data.scheduleSheetInitialized; project.data.scheduleSheetColumns = data.scheduleSheetColumns; project.data.scheduleCustomValues = data.scheduleCustomValues;
+    const data = JSON.parse(snapshot);
+    project.data.slots = Array.isArray(data.slots) ? data.slots : [];
+    project.data.assignments = Array.isArray(data.assignments) ? data.assignments : [];
+    project.data.availability = data.availability && typeof data.availability === 'object' ? data.availability : project.data.availability;
+    project.data.scheduleSheetInitialized = data.scheduleSheetInitialized;
+    project.data.scheduleSheetColumns = data.scheduleSheetColumns;
+    project.data.scheduleCustomValues = data.scheduleCustomValues || {};
+    refreshScheduleConflicts(project);
+  }
+
+  function scheduleArtifactKey(item, index = 0) {
+    if (item?.externalId) return `${item.kind || 'artifact'}:external:${item.externalId}`;
+    return `${item?.kind || 'artifact'}:${item?.slotId || item?.personId || ''}:${item?.createdAt || index}`;
+  }
+
+  function mergeScheduleArtifacts(remoteArtifacts = [], localArtifacts = [], impact = null) {
+    const merged = new Map(remoteArtifacts.map((item, index) => [scheduleArtifactKey(item, index), item]));
+    const zoomSlots = new Set([...(impact?.changedSlotIds || []), ...(impact?.zoomReviewSlotIds || [])]);
+    const mailPeople = new Set(impact?.affectedPersonIds || []);
+    localArtifacts.forEach((item, index) => {
+      const key = scheduleArtifactKey(item, index);
+      const remote = merged.get(key) || {};
+      const affected = (item.kind === 'zoom' && zoomSlots.has(item.slotId)) || (item.kind === 'gmailDraft' && mailPeople.has(item.personId));
+      const next = affected ? { ...remote, ...item } : { ...item, ...remote };
+      if (remote.status === 'superseded' || item.status === 'superseded') {
+        next.status = 'superseded';
+        next.replacedAt = remote.replacedAt || item.replacedAt;
+      }
+      merged.set(key, next);
+    });
+    return [...merged.values()].map((item) => {
+      if (item.status === 'superseded') return item;
+      if ((item.kind === 'zoom' && zoomSlots.has(item.slotId)) || (item.kind === 'gmailDraft' && mailPeople.has(item.personId))) return { ...item, status: 'stale' };
+      return item;
+    });
+  }
+
+  function mergeExternalArtifactUpdates(currentArtifacts = [], updates = []) {
+    const merged = new Map(currentArtifacts.map((item, index) => [scheduleArtifactKey(item, index), item]));
+    updates.forEach((item, index) => {
+      const key = scheduleArtifactKey(item, index); const current = merged.get(key) || {}; const next = { ...current, ...item };
+      if (current.status === 'superseded') { next.status = 'superseded'; next.replacedAt = current.replacedAt || item.replacedAt; }
+      merged.set(key, next);
+    });
+    return [...merged.values()];
+  }
+
+  function overlayLocalScheduleState(baseState, projectId, localProject, impact = null) {
+    const scheduleKeys = ['roles', 'slots', 'availability', 'assignments', 'conflicts', 'scheduleRules', 'scheduleSheetInitialized', 'scheduleSheetColumns', 'scheduleCustomValues', 'versions'];
+    const baseProject = baseState.projects.find((item) => item.id === projectId) || Object.values(baseState.quickWorkspaces || {}).find((item) => item.id === projectId);
+    if (!baseProject || !localProject) return baseState;
+    const data = Object.fromEntries(scheduleKeys.map((key) => [key, localProject.data[key]]));
+    data.externalArtifacts = mergeScheduleArtifacts(baseProject.data.externalArtifacts, localProject.data.externalArtifacts, impact);
+    const moduleState = { ...baseProject.moduleState, schedule: localProject.moduleState.schedule };
+    ['zoom', 'gmailFlow'].forEach((moduleId) => { if (localProject.moduleState[moduleId]?.status === 'stale') moduleState[moduleId] = localProject.moduleState[moduleId]; });
+    const workflow = baseProject.workflow.map((step) => {
+      const localStep = localProject.workflow.find((item) => item.id === step.id);
+      if (!localStep) return step;
+      return step.moduleId === 'schedule' || (['zoom', 'gmailFlow'].includes(step.moduleId) && localStep.status === 'stale') ? localStep : step;
+    });
+    return Core.updateProject(baseState, projectId, { data, moduleState, workflow });
+  }
+
+  function resetScheduleHistoryForIncomingState(nextState) {
+    const project = activeProject();
+    if (!project) return;
+    const incomingProject = nextState.projects.find((item) => item.id === project.id) || Object.values(nextState.quickWorkspaces || {}).find((item) => item.id === project.id);
+    if (!incomingProject || scheduleSnapshot(project) === scheduleSnapshot(incomingProject)) return;
+    clearScheduleHistory();
+  }
+
+  function applyIncomingWorkspaceState(nextState) {
+    resetScheduleHistoryForIncomingState(nextState);
+    state = nextState;
+    if (mailEditorDirty && currentPage === 'gmailFlow') {
+      showToast('다른 창의 변경사항을 받았습니다. 작성 중인 메일은 그대로 보호됩니다.');
+      renderGmailPage();
+      renderConnectionsPage();
+    } else renderAll();
+  }
+
+  function applyDeferredWorkspaceState() {
+    if (!deferredWorkspaceState || persistSaving || schedulePersistBaseline) return;
+    const nextState = deferredWorkspaceState;
+    deferredWorkspaceState = null;
+    const nextRevision = Number(nextState._revision || 0);
+    const currentRevision = Number(state._revision || 0);
+    const newer = nextRevision > currentRevision || (nextRevision === currentRevision && String(nextState.updatedAt || '') > String(state.updatedAt || ''));
+    if (newer) applyIncomingWorkspaceState(nextState);
+  }
+
+  function scheduleMutationImpact(before = {}, after = {}) {
+    return Ops.diffScheduleDependencies({
+      beforeSlots: Array.isArray(before.slots) ? before.slots : [],
+      beforeAssignments: Array.isArray(before.assignments) ? before.assignments : [],
+      afterSlots: Array.isArray(after.slots) ? after.slots : [],
+      afterAssignments: Array.isArray(after.assignments) ? after.assignments : []
+    });
+  }
+
+  function recordScheduleMergeImpact(projectId, impact = null, { scheduleOnly = true } = {}) {
+    if (!projectId) return;
+    const current = pendingScheduleMergeHints.get(projectId) || { changedSlotIds: [], zoomReviewSlotIds: [], affectedPersonIds: [] };
+    pendingScheduleMergeHints.set(projectId, {
+      changedSlotIds: [...new Set([...current.changedSlotIds, ...(impact?.changedSlotIds || [])])],
+      zoomReviewSlotIds: [...new Set([...current.zoomReviewSlotIds, ...(impact?.zoomReviewSlotIds || [])])],
+      affectedPersonIds: [...new Set([...current.affectedPersonIds, ...(impact?.affectedPersonIds || [])])],
+      scheduleOnly: current.scheduleOnly === false || scheduleOnly === false ? false : true
+    });
+  }
+
+  function applyScheduleMutationImpact(project, beforeSnapshot) {
+    if (!beforeSnapshot) return null;
+    const before = typeof beforeSnapshot === 'string' ? JSON.parse(beforeSnapshot) : beforeSnapshot;
+    const impact = scheduleMutationImpact(before, { slots: project.data.slots, assignments: project.data.assignments });
+    markScheduleChangeStale(project, impact, { markConfirmedSlots: false });
+    return impact;
+  }
+
+  function syncScheduleProjectState(project, summary, impact = null) {
+    state = Core.updateProject(state, project.id, { data: project.data });
+    state = Core.setModuleStatus(state, project.id, 'schedule', project.data.conflicts.length ? 'needsReview' : 'inProgress', summary || `일정 ${project.data.slots.length}개 · 확인할 문제 ${project.data.conflicts.length}건`);
+    if (impact && project.installedModules.includes('zoom') && impact.zoomReviewSlotIds?.length) state = Core.setModuleStatus(state, project.id, 'zoom', 'stale', '일정 변경 후 Zoom 확인 필요');
+    if (impact && project.installedModules.includes('gmailFlow') && impact.affectedPersonIds?.length) state = Core.setModuleStatus(state, project.id, 'gmailFlow', 'stale', '일정 변경 후 안내 메일 확인 필요');
+    recordScheduleMergeImpact(project.id, impact);
   }
 
   function pushScheduleHistory(project) {
-    scheduleHistory.push(scheduleSnapshot(project)); if (scheduleHistory.length > 80) scheduleHistory.shift(); scheduleFuture = [];
+    pushScheduleHistorySnapshot(scheduleSnapshot(project));
   }
 
-  function queueSchedulePersist(project, message = '일정 셀 편집 저장됨') {
-    clearTimeout(schedulePersistTimer); schedulePersistTimer = setTimeout(async () => {
-      state = Core.updateProject(state, project.id, { data: project.data });
-      state = Core.setModuleStatus(state, project.id, 'schedule', project.data.conflicts.length ? 'needsReview' : 'inProgress', `직접 편집 · 문제 ${project.data.conflicts.length}건`);
-      await persist(message); renderDashboard();
-    }, 450);
+  function syncScheduleHistoryControls() {
+    ['scheduleUndo', 'sessionUndo'].forEach((id) => { if ($(`#${id}`)) $(`#${id}`).disabled = !scheduleHistory.length; });
+    ['scheduleRedo', 'sessionRedo'].forEach((id) => { if ($(`#${id}`)) $(`#${id}`).disabled = !scheduleFuture.length; });
+  }
+
+  function pushScheduleHistorySnapshot(snapshot) {
+    scheduleHistory.push(snapshot); if (scheduleHistory.length > 80) scheduleHistory.shift(); scheduleFuture = []; syncScheduleHistoryControls();
+  }
+
+  function clearScheduleHistory() {
+    scheduleHistory = [];
+    scheduleFuture = [];
+    pendingSessionChange = null;
+    const formula = $('#scheduleCellValue');
+    if (formula) ['scheduleEditing', 'scheduleImpactBefore', 'scheduleEditRow', 'scheduleEditCol', 'scheduleEditValue'].forEach((key) => delete formula.dataset[key]);
+    syncScheduleHistoryControls();
+  }
+
+  function takeSchedulePersistBaseline(project, fallback = null) {
+    if (!schedulePersistBaseline || schedulePersistProjectId !== project?.id) return fallback;
+    const baseline = schedulePersistBaseline;
+    clearTimeout(schedulePersistTimer); schedulePersistTimer = null; schedulePersistBaseline = null; schedulePersistProjectId = null;
+    return baseline;
+  }
+
+  function commitSchedulePersistState() {
+    if (!schedulePersistBaseline || !schedulePersistProjectId) return null;
+    const projectId = schedulePersistProjectId; const baseline = schedulePersistBaseline; const message = schedulePersistMessage;
+    clearTimeout(schedulePersistTimer); schedulePersistTimer = null; schedulePersistBaseline = null; schedulePersistProjectId = null;
+    const project = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId);
+    if (!project) return null;
+    const impact = applyScheduleMutationImpact(project, baseline);
+    syncScheduleProjectState(project, `직접 편집 · 문제 ${project.data.conflicts.length}건`, impact);
+    return { message, projectId, generation: scheduleEditGeneration };
+  }
+
+  async function flushSchedulePersist() {
+    const committed = commitSchedulePersistState(); if (!committed) return;
+    await persist(committed.message, { scheduleProjectId: committed.projectId, scheduleGeneration: committed.generation });
+    if (currentPage === 'schedule' && activeProject()?.id === committed.projectId) { const project = activeProject(); renderAvailability(project); renderSessionPlanner(project); syncScheduleHistoryControls(); renderDashboard(); } else renderDashboard();
+  }
+
+  async function moveScheduleHistory(project, undo = true) {
+    const from = undo ? scheduleHistory : scheduleFuture; const to = undo ? scheduleFuture : scheduleHistory;
+    if (!project || !from.length) return;
+    const dependencyBaseline = takeSchedulePersistBaseline(project, null);
+    const before = JSON.parse(scheduleSnapshot(project));
+    to.push(scheduleSnapshot(project)); restoreScheduleSnapshot(project, from.pop());
+    const impact = applyScheduleMutationImpact(project, dependencyBaseline || before);
+    pendingSessionChange = null;
+    syncScheduleProjectState(project, undo ? '일정 변경 실행 취소' : '일정 변경 다시 실행', impact);
+    syncScheduleHistoryControls(); await persist(undo ? '실행 취소됨' : '다시 실행됨'); renderSchedulePage();
+  }
+
+  function queueSchedulePersist(project, message = '일정 셀 편집 저장됨', beforeSnapshot = null) {
+    if (schedulePersistProjectId && schedulePersistProjectId !== project.id) void flushSchedulePersist();
+    if (!schedulePersistBaseline) schedulePersistBaseline = beforeSnapshot || scheduleSnapshot(project);
+    persistDirty = true;
+    schedulePersistProjectId = project.id; schedulePersistMessage = message;
+    clearTimeout(schedulePersistTimer); schedulePersistTimer = setTimeout(() => void flushSchedulePersist(), 450);
+  }
+
+  function syncScheduleRowLockControls(project, rowIndex) {
+    const locked = Boolean(project.data.slots[rowIndex]?.locked);
+    $$(`[data-schedule-row="${rowIndex}"][data-schedule-col]`, $('#scheduleBoard')).forEach((cell) => {
+      const column = scheduleSheetColumns(project)[Number(cell.dataset.scheduleCol)]; const input = cell.querySelector('[data-schedule-input]');
+      if (input) input.disabled = Boolean(locked && column?.key !== 'locked');
+    });
+    if (scheduleSelection?.focus.row === rowIndex) updateScheduleSelection(scheduleSelection.anchor, scheduleSelection.focus, scheduleSelection.mode);
   }
 
   function updateScheduleSelection(anchor, focus = anchor, mode = scheduleSelection?.mode || 'cells') {
@@ -1134,7 +1399,7 @@
     $('#scheduleBoard [data-select-schedule-all]')?.classList.toggle('sheet-row-selected', mode === 'all');
     const address = (row, col) => `${spreadsheetColumnName(col)}${row + 2}`; const from = address(minRow, minCol); const to = address(maxRow, maxCol);
     $('#scheduleSelectionStatus').textContent = from === to ? from : `${from}:${to}`; $('#scheduleCellAddress').textContent = address(focus.row, focus.col);
-    const column = scheduleSheetColumns(project)[focus.col]; $('#scheduleCellValue').disabled = !column; $('#scheduleCellValue').value = focus.row === -1 ? column?.name || '' : scheduleCellValue(project, focus.row, focus.col);
+    const column = scheduleSheetColumns(project)[focus.col]; const locked = focus.row >= 0 && project.data.slots[focus.row]?.locked && column?.key !== 'locked'; $('#scheduleCellValue').disabled = !column || locked; $('#scheduleCellValue').title = locked ? '잠금 셀을 먼저 해제하면 편집할 수 있습니다.' : ''; $('#scheduleCellValue').value = focus.row === -1 ? column?.name || '' : scheduleCellValue(project, focus.row, focus.col);
   }
 
   function selectedScheduleMatrix(project) {
@@ -1147,7 +1412,9 @@
     const project = activeProject(); if (!project) return; const visibleRows = Math.max(project.data.slots.length + 2, 5);
     const point = { row: Math.max(0, Math.min(visibleRows - 1, row)), col: Math.max(0, Math.min(scheduleSheetColumns(project).length - 1, col)) };
     updateScheduleSelection(extend && scheduleSelection ? scheduleSelection.anchor : point, point);
-    const input = $(`[data-schedule-row="${point.row}"][data-schedule-col="${point.col}"] input`, $('#scheduleBoard')); input?.focus(); input?.select();
+    const cell = $(`[data-schedule-row="${point.row}"][data-schedule-col="${point.col}"]`, $('#scheduleBoard')); const input = cell?.querySelector('input');
+    if (input && !input.disabled) { input.focus(); input.select(); }
+    else if (cell) { document.activeElement?.blur(); cell.tabIndex = -1; cell.focus({ preventScroll: true }); }
   }
 
   function renderScheduleBoard(project) {
@@ -1162,7 +1429,7 @@
       const slot = sortedSlots[rowIndex]; const tr = element('tr'); if (slot) tr.dataset.scheduleSlot = slot.id; const number = element('th', 'sheet-row-number', String(rowIndex + 2)); number.dataset.selectScheduleRow = String(rowIndex); tr.append(number);
       columns.forEach((column, columnIndex) => {
         const td = element('td', column.role ? 'schedule-role-cell' : ''); td.dataset.scheduleRow = String(rowIndex); td.dataset.scheduleCol = String(columnIndex);
-        const input = element('input'); input.type = 'text'; input.value = scheduleCellValue(project, rowIndex, columnIndex); input.dataset.scheduleInput = 'true'; input.autocomplete = 'off';
+        const input = element('input'); input.type = 'text'; input.value = scheduleCellValue(project, rowIndex, columnIndex); input.dataset.scheduleInput = 'true'; input.autocomplete = 'off'; input.disabled = Boolean(slot?.locked && column.key !== 'locked');
         if (column.role) { input.setAttribute('list', `schedule-role-${column.role.id}`); const unknown = peopleTokens(input.value).some((name) => !project.data.people.some((person) => [person.name, person.email, person.phone].includes(name))); td.classList.toggle('schedule-invalid', unknown); }
         td.append(input); tr.append(td);
       });
@@ -1178,7 +1445,7 @@
     $('#scheduleBoardSummary').textContent = conflicts.length ? `현재 일정표에서 확인할 문제가 ${conflicts.length}건 있습니다.` : '현재 일정표에서 확인할 문제가 없습니다.';
     if (scheduleSelection && columns.length) updateScheduleSelection({ row: Math.min(scheduleSelection.anchor.row, visibleRows - 1), col: Math.min(scheduleSelection.anchor.col, columns.length - 1) }, { row: Math.min(scheduleSelection.focus.row, visibleRows - 1), col: Math.min(scheduleSelection.focus.col, columns.length - 1) }, scheduleSelection.mode);
     else { scheduleSelection = null; $('#scheduleSelectionStatus').textContent = '선택 없음'; $('#scheduleCellAddress').textContent = '—'; $('#scheduleCellValue').value = ''; $('#scheduleCellValue').disabled = true; }
-    $('#scheduleUndo').disabled = !scheduleHistory.length; $('#scheduleRedo').disabled = !scheduleFuture.length;
+    syncScheduleHistoryControls();
     renderSessionPlanner(project);
   }
 
@@ -1187,7 +1454,130 @@
     const view = project.data.rosterViews.find((item) => item.id === viewId) || null;
     const ids = new Set(rosterViewIncludedIds(view, project));
     const group = $('#sessionGroupFilter')?.value || '';
-    return project.data.people.filter((person) => person.active !== false && ids.has(person.id) && (!group || person.group === group));
+    const search = ($('#sessionPersonSearch')?.value || '').trim().toLowerCase();
+    return project.data.people.filter((person) => {
+      if (person.active === false || !ids.has(person.id) || (group && person.group !== group)) return false;
+      if (!search) return true;
+      return [person.name, person.email, person.phone, person.group].some((value) => String(value || '').toLowerCase().includes(search));
+    });
+  }
+
+  function sessionSlotLabel(slot) {
+    if (!slot) return '일정 없음';
+    return `${slot.date || '날짜 미정'} ${slot.startTime || '--:--'}–${slot.endTime || '--:--'}${slot.label ? ` · ${slot.label}` : ''}`;
+  }
+
+  function sessionChangeRole(project, personId, assignmentId = '') {
+    const assignment = assignmentId && assignmentId !== 'new' ? project.data.assignments.find((item) => item.id === assignmentId) : null;
+    if (assignment) return assignment.roleId;
+    const selectedRole = $('#sessionRoleSelect')?.value;
+    return project.data.roles.find((item) => item.id === selectedRole && item.active)?.id
+      || project.data.roles.find((item) => item.active && roleCandidates(project, item).some((candidate) => candidate.id === personId))?.id
+      || project.data.roles.find((item) => item.active)?.id
+      || '';
+  }
+
+  function makeSessionChangePlan(project, change, extraSlots = []) {
+    const viewId = $('#sessionRosterView')?.value || project.data.scheduleRules.rosterViewId || '';
+    const scheduleView = project.data.rosterViews.find((item) => item.id === viewId) || null;
+    return Ops.planScheduleChange({
+      people: project.data.people,
+      roles: project.data.roles,
+      slots: [...project.data.slots, ...extraSlots],
+      assignments: project.data.assignments,
+      availability: project.data.availability,
+      rules: project.data.scheduleRules,
+      targetPersonIds: rosterViewIncludedIds(scheduleView, project),
+      change
+    });
+  }
+
+  function scheduleChangeSignature(project) {
+    return JSON.stringify({
+      slots: project.data.slots.map((slot) => [slot.id, slot.date, slot.startTime, slot.endTime, slot.label, slot.status, Boolean(slot.locked)]),
+      assignments: project.data.assignments.map((assignment) => [assignment.id, assignment.slotId, assignment.personId, assignment.roleId, Boolean(assignment.locked)]),
+      people: project.data.people.map((person) => [person.id, person.name, person.active !== false, [...(person.roleIds || [])].sort(), Object.entries(person.values || {}).sort(([a], [b]) => a.localeCompare(b))]),
+      roles: project.data.roles.map((role) => [role.id, role.name, role.active !== false, role.candidateFilter || 'manual', Number(role.minPerSession) || 0, Number(role.maxPerSession) || 0, Number(role.targetSessions) || 0]),
+      availability: Object.entries(project.data.availability || {}).sort(([a], [b]) => a.localeCompare(b)).map(([personId, slotIds]) => [personId, Array.isArray(slotIds) ? [...slotIds].sort() : slotIds]),
+      unmarkedMeansAvailable: Boolean(project.data.scheduleRules.unmarkedMeansAvailable)
+    });
+  }
+
+  function renderSessionChangePreview(project) {
+    const panel = $('#sessionChangePreview');
+    if (!pendingSessionChange) { panel.hidden = true; return; }
+    const { plan } = pendingSessionChange;
+    const person = project.data.people.find((item) => item.id === plan.impact.personId);
+    const role = project.data.roles.find((item) => item.id === plan.impact.roleId);
+    const fromSlot = project.data.slots.find((item) => item.id === plan.impact.fromSlotId);
+    const toSlot = project.data.slots.find((item) => item.id === plan.impact.toSlotId) || pendingSessionChange.newSlot;
+    const actionLabel = plan.action === 'remove' ? '일정에서 제외' : plan.action === 'add' ? '새 일정에 추가' : '일정 이동';
+    $('#sessionChangeTitle').textContent = `${person?.name || '선택한 고객'} · ${role?.name || '역할 미정'} · ${actionLabel}`;
+    $('#sessionChangeSummary').textContent = plan.action === 'remove'
+      ? sessionSlotLabel(fromSlot)
+      : plan.action === 'add'
+        ? sessionSlotLabel(toSlot)
+        : `${sessionSlotLabel(fromSlot)} → ${sessionSlotLabel(toSlot)}`;
+    const warningList = $('#sessionChangeWarnings'); warningList.replaceChildren();
+    const affectedPeers = Math.max(0, plan.impact.affectedPersonIds.length - 1);
+    const impact = element('span', 'session-impact-chip', affectedPeers ? `함께 확인할 고객 ${affectedPeers}명` : '다른 고객 영향 없음'); warningList.append(impact);
+    const zoomCount = project.installedModules.includes('zoom') ? plan.impact.zoomReviewSlotIds.length : 0;
+    const mailCount = project.installedModules.includes('gmailFlow') ? plan.impact.affectedPersonIds.length : 0;
+    if (zoomCount || mailCount) {
+      const followUps = [];
+      if (zoomCount) followUps.push(`Zoom ${zoomCount}건`);
+      if (mailCount) followUps.push(`안내 메일 ${mailCount}명`);
+      warningList.append(element('span', 'session-impact-chip warning', `후속 확인 · ${followUps.join(' · ')}`));
+    }
+    [...plan.blockers.map((item) => ({ ...item, blocking: true })), ...plan.warnings].forEach((item) => warningList.append(element('span', `session-impact-chip ${item.blocking ? 'blocking' : 'warning'}`, item.message)));
+    if (!plan.blockers.length && !plan.warnings.length) warningList.append(element('span', 'session-impact-chip ready', '새 충돌 없음'));
+    $('#sessionApplyChange').disabled = !plan.canApply;
+    $('#sessionApplyChange').textContent = plan.action === 'remove' ? '일정에서 제외' : plan.action === 'add' ? '일정 추가' : '변경 적용';
+    panel.hidden = false;
+  }
+
+  function previewSessionChange(project, { personId, assignmentId = '', toSlotId = '', action = '', newSlot = null }) {
+    const actualAction = action || (assignmentId && assignmentId !== 'new' ? 'move' : 'add');
+    const nextAssignmentId = actualAction === 'add' ? `assignment-${Date.now().toString(36)}` : '';
+    const change = { action: actualAction, assignmentId: assignmentId === 'new' ? '' : assignmentId, personId, toSlotId, roleId: sessionChangeRole(project, personId, assignmentId), nextAssignmentId };
+    pendingSessionChange = { change, newSlot, baseSignature: scheduleChangeSignature(project), plan: makeSessionChangePlan(project, change, newSlot ? [newSlot] : []) };
+    renderSessionPlanner(project);
+  }
+
+  function markScheduleChangeStale(project, impact, { markConfirmedSlots = true } = {}) {
+    if (markConfirmedSlots) project.data.slots.filter((slot) => impact.changedSlotIds.includes(slot.id) && slot.status === 'confirmed').forEach((slot) => { slot.status = 'changed'; });
+    const zoomSlots = impact.zoomReviewSlotIds || impact.changedSlotIds;
+    project.data.externalArtifacts.forEach((artifact) => {
+      if (artifact.kind === 'zoom' && artifact.status !== 'superseded' && zoomSlots.includes(artifact.slotId)) artifact.status = 'stale';
+      if (artifact.kind === 'gmailDraft' && impact.affectedPersonIds.includes(artifact.personId)) artifact.status = 'stale';
+    });
+  }
+
+  async function applyPendingSessionChange() {
+    await flushSchedulePersist();
+    const project = activeProject(); const pending = pendingSessionChange;
+    if (!project || !pending) return;
+    const currentSignature = scheduleChangeSignature(project);
+    const refreshedPlan = makeSessionChangePlan(project, pending.change, pending.newSlot ? [pending.newSlot] : []);
+    if (currentSignature !== pending.baseSignature) {
+      pending.plan = refreshedPlan; pending.baseSignature = currentSignature;
+      renderSessionPlanner(project); showToast('다른 변경사항을 반영해 미리보기를 새로 계산했습니다. 다시 확인해주세요.'); return;
+    }
+    pending.plan = refreshedPlan;
+    if (!pending.plan.canApply) return;
+    pushScheduleHistory(project);
+    if (pending.newSlot && !project.data.slots.some((slot) => slot.id === pending.newSlot.id)) project.data.slots.push(pending.newSlot);
+    project.data.assignments = pending.plan.nextAssignments;
+    markScheduleChangeStale(project, pending.plan.impact);
+    refreshScheduleConflicts(project);
+    syncScheduleProjectState(project, `${project.data.slots.length}개 일정 · 변경 내용 확인`, pending.plan.impact);
+    const action = pending.plan.action;
+    selectedSessionPersonId = pending.plan.impact.personId;
+    selectedSessionAssignmentId = action === 'remove' ? null : pending.change.nextAssignmentId || pending.plan.impact.assignmentId;
+    pendingSessionChange = null;
+    await persist(action === 'remove' ? '고객 일정 제외됨' : action === 'add' ? '고객 일정 추가됨' : '고객 일정 변경됨');
+    renderSchedulePage();
+    showToast(action === 'remove' ? '고객을 일정에서 제외했습니다.' : action === 'add' ? '고객 일정을 추가했습니다.' : '고객 일정을 변경했습니다.', 'success');
   }
 
   function renderSessionPlanner(project) {
@@ -1201,40 +1591,66 @@
     const dateSelect = $('#sessionDateFilter'); const previousDate = dateSelect.value; dateSelect.replaceChildren(element('option', '', '전체 날짜'));
     [...new Set(project.data.slots.map((slot) => slot.date).filter(Boolean))].sort().forEach((date) => { const option = element('option', '', formatDate(date)); option.value = date; dateSelect.append(option); }); dateSelect.value = [...dateSelect.options].some((option) => option.value === previousDate) ? previousDate : '';
     const people = sessionRosterPeople(project); const pool = $('#sessionPersonPool');
-    pool.replaceChildren(...(people.length ? people.map((person) => { const chip = element('button', `session-person-chip${selectedSessionPersonId === person.id ? ' selected' : ''}`); chip.type = 'button'; chip.draggable = true; chip.dataset.sessionPerson = person.id; chip.title = '끌어서 세션에 배정'; chip.append(element('strong', '', person.name || '이름 없음'), element('small', '', person.group || person.email || '')); return chip; }) : [element('div', 'list-empty', '선택한 단계 명단에 포함된 사람이 없습니다.')]));
+    const selectedPerson = project.data.people.find((person) => person.id === selectedSessionPersonId && person.active !== false) || null;
+    const selectedAssignments = selectedPerson ? project.data.assignments.filter((assignment) => assignment.personId === selectedPerson.id).sort((a, b) => Ops.slotKey(project.data.slots.find((slot) => slot.id === a.slotId) || {}).localeCompare(Ops.slotKey(project.data.slots.find((slot) => slot.id === b.slotId) || {}))) : [];
+    if (!selectedPerson) { selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null; }
+    else if (selectedSessionAssignmentId !== 'new' && !selectedAssignments.some((assignment) => assignment.id === selectedSessionAssignmentId)) selectedSessionAssignmentId = selectedAssignments.length === 0 ? 'new' : selectedAssignments.length === 1 ? selectedAssignments[0].id : null;
+    pool.replaceChildren(...(people.length ? people.map((person) => {
+      const count = project.data.assignments.filter((assignment) => assignment.personId === person.id).length;
+      const chip = element('button', `session-person-chip${selectedSessionPersonId === person.id ? ' selected' : ''}`); chip.type = 'button'; chip.draggable = true; chip.dataset.sessionPerson = person.id; chip.title = count ? '고객을 선택해 현재 일정을 변경' : '고객을 선택해 새 일정에 배정';
+      chip.append(element('strong', '', person.name || '이름 없음'), element('small', '', `${person.group || person.email || '분류 없음'} · ${count ? `일정 ${count}개` : '미배정'}`)); return chip;
+    }) : [element('div', 'list-empty', '검색 조건에 맞는 고객이 없습니다.')]));
+
+    const selectedPanel = $('#sessionSelectedPersonPanel'); selectedPanel.replaceChildren();
+    if (selectedPerson) {
+      const heading = element('div', 'session-selected-heading'); const copy = element('span'); copy.append(element('small', '', '선택한 고객'), element('strong', '', selectedPerson.name || '이름 없음'));
+      const clear = element('button', 'text-button', '선택 해제'); clear.type = 'button'; clear.dataset.sessionClearPerson = 'true'; heading.append(copy, clear); selectedPanel.append(heading);
+      const current = element('div', 'session-current-options');
+      selectedAssignments.forEach((assignment) => { const slot = project.data.slots.find((item) => item.id === assignment.slotId); const role = project.data.roles.find((item) => item.id === assignment.roleId); const label = `${sessionSlotLabel(slot)} · ${role?.name || assignment.roleName || '역할 미정'}`; const button = element('button', selectedSessionAssignmentId === assignment.id ? 'selected' : '', label); button.type = 'button'; button.dataset.sessionOriginAssignment = assignment.id; button.title = label; current.append(button); });
+      const add = element('button', selectedSessionAssignmentId === 'new' ? 'selected add' : 'add', '＋ 새 일정 추가'); add.type = 'button'; add.dataset.sessionOriginNew = 'true'; current.append(add); selectedPanel.append(current);
+      selectedPanel.append(element('p', 'session-selection-help', selectedSessionAssignmentId === 'new' ? '추가할 일정을 캘린더에서 선택하세요.' : selectedSessionAssignmentId ? '옮길 일정을 캘린더에서 선택하세요.' : '변경할 현재 일정을 먼저 선택하세요.'));
+      selectedPanel.hidden = false; $('#sessionTargetLegend').hidden = false;
+    } else { selectedPanel.hidden = true; $('#sessionTargetLegend').hidden = true; }
     const visibleDate = dateSelect.value; const slots = project.data.slots.slice().sort((a, b) => Ops.slotKey(a).localeCompare(Ops.slotKey(b))).filter((slot) => !visibleDate || slot.date === visibleDate);
     const byDate = new Map(); slots.forEach((slot) => { if (!byDate.has(slot.date || '날짜 미정')) byDate.set(slot.date || '날짜 미정', []); byDate.get(slot.date || '날짜 미정').push(slot); });
     const board = $('#sessionCalendarBoard'); const columns = [...byDate.entries()].map(([date, dateSlots]) => {
       const column = element('section', 'session-date-column'); column.append(element('h3', '', date === '날짜 미정' ? date : formatDate(date)));
       dateSlots.forEach((slot) => {
-        const card = element('article', `session-slot-card status-${slot.status || 'draft'}`); card.dataset.sessionSlot = slot.id; card.tabIndex = 0;
+        const card = element('article', `session-slot-card status-${slot.status || 'draft'}`); card.dataset.sessionSlot = slot.id; card.tabIndex = 0; card.title = sessionSlotLabel(slot);
+        if (pendingSessionChange?.plan.impact.toSlotId === slot.id) card.classList.add('is-pending-target');
+        if (selectedPerson && selectedSessionAssignmentId) {
+          const currentAssignment = selectedAssignments.find((assignment) => assignment.id === selectedSessionAssignmentId);
+          if (currentAssignment?.slotId === slot.id) card.classList.add('is-current');
+          else {
+            const change = { action: selectedSessionAssignmentId === 'new' ? 'add' : 'move', assignmentId: selectedSessionAssignmentId === 'new' ? '' : selectedSessionAssignmentId, personId: selectedPerson.id, toSlotId: slot.id, roleId: sessionChangeRole(project, selectedPerson.id, selectedSessionAssignmentId) };
+            const candidate = makeSessionChangePlan(project, change);
+            card.classList.add(!candidate.canApply ? 'is-blocked-target' : candidate.warnings.length ? 'is-warning-target' : 'is-ready-target');
+          }
+        }
         const heading = element('div', 'session-slot-heading'); const title = element('span'); title.append(element('strong', '', `${slot.startTime || '--:--'}–${slot.endTime || '--:--'}`), element('small', '', slot.label || '이름 없는 세션'));
-        const actions = element('span', 'session-slot-actions'); const edit = element('button', '', '시간 변경'); edit.type = 'button'; edit.dataset.sessionEdit = slot.id; const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.sessionRemove = slot.id; remove.title = '세션 삭제'; actions.append(edit, remove); heading.append(title, actions); card.append(heading);
+        const actions = element('span', 'session-slot-actions'); const edit = element('button', '', '시간 변경'); edit.type = 'button'; edit.dataset.sessionEdit = slot.id; edit.disabled = Boolean(slot.locked); edit.title = slot.locked ? '잠금을 해제한 뒤 변경할 수 있습니다.' : '세션 시간 변경'; const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.sessionRemove = slot.id; remove.disabled = Boolean(slot.locked); remove.title = slot.locked ? '잠금을 해제한 뒤 삭제할 수 있습니다.' : '세션 삭제'; actions.append(edit, remove); heading.append(title, actions); card.append(heading);
         const assignments = element('div', 'session-assignments');
-        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person || person.active === false) return; const chip = element('div', 'session-assignment-chip'); chip.draggable = true; chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.title = '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
+        project.data.assignments.filter((assignment) => assignment.slotId === slot.id).forEach((assignment) => { const person = project.data.people.find((item) => item.id === assignment.personId); if (!person || person.active === false) return; const chip = element('div', `session-assignment-chip${selectedSessionPersonId === person.id ? ' selected-person' : ''}${selectedSessionAssignmentId === assignment.id ? ' selected-assignment' : ''}`); chip.draggable = true; chip.tabIndex = 0; chip.setAttribute('role', 'button'); chip.dataset.sessionAssignment = assignment.id; chip.dataset.sessionPerson = person.id; chip.append(element('span', '', `${person.name || '이름 없음'} · ${project.data.roles.find((role) => role.id === assignment.roleId)?.name || assignment.roleName || '참여'}`)); const eject = element('button', '', '×'); eject.type = 'button'; eject.dataset.sessionUnassign = assignment.id; eject.title = '이 세션에서 빼기'; chip.append(eject); assignments.append(chip); });
         if (!assignments.children.length) assignments.append(element('div', 'session-drop-hint', '인원을 여기에 놓으세요'));
         card.append(assignments); column.append(card);
       }); return column;
     });
-    const emptyDrop = element('button', 'session-empty-drop', '＋ 빈 시간에 놓기'); emptyDrop.type = 'button'; emptyDrop.dataset.sessionEmptyDrop = 'true'; emptyDrop.title = '인원을 놓으면 날짜와 시간을 입력합니다.';
+    const emptyDrop = element('button', 'session-empty-drop', '＋ 고객을 놓아 새 시간 만들기'); emptyDrop.type = 'button'; emptyDrop.dataset.sessionEmptyDrop = 'true'; emptyDrop.title = '고객을 끌어 놓으면 새 날짜와 시간을 입력합니다.';
     board.replaceChildren(...columns, emptyDrop);
-    $('#sessionBoardStatus').textContent = people.length ? `선택한 명단의 ${people[0].name || '첫 번째 사람'}${people.length > 1 ? ` 외 ${people.length - 1}명` : ''}을 배정할 수 있습니다.` : '선택한 명단에 배정할 사람이 없습니다.';
+    $('#sessionBoardStatus').textContent = selectedPerson ? `${selectedPerson.name || '선택한 고객'} · 현재 일정 ${selectedAssignments.length}개 · ${visibleDate ? `${formatDate(visibleDate)} 보기` : '전체 날짜 보기'}` : `${people.length}명 · 고객을 선택하면 현재 일정과 이동 후보가 표시됩니다.`;
+    renderSessionChangePreview(project);
   }
 
-  async function assignPersonToSession(personId, slotId, assignmentId = '') {
-    const project = activeProject(); const person = project?.data.people.find((item) => item.id === personId); const slot = project?.data.slots.find((item) => item.id === slotId); if (!project || !person || !slot) return;
-    pushScheduleHistory(project);
-    const existing = assignmentId ? project.data.assignments.find((item) => item.id === assignmentId) : null;
-    if (project.data.assignments.some((item) => item.slotId === slotId && item.personId === personId && item.id !== assignmentId)) { showToast('이미 이 세션에 배정된 사람입니다.'); return; }
-    if (existing) existing.slotId = slotId;
-    else { const selectedRole = $('#sessionRoleSelect')?.value; const role = project.data.roles.find((item) => item.id === selectedRole && item.active) || project.data.roles.find((item) => item.active && roleCandidates(project, item).some((candidate) => candidate.id === personId)) || project.data.roles.find((item) => item.active); project.data.assignments.push({ id: `assignment-${Date.now().toString(36)}`, slotId, personId, roleId: role?.id || '', roleName: role?.name || '참여', locked: false, source: 'session-board' }); }
-    if (slot.status === 'confirmed') slot.status = 'changed'; refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 인원 배정 변경됨'); renderSchedulePage();
+  async function requestSessionSlot(defaultValue = '') {
+    const value = await requestName('새 세션 날짜·시간', defaultValue || `${new Date().toISOString().slice(0, 10)} 09:00-10:00 새 세션`); if (!value) return null;
+    const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '예: 2026-08-20 09:00-10:00 필기 교육', 'error'); return null; }
+    return parsed.slots[0];
   }
 
   async function addSessionFromText(defaultValue = '') {
-    const project = activeProject(); if (!project) return null; const value = await requestName('새 세션 날짜·시간', defaultValue || `${new Date().toISOString().slice(0, 10)} 09:00-10:00 새 세션`); if (!value) return null;
-    const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '예: 2026-08-20 09:00-10:00 필기 교육', 'error'); return null; }
-    pushScheduleHistory(project); const slot = parsed.slots[0]; project.data.slots.push(slot); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('새 세션 추가됨'); renderSchedulePage(); return slot;
+    await flushSchedulePersist(); let project = activeProject(); if (!project) return null; const projectId = project.id; const slot = await requestSessionSlot(defaultValue); if (!slot) return null;
+    project = projectById(projectId); if (!project) { showToast('일정을 반영할 프로젝트를 찾지 못했습니다.', 'error'); return null; }
+    pushScheduleHistory(project); project.data.slots.push(slot); refreshScheduleConflicts(project); syncScheduleProjectState(project, `새 세션 추가 · 문제 ${project.data.conflicts.length}건`); await persist('새 세션 추가됨'); renderSchedulePage(); return slot;
   }
 
   function renderSchedulePage() {
@@ -1247,6 +1663,12 @@
     $('#ruleUnmarkedAvailable').checked = project.data.scheduleRules.unmarkedMeansAvailable;
     renderAvailability(project);
     renderScheduleBoard(project);
+    const setup = $('#scheduleSetupDetails'); const hasAssignments = project.data.assignments.length > 0; const setupState = hasAssignments ? 'ready' : 'empty';
+    if (setup.dataset.projectId !== project.id) setup.open = !hasAssignments;
+    else if (setup.dataset.scheduleState === 'empty' && hasAssignments) setup.open = false;
+    else if (!hasAssignments) setup.open = true;
+    setup.dataset.projectId = project.id; setup.dataset.scheduleState = setupState;
+    const generateButton = $('#generateScheduleButton'); generateButton.textContent = hasAssignments ? '전체 일정 다시 만들기' : '조건에 맞춰 일정표 만들기'; generateButton.className = hasAssignments ? 'secondary-button' : 'primary-button';
     const schedulePeople = project.data.people.filter((person) => person.active !== false);
     $('#scheduleProjectRosterStatus').textContent = schedulePeople.length ? `${schedulePeople[0].name || '첫 번째 사람'}${schedulePeople.length > 1 ? ` 외 ${schedulePeople.length - 1}명` : ''}이 배정 후보로 연결되어 있습니다.` : '명단 가져오기를 눌러 배정할 사람을 준비해주세요.';
   }
@@ -1260,6 +1682,24 @@
     };
     if (aliases[normalized]) return aliases[normalized];
     const role = project.data.roles.find((item) => item.name.toLowerCase().replace(/[\s_.·-]/g, '') === normalized); return role ? `role:${role.id}` : '';
+  }
+
+  function applyScheduleColumnName(project, column, value) {
+    const cleanName = String(value || '').trim().replace(/[{}]/g, '');
+    if (!project || !column || !cleanName) return false;
+    const before = `${column.name}|${column.key}|${column.kind}|${column.roleId || ''}`;
+    column.name = cleanName;
+    if (column.kind === 'custom') {
+      let key = scheduleHeaderKey(cleanName, project);
+      if (project.data.scheduleSheetColumns.some((item) => item.id !== column.id && item.key === key)) key = '';
+      if (key) {
+        column.key = key;
+        column.roleId = key.startsWith('role:') ? key.slice(5) : null;
+        column.kind = column.roleId ? 'role' : 'system';
+      }
+    }
+    if (`${column.name}|${column.key}|${column.kind}|${column.roleId || ''}` !== before) scheduleEditGeneration += 1;
+    return true;
   }
 
   function looksLikeScheduleHeader(matrix) {
@@ -1285,9 +1725,17 @@
   }
 
   async function importScheduleMatrix(matrix, mode = 'replace') {
-    const project = activeProject(); if (!project || !matrix?.length) return;
+    let project = activeProject(); if (!project || !matrix?.length) return; const projectId = project.id; const confirmationSnapshot = scheduleSnapshot(project);
     const hasHeader = looksLikeScheduleHeader(matrix); const importedColumns = inferredScheduleColumns(matrix, project, hasHeader);
-    if (mode === 'replace' && project.data.slots.length && !await showConfirm('현재 일정표를 Excel 시트 내용으로 교체할까요? 기존 상태는 실행 취소로 되돌릴 수 있습니다.', { title: '일정표 교체', action: '교체' })) return;
+    if (mode === 'replace' && project.data.slots.some((slot) => slot.locked)) { showToast('잠긴 세션이 있습니다. 잠금을 해제한 뒤 일정표를 교체해주세요.', 'error'); return; }
+    if (mode === 'replace' && project.data.slots.length) {
+      if (!await showConfirm('현재 일정표를 Excel 시트 내용으로 교체할까요? 기존 상태는 실행 취소로 되돌릴 수 있습니다.', { title: '일정표 교체', action: '교체' })) return;
+      const currentProject = activeProject();
+      if (!currentProject || currentProject.id !== projectId || scheduleSnapshot(currentProject) !== confirmationSnapshot) { showToast('확인하는 동안 일정이 바뀌었습니다. 최신 일정을 확인한 뒤 다시 가져와주세요.', 'error'); renderSchedulePage(); return; }
+      project = currentProject;
+      if (project.data.slots.some((slot) => slot.locked)) { showToast('새로 잠긴 세션이 있어 일정표 교체를 중단했습니다.', 'error'); return; }
+    }
+    const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
     pushScheduleHistory(project);
     if (mode === 'replace') { project.data.slots = []; project.data.assignments = []; project.data.conflicts = []; project.data.scheduleCustomValues = {}; project.data.scheduleSheetColumns = importedColumns; project.data.scheduleSheetInitialized = true; }
     else {
@@ -1296,23 +1744,23 @@
     const rows = (hasHeader ? matrix.slice(1) : matrix).filter((row) => row.some((value) => String(value || '').trim())); const targetColumns = scheduleSheetColumns(project); const mappedIndexes = importedColumns.map((column) => targetColumns.findIndex((item) => item.key === column.key || item.name.toLowerCase() === column.name.toLowerCase()));
     const startRow = project.data.slots.length;
     rows.forEach((row, rowOffset) => {
-      row.forEach((value, columnIndex) => {
-        const actualColumn = mappedIndexes[columnIndex]; if (actualColumn >= 0) setScheduleCellValue(project, startRow + rowOffset, actualColumn, value);
+      row.map((value, columnIndex) => ({ value, columnIndex, actualColumn: mappedIndexes[columnIndex] })).sort((left, right) => Number(targetColumns[left.actualColumn]?.key === 'locked') - Number(targetColumns[right.actualColumn]?.key === 'locked')).forEach(({ value, actualColumn }) => {
+        if (actualColumn >= 0) setScheduleCellValue(project, startRow + rowOffset, actualColumn, value);
       });
     });
-    refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('Excel 일정 가져옴'); renderAll(); navigate('schedule');
+    refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `Excel 일정 가져오기 · 문제 ${project.data.conflicts.length}건`, impact); renderAll(); navigate('schedule'); await persist('Excel 일정 가져옴');
     showToast(`${importedColumns.length}열 × ${rows.length}행을 자동 감지해 일정표에 가져왔습니다.`, project.data.conflicts.length ? 'normal' : 'success');
   }
 
   async function addScheduleColumn() {
     const project = activeProject(); if (!project) return; const name = await requestName('추가할 일정표 컬럼 이름', `새 컬럼 ${scheduleSheetColumns(project).length + 1}`); if (!name?.trim()) return;
     pushScheduleHistory(project); const id = `schedule-column-${Date.now().toString(36)}`; const cleanName = name.trim().replace(/[{}]/g, ''); let key = scheduleHeaderKey(cleanName, project); if (project.data.scheduleSheetColumns.some((column) => column.key === key)) key = ''; const roleId = key.startsWith('role:') ? key.slice(5) : null; project.data.scheduleSheetColumns.push({ id, key: key || `custom:${id}`, name: cleanName, kind: roleId ? 'role' : key ? 'system' : 'custom', roleId }); refreshScheduleConflicts(project);
-    state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 컬럼 추가됨'); renderSchedulePage();
+    syncScheduleProjectState(project, `일정 컬럼 추가 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 추가됨'); renderSchedulePage();
   }
 
   async function renameScheduleColumn(columnId) {
     const project = activeProject(); const column = project?.data.scheduleSheetColumns.find((item) => item.id === columnId); if (!column) return; const name = await requestName('일정표 컬럼 이름 변경', column.name); if (!name?.trim()) return;
-    pushScheduleHistory(project); column.name = name.trim().replace(/[{}]/g, ''); if (column.kind === 'custom') { let key = scheduleHeaderKey(column.name, project); if (project.data.scheduleSheetColumns.some((item) => item.id !== column.id && item.key === key)) key = ''; if (key) { column.key = key; column.roleId = key.startsWith('role:') ? key.slice(5) : null; column.kind = column.roleId ? 'role' : 'system'; } } refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 컬럼 이름 변경됨'); renderSchedulePage();
+    pushScheduleHistory(project); applyScheduleColumnName(project, column, name); refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 컬럼 이름 변경 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 이름 변경됨'); renderSchedulePage();
   }
 
   async function removeScheduleColumn(columnId) {
@@ -1320,13 +1768,13 @@
     if (!await showConfirm(`“${column.name}” 컬럼을 표에서 삭제할까요?${column.kind === 'custom' ? ' 이 컬럼의 셀 값도 삭제됩니다.' : ' 연결된 원본 일정 데이터는 유지됩니다.'}`, { title: '일정표 컬럼 삭제', action: '삭제' })) return;
     pushScheduleHistory(project); project.data.scheduleSheetColumns = project.data.scheduleSheetColumns.filter((item) => item.id !== columnId);
     if (column.kind === 'custom') Object.values(project.data.scheduleCustomValues || {}).forEach((values) => { delete values[column.id]; });
-    refreshScheduleConflicts(project); scheduleSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 컬럼 삭제됨'); renderSchedulePage();
+    refreshScheduleConflicts(project); scheduleSelection = null; syncScheduleProjectState(project, `일정 컬럼 삭제 · 문제 ${project.data.conflicts.length}건`); await persist('일정 컬럼 삭제됨'); renderSchedulePage();
   }
 
   async function insertScheduleRow(afterIndex = null) {
     const project = activeProject(); if (!project) return; pushScheduleHistory(project); const index = afterIndex == null ? project.data.slots.length : Math.min(project.data.slots.length, Number(afterIndex) + 1);
     const slot = { id: `slot-${Date.now().toString(36)}-${index}`, date: '', startTime: '', endTime: '', label: '', status: 'draft', locked: false }; project.data.slots.splice(index, 0, slot); refreshScheduleConflicts(project);
-    state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 행 추가됨'); renderSchedulePage(); focusScheduleCell(index, 0);
+    syncScheduleProjectState(project, `일정 행 추가 · 문제 ${project.data.conflicts.length}건`); await persist('일정 행 추가됨'); renderSchedulePage(); focusScheduleCell(index, 0);
   }
 
   async function mergeScheduleRoster(rosterId) {
@@ -1343,14 +1791,23 @@
     const min = Math.max(0, Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row)); const max = Math.max(scheduleSelection.anchor.row, scheduleSelection.focus.row);
     const targets = project.data.slots.slice(min, max + 1);
     if (!targets.length) return; if (targets.some((slot) => slot.locked)) { showToast('잠긴 행이 포함되어 있습니다. 잠금 셀을 지운 뒤 삭제해주세요.', 'error'); return; }
-    pushScheduleHistory(project); const ids = new Set(targets.map((slot) => slot.id)); project.data.slots = project.data.slots.filter((slot) => !ids.has(slot.id)); project.data.assignments = project.data.assignments.filter((item) => !ids.has(item.slotId));
+    const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const ids = new Set(targets.map((slot) => slot.id)); project.data.slots = project.data.slots.filter((slot) => !ids.has(slot.id)); project.data.assignments = project.data.assignments.filter((item) => !ids.has(item.slotId));
     Object.keys(project.data.availability).forEach((personId) => { project.data.availability[personId] = project.data.availability[personId].filter((id) => !ids.has(id)); });
-    refreshScheduleConflicts(project); scheduleSelection = null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 행 삭제됨'); renderSchedulePage();
+    refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); scheduleSelection = null; syncScheduleProjectState(project, `일정 행 삭제 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('일정 행 삭제됨');
   }
 
   function scheduleClipboardHtml(matrix) {
     const escape = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return `<table>${matrix.map((row) => `<tr>${row.map((value) => `<td>${escape(value)}</td>`).join('')}</tr>`).join('')}</table>`;
+  }
+
+  function shouldUseNativeScheduleClipboard(event) {
+    if (event.target.closest?.('[contenteditable="true"]')) return true;
+    const input = event.target.closest?.('input, textarea'); if (!input) return false;
+    if (!input.matches('[data-schedule-input]')) return true;
+    const rangeSelected = scheduleSelection && (scheduleSelection.mode !== 'cells' || scheduleSelection.anchor.row !== scheduleSelection.focus.row || scheduleSelection.anchor.col !== scheduleSelection.focus.col);
+    if (rangeSelected) return false;
+    return typeof input.selectionStart === 'number' && input.selectionStart !== input.selectionEnd;
   }
 
   function renderLayoutPage() {
@@ -1421,7 +1878,8 @@
       const accountCell = element('td'); const select = element('select'); select.dataset.zoomSlotConnection = slot.id;
       const inherit = element('option', '', defaultConnection ? `기본값 · ${defaultConnection.label}` : '계정 선택 필요'); inherit.value = ''; select.append(inherit);
       zoomConnections.forEach((connection) => { const option = element('option', '', `${connection.label}${connection.status !== 'connected' ? ' · 로그인 필요' : ''}`); option.value = connection.id; option.selected = slot.zoomConnectionId === connection.id; select.append(option); }); accountCell.append(select); row.append(accountCell);
-      const artifact = project.data.externalArtifacts.find((item) => item.kind === 'zoom' && item.slotId === slot.id);
+      const artifact = project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created')
+        || project.data.externalArtifacts.slice().reverse().find((item) => item.kind === 'zoom' && item.slotId === slot.id);
       row.append(element('td', '', artifact?.status === 'created' ? '만들기 완료' : artifact?.status === 'stale' ? '일정 변경 확인 필요' : '아직 만들지 않음'), element('td', '', artifact?.joinUrl || ''));
       return row;
     }); table.tBodies[0].replaceChildren(...rows);
@@ -1787,8 +2245,9 @@
 
   async function switchProject(projectId) {
     try {
+      if (schedulePersistTimer) await flushSchedulePersist();
       state = Core.setActiveProject(state, projectId);
-      scheduleSelection = null; scheduleHistory = []; scheduleFuture = [];
+      scheduleSelection = null; scheduleHistory = []; scheduleFuture = []; selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null;
       await persist('프로젝트 전환됨');
       renderAll();
       navigate('dashboard');
@@ -1951,29 +2410,40 @@
   }
 
   async function persistScheduleData(message = '일정 설정을 저장했습니다.') {
-    const project = activeProject(); if (!project) return;
+    await flushSchedulePersist(); const project = activeProject(); if (!project) return;
     syncRoleInputs(project);
     project.data.scheduleRules = {
+      ...project.data.scheduleRules,
       avoidRepeatPairing: $('#ruleAvoidRepeat').checked,
       avoidPastPairing: $('#ruleAvoidPast').checked,
       groupPreference: $('#ruleGroupPreference').value,
       unmarkedMeansAvailable: $('#ruleUnmarkedAvailable').checked
     };
-    state = Core.updateProject(state, project.id, { data: project.data });
+    refreshScheduleConflicts(project);
+    syncScheduleProjectState(project, `일정 조건 변경 · 문제 ${project.data.conflicts.length}건`);
     await persist(); renderAll(); showToast(message, 'success');
   }
 
   async function generateSchedule() {
-    const project = activeProject(); if (!project) return;
+    await flushSchedulePersist(); let project = activeProject(); if (!project) return; const projectId = project.id;
+    if (!project.data.people.length) { showToast('명단을 먼저 등록해주세요.', 'error'); return; }
+    if (!project.data.slots.length) { showToast('시간대를 먼저 추가해주세요.', 'error'); return; }
+    const replacing = project.data.assignments.length > 0;
+    const confirmSignature = scheduleChangeSignature(project);
+    if (replacing && !await showConfirm('현재 수동 조정 내용을 자동 백업한 뒤, 잠그지 않은 배정을 조건에 맞춰 다시 만듭니다. 전체 일정을 다시 만들까요?', { title: '전체 일정 다시 만들기', action: '백업 후 다시 만들기', danger: false })) return;
+    project = projectById(projectId); if (!project) { showToast('일정을 반영할 프로젝트를 찾지 못했습니다.', 'error'); return; }
+    if (replacing && scheduleChangeSignature(project) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 만들기를 한 번 더 눌러주세요.'); renderSchedulePage(); return; }
     syncRoleInputs(project);
     project.data.scheduleRules = {
+      ...project.data.scheduleRules,
       avoidRepeatPairing: $('#ruleAvoidRepeat').checked,
       avoidPastPairing: $('#ruleAvoidPast').checked,
       groupPreference: $('#ruleGroupPreference').value,
       unmarkedMeansAvailable: $('#ruleUnmarkedAvailable').checked
     };
-    if (!project.data.people.length) { showToast('명단을 먼저 등록해주세요.', 'error'); return; }
-    if (!project.data.slots.length) { showToast('시간대를 먼저 추가해주세요.', 'error'); return; }
+    pushScheduleHistory(project);
+    if (replacing) project.data.versions.push(createScheduleVersion(project, `재편성 전 자동 백업 ${project.data.versions.length + 1}`));
+    const beforeAssignments = project.data.assignments.map((assignment) => ({ ...assignment }));
     const result = Ops.generateSchedule({
       people: schedulePeopleWithRoleFilters(project),
       roles: project.data.roles,
@@ -1983,25 +2453,31 @@
       rules: project.data.scheduleRules
     });
     project.data.assignments = result.assignments;
-    project.data.conflicts = [...result.conflicts, ...Ops.validateAssignments({ assignments: result.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots }).map((message) => ({ type: 'validation', message }))];
-    state = Core.updateProject(state, project.id, { data: project.data });
-    state = Core.setModuleStatus(state, project.id, 'schedule', project.data.conflicts.length ? 'needsReview' : 'inProgress', `시간대 ${project.data.slots.length}개 · 확인할 문제 ${project.data.conflicts.length}건`);
-    if (project.installedModules.includes('zoom')) state = Core.setModuleStatus(state, project.id, 'zoom', 'stale', '일정이 바뀌어 Zoom 링크 확인 필요');
-    if (project.installedModules.includes('gmailFlow')) state = Core.setModuleStatus(state, project.id, 'gmailFlow', 'stale', '일정이 바뀌어 안내 메일 확인 필요');
+    refreshScheduleConflicts(project);
+    const assignmentSignature = (items, slotId) => items.filter((item) => item.slotId === slotId).map((item) => `${item.personId}|${item.roleId}`).sort().join(',');
+    const changedSlotIds = project.data.slots.filter((slot) => assignmentSignature(beforeAssignments, slot.id) !== assignmentSignature(result.assignments, slot.id)).map((slot) => slot.id);
+    const zoomReviewSlotIds = changedSlotIds.filter((slotId) => (beforeAssignments.some((item) => item.slotId === slotId)) !== (result.assignments.some((item) => item.slotId === slotId)));
+    const affectedPersonIds = [...new Set([...beforeAssignments, ...result.assignments].filter((item) => changedSlotIds.includes(item.slotId)).map((item) => item.personId).filter(Boolean))];
+    markScheduleChangeStale(project, { changedSlotIds, zoomReviewSlotIds, affectedPersonIds });
+    syncScheduleProjectState(project, `시간대 ${project.data.slots.length}개 · 확인할 문제 ${project.data.conflicts.length}건`, { changedSlotIds, zoomReviewSlotIds, affectedPersonIds });
     await persist(); renderAll();
-    showToast(project.data.conflicts.length ? `일정표를 만들었습니다. 확인할 문제가 ${project.data.conflicts.length}건 있습니다.` : '조건에 맞춰 일정표를 만들었습니다.', project.data.conflicts.length ? 'normal' : 'success');
+    showToast(project.data.conflicts.length ? `일정표를 만들었습니다. 확인할 문제가 ${project.data.conflicts.length}건 있습니다.${replacing ? ' 이전 일정은 자동 백업했습니다.' : ''}` : `조건에 맞춰 일정표를 만들었습니다.${replacing ? ' 이전 일정은 자동 백업했습니다.' : ''}`, project.data.conflicts.length ? 'normal' : 'success');
   }
 
-  async function saveScheduleSnapshot() {
-    const project = activeProject(); if (!project) return;
-    const version = {
+  function createScheduleVersion(project, name = `일정 ${project.data.versions.length + 1}차`) {
+    return {
       id: `version-${Date.now().toString(36)}`,
-      name: `일정 ${project.data.versions.length + 1}차`,
+      name,
       createdAt: new Date().toISOString(),
       slots: JSON.parse(JSON.stringify(project.data.slots)),
       assignments: JSON.parse(JSON.stringify(project.data.assignments)),
       conflicts: JSON.parse(JSON.stringify(project.data.conflicts))
     };
+  }
+
+  async function saveScheduleSnapshot() {
+    await flushSchedulePersist(); const project = activeProject(); if (!project) return;
+    const version = createScheduleVersion(project);
     project.data.versions.push(version);
     state = Core.updateProject(state, project.id, { data: project.data });
     state = Core.setModuleStatus(state, project.id, 'schedule', project.data.conflicts.length ? 'needsReview' : 'complete', `${version.name} 저장`);
@@ -2129,7 +2605,7 @@
       else if (allSelector) { anchor = { row: -1, col: 0 }; focus = { row: visibleRows - 1, col: Math.max(0, columns.length - 1) }; mode = 'all'; }
       else { const point = { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) }; anchor = event.shiftKey && scheduleSelection ? scheduleSelection.anchor : point; focus = point; }
       scheduleSelecting = true; updateScheduleSelection(anchor, focus, mode);
-      const input = event.target.closest('[data-schedule-input]') || cell?.querySelector('[data-schedule-input]'); const target = input || event.target.closest('button, [tabindex]') || cell; if (target && document.activeElement !== target) { event.preventDefault(); target.focus({ preventScroll: true }); }
+      const input = event.target.closest('[data-schedule-input]') || cell?.querySelector('[data-schedule-input]'); const target = input?.disabled ? cell : input || event.target.closest('button, [tabindex]') || cell; if (target && document.activeElement !== target) { event.preventDefault(); if (input?.disabled) { document.activeElement?.blur(); cell.tabIndex = -1; } target.focus({ preventScroll: true }); }
     });
     scheduleTable.addEventListener('mousemove', (event) => {
       if (!scheduleSelecting || !scheduleSelection || !(event.buttons & 1)) return; const cell = event.target.closest('[data-schedule-row][data-schedule-col]'); const columnSelector = event.target.closest('[data-select-schedule-column]'); const rowSelector = event.target.closest('[data-select-schedule-row]'); let focus = scheduleSelection.focus;
@@ -2139,84 +2615,116 @@
       else return; updateScheduleSelection(scheduleSelection.anchor, focus, scheduleSelection.mode);
     });
     globalThis.addEventListener('mouseup', () => { scheduleSelecting = false; });
-    scheduleTable.addEventListener('focusin', (event) => { if (event.target.matches('[data-schedule-input]')) event.target.dataset.scheduleBefore = scheduleSnapshot(activeProject()); });
+    scheduleTable.addEventListener('focusin', (event) => {
+      if (!event.target.matches('[data-schedule-input]')) return;
+      const snapshot = scheduleSnapshot(activeProject()); event.target.dataset.scheduleBefore = snapshot; event.target.dataset.scheduleImpactBefore = snapshot;
+    });
     scheduleTable.addEventListener('input', (event) => {
       if (!event.target.matches('[data-schedule-input]')) return; const project = activeProject(); const cell = event.target.closest('[data-schedule-row][data-schedule-col]'); if (!project || !cell) return;
-      if (event.target.dataset.scheduleBefore) { scheduleHistory.push(event.target.dataset.scheduleBefore); if (scheduleHistory.length > 80) scheduleHistory.shift(); scheduleFuture = []; delete event.target.dataset.scheduleBefore; }
-      setScheduleCellValue(project, Number(cell.dataset.scheduleRow), Number(cell.dataset.scheduleCol), event.target.value); updateScheduleSelection(scheduleSelection?.anchor || { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) }, { row: Number(cell.dataset.scheduleRow), col: Number(cell.dataset.scheduleCol) });
+      const rowIndex = Number(cell.dataset.scheduleRow); const columnIndex = Number(cell.dataset.scheduleCol);
+      if (!setScheduleCellValue(project, rowIndex, columnIndex, event.target.value)) { event.target.value = scheduleCellValue(project, rowIndex, columnIndex); showToast('잠긴 일정은 잠금 셀을 먼저 해제한 뒤 편집해주세요.', 'error'); return; }
+      if (scheduleSheetColumns(project)[columnIndex]?.key === 'locked') syncScheduleRowLockControls(project, rowIndex);
+      if (event.target.dataset.scheduleBefore) { pushScheduleHistorySnapshot(event.target.dataset.scheduleBefore); delete event.target.dataset.scheduleBefore; }
+      updateScheduleSelection(scheduleSelection?.anchor || { row: rowIndex, col: columnIndex }, { row: rowIndex, col: columnIndex });
       const conflicts = project.data.conflicts || []; $('#scheduleConflicts').hidden = !conflicts.length; $('#scheduleConflicts').textContent = conflicts.slice(0, 30).map((item) => `• ${item.message}`).join('\n'); $('#scheduleBoardSummary').textContent = conflicts.length ? `현재 일정표에서 확인할 문제가 ${conflicts.length}건 있습니다.` : '현재 일정표에서 확인할 문제가 없습니다.';
-      queueSchedulePersist(project);
+      queueSchedulePersist(project, '일정 셀 편집 저장됨', event.target.dataset.scheduleImpactBefore);
     });
+    scheduleTable.addEventListener('change', (event) => { if (event.target.matches('[data-schedule-input]')) delete event.target.dataset.scheduleImpactBefore; });
     scheduleTable.addEventListener('paste', async (event) => {
-      if (!scheduleSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text) return; event.preventDefault();
-      const project = activeProject(); if (!project) return; const matrix = Ops.parseDelimited(text); if (!matrix.length) return; const start = scheduleSelection.focus; const structured = matrix.length > 1 || matrix.some((row) => row.length > 1);
+      if (!scheduleSelection) return; const text = event.clipboardData?.getData('text/plain') || ''; if (!text) return;
+      const project = activeProject(); if (!project) return; const matrix = /[\t\r\n]/.test(text) ? Ops.parseDelimited(text) : [[text]]; if (!matrix.length) return; const start = scheduleSelection.focus; const structured = matrix.length > 1 || matrix.some((row) => row.length > 1); if (!structured && shouldUseNativeScheduleClipboard(event)) return; event.preventDefault();
       if (structured && start.row <= 0 && start.col === 0 && (looksLikeScheduleHeader(matrix) || !project.data.slots.length)) { await importScheduleMatrix(matrix, 'replace'); return; }
-      pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length));
+      const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const width = Math.max(...matrix.map((row) => row.length)); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id));
       while (scheduleSheetColumns(project).length < start.col + width) { const index = project.data.scheduleSheetColumns.length; const id = `schedule-column-${Date.now().toString(36)}-${index}`; project.data.scheduleSheetColumns.push({ id, key: `custom:${id}`, name: `컬럼${index + 1}`, kind: 'custom', roleId: null }); }
-      matrix.forEach((row, rowOffset) => row.forEach((value, colOffset) => { const targetRow = start.row + rowOffset; if (targetRow === -1) project.data.scheduleSheetColumns[start.col + colOffset].name = String(value || '').trim() || project.data.scheduleSheetColumns[start.col + colOffset].name; else setScheduleCellValue(project, targetRow, start.col + colOffset, value); }));
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 셀 붙여넣기 저장됨'); renderSchedulePage();
+      matrix.forEach((row, rowOffset) => row.map((value, colOffset) => ({ value, targetColumn: start.col + colOffset })).sort((left, right) => Number(scheduleSheetColumns(project)[left.targetColumn]?.key === 'locked') - Number(scheduleSheetColumns(project)[right.targetColumn]?.key === 'locked')).forEach(({ value, targetColumn }) => { const targetRow = start.row + rowOffset; if (targetRow === -1) applyScheduleColumnName(project, project.data.scheduleSheetColumns[targetColumn], value); else if (!setScheduleCellValue(project, targetRow, targetColumn, value, { lockedSlotIds })) lockedCells += 1; }));
+      const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `셀 붙여넣기 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage();
       updateScheduleSelection(start, { row: start.row + matrix.length - 1, col: Math.min(scheduleSheetColumns(project).length - 1, start.col + width - 1) });
-      showToast(`${matrix.length}행 × ${Math.max(...matrix.map((row) => row.length))}열을 붙여넣었습니다.`, 'success');
+      showToast(`${matrix.length}행 × ${Math.max(...matrix.map((row) => row.length))}열을 붙여넣었습니다.${lockedCells ? ` 잠긴 셀 ${lockedCells}개는 유지했습니다.` : ''}`, lockedCells ? 'normal' : 'success');
+      await persist('일정 셀 붙여넣기 저장됨');
     });
     scheduleTable.addEventListener('keydown', async (event) => {
-      if (!scheduleSelection) return; const project = activeProject(); if (!project) return;
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); updateScheduleSelection({ row: -1, col: 0 }, { row: Math.max(project.data.slots.length + 1, 4), col: scheduleSheetColumns(project).length - 1 }, 'all'); return; }
+      const project = activeProject(); if (!project) return;
       if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
-        event.preventDefault(); const undo = event.key.toLowerCase() === 'z' && !event.shiftKey;
-        const from = undo ? scheduleHistory : scheduleFuture; const to = undo ? scheduleFuture : scheduleHistory; if (!from.length) return;
-        to.push(scheduleSnapshot(project)); restoreScheduleSnapshot(project, from.pop()); state = Core.updateProject(state, project.id, { data: project.data }); await persist(undo ? '실행 취소됨' : '다시 실행됨'); renderSchedulePage(); return;
+        event.preventDefault(); await moveScheduleHistory(project, event.key.toLowerCase() === 'z' && !event.shiftKey); return;
       }
+      if (!scheduleSelection) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') { event.preventDefault(); updateScheduleSelection({ row: -1, col: 0 }, { row: Math.max(project.data.slots.length + 1, 4), col: scheduleSheetColumns(project).length - 1 }, 'all'); return; }
       const movement = { Enter: [1, 0], Tab: [0, event.shiftKey ? -1 : 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[event.key];
       if (movement && (!event.target.matches('input') || event.key === 'Enter' || event.key === 'Tab' || event.altKey)) {
         event.preventDefault(); focusScheduleCell(scheduleSelection.focus.row + movement[0], scheduleSelection.focus.col + movement[1], event.shiftKey && event.key !== 'Tab'); return;
       }
       const rangeSelected = scheduleSelection.anchor.row !== scheduleSelection.focus.row || scheduleSelection.anchor.col !== scheduleSelection.focus.col || scheduleSelection.mode !== 'cells';
       if ((event.key === 'Delete' || event.key === 'Backspace') && (!event.target.matches('input:focus') || rangeSelected)) {
-        event.preventDefault(); pushScheduleHistory(project); const matrix = selectedScheduleMatrix(project); const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col);
-        matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0) setScheduleCellValue(project, minRow + r, minCol + c, ''); })); state = Core.updateProject(state, project.id, { data: project.data }); await persist('선택 셀 지움'); renderSchedulePage();
+        event.preventDefault(); const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const matrix = selectedScheduleMatrix(project); const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id));
+        matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0 && !setScheduleCellValue(project, minRow + r, minCol + c, '', { lockedSlotIds })) lockedCells += 1; })); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `선택 셀 지움 · 문제 ${project.data.conflicts.length}건`, impact); renderSchedulePage(); if (lockedCells) showToast(`잠긴 셀 ${lockedCells}개는 유지했습니다.`, 'normal'); await persist('선택 셀 지움');
       }
     });
     document.addEventListener('copy', (event) => {
-      if (currentPage !== 'schedule' || !scheduleSelection) return; const project = activeProject(); if (!project) return; const matrix = selectedScheduleMatrix(project); if (!matrix.length) return;
+      if (currentPage !== 'schedule' || !scheduleSelection || shouldUseNativeScheduleClipboard(event)) return; const project = activeProject(); if (!project) return; const matrix = selectedScheduleMatrix(project); if (!matrix.length) return;
       event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', scheduleClipboardHtml(matrix)); event.preventDefault(); showToast(`${matrix.length}행 × ${matrix[0].length}열을 복사했습니다.`);
     });
     document.addEventListener('cut', (event) => {
-      if (currentPage !== 'schedule' || !scheduleSelection) return; const project = activeProject(); if (!project) return; const matrix = selectedScheduleMatrix(project); if (!matrix.length) return;
-      event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', scheduleClipboardHtml(matrix)); event.preventDefault(); pushScheduleHistory(project);
-      const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0) setScheduleCellValue(project, minRow + r, minCol + c, ''); })); queueSchedulePersist(project, '잘라내기 저장됨'); renderSchedulePage();
+      if (currentPage !== 'schedule' || !scheduleSelection || shouldUseNativeScheduleClipboard(event)) return; const project = activeProject(); if (!project) return; const matrix = selectedScheduleMatrix(project); if (!matrix.length) return;
+      event.clipboardData.setData('text/plain', matrix.map((row) => row.join('\t')).join('\r\n')); event.clipboardData.setData('text/html', scheduleClipboardHtml(matrix)); event.preventDefault(); const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project);
+      const minRow = Math.min(scheduleSelection.anchor.row, scheduleSelection.focus.row); const minCol = Math.min(scheduleSelection.anchor.col, scheduleSelection.focus.col); let lockedCells = 0; const lockedSlotIds = new Set(project.data.slots.filter((slot) => slot.locked).map((slot) => slot.id)); matrix.forEach((row, r) => row.forEach((_value, c) => { if (minRow + r >= 0 && !setScheduleCellValue(project, minRow + r, minCol + c, '', { lockedSlotIds })) lockedCells += 1; })); queueSchedulePersist(project, '잘라내기 저장됨', beforeSnapshot); renderSchedulePage(); if (lockedCells) showToast(`잠긴 셀 ${lockedCells}개는 복사만 하고 원본은 유지했습니다.`, 'normal');
+    });
+    $('#scheduleCellValue').addEventListener('focus', (event) => {
+      const project = activeProject(); const point = scheduleSelection?.focus; if (!project || !point) return;
+      event.target.dataset.scheduleImpactBefore = scheduleSnapshot(project); event.target.dataset.scheduleEditRow = String(point.row); event.target.dataset.scheduleEditCol = String(point.col); event.target.dataset.scheduleEditValue = event.target.value;
     });
     $('#scheduleCellValue').addEventListener('input', (event) => {
-      const project = activeProject(); if (!project || !scheduleSelection) return; if (!event.target.dataset.scheduleEditing) { pushScheduleHistory(project); event.target.dataset.scheduleEditing = 'true'; }
-      if (scheduleSelection.focus.row === -1) { const column = project.data.scheduleSheetColumns[scheduleSelection.focus.col]; if (column) column.name = event.target.value.trim() || column.name; }
-      else setScheduleCellValue(project, scheduleSelection.focus.row, scheduleSelection.focus.col, event.target.value); const input = $(`[data-schedule-row="${scheduleSelection.focus.row}"][data-schedule-col="${scheduleSelection.focus.col}"] input`, scheduleTable); if (input) input.value = event.target.value; queueSchedulePersist(project);
+      const project = activeProject(); if (!project || !scheduleSelection) return;
+      const rowIndex = Number(event.target.dataset.scheduleEditRow ?? scheduleSelection.focus.row); const columnIndex = Number(event.target.dataset.scheduleEditCol ?? scheduleSelection.focus.col); const column = scheduleSheetColumns(project)[columnIndex]; const slot = rowIndex >= 0 ? project.data.slots[rowIndex] : null; event.target.dataset.scheduleEditValue = event.target.value;
+      if (slot?.locked && column?.key !== 'locked') { event.target.value = scheduleCellValue(project, rowIndex, columnIndex); showToast('잠긴 일정은 잠금 셀을 먼저 해제한 뒤 편집해주세요.', 'error'); return; }
+      const beforeSnapshot = event.target.dataset.scheduleImpactBefore || scheduleSnapshot(project); event.target.dataset.scheduleImpactBefore = beforeSnapshot;
+      if (!event.target.dataset.scheduleEditing) { pushScheduleHistorySnapshot(beforeSnapshot); event.target.dataset.scheduleEditing = 'true'; }
+      if (rowIndex === -1) { const editColumn = project.data.scheduleSheetColumns[columnIndex]; if (editColumn) { editColumn.name = event.target.value.trim() || editColumn.name; scheduleEditGeneration += 1; } }
+      else if (!setScheduleCellValue(project, rowIndex, columnIndex, event.target.value)) { event.target.value = scheduleCellValue(project, rowIndex, columnIndex); showToast('잠긴 일정은 잠금 셀을 먼저 해제한 뒤 편집해주세요.', 'error'); return; }
+      if (rowIndex >= 0 && column?.key === 'locked') syncScheduleRowLockControls(project, rowIndex);
+      const input = $(`[data-schedule-row="${rowIndex}"][data-schedule-col="${columnIndex}"] input`, scheduleTable); if (input) input.value = event.target.value; queueSchedulePersist(project, '일정 셀 편집 저장됨', event.target.dataset.scheduleImpactBefore);
     });
-    $('#scheduleCellValue').addEventListener('change', () => { delete $('#scheduleCellValue').dataset.scheduleEditing; });
+    $('#scheduleCellValue').addEventListener('change', (event) => {
+      const project = activeProject(); const rowIndex = Number(event.target.dataset.scheduleEditRow ?? scheduleSelection?.focus.row); const columnIndex = Number(event.target.dataset.scheduleEditCol ?? scheduleSelection?.focus.col); const editValue = event.target.dataset.scheduleEditValue ?? event.target.value;
+      if (project && rowIndex === -1) {
+        const column = project.data.scheduleSheetColumns[columnIndex];
+        if (column) { applyScheduleColumnName(project, column, editValue); refreshScheduleConflicts(project); queueSchedulePersist(project, '일정 컬럼 이름 변경됨', event.target.dataset.scheduleImpactBefore); renderSchedulePage(); }
+      }
+      ['scheduleEditing', 'scheduleImpactBefore', 'scheduleEditRow', 'scheduleEditCol', 'scheduleEditValue'].forEach((key) => delete event.target.dataset[key]);
+    });
     $('#openScheduleRosterManager').addEventListener('click', () => void openRosterManager());
-    $('#sessionRosterView').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.scheduleRules.rosterViewId = event.target.value || null; state = Core.updateProject(state, project.id, { data: project.data }); await persist('일정 단계 명단 변경됨'); renderAvailability(project); renderSessionPlanner(project); });
-    ['sessionRoleSelect', 'sessionGroupFilter', 'sessionDateFilter'].forEach((id) => $(`#${id}`).addEventListener('change', () => { const project = activeProject(); if (project) renderSessionPlanner(project); }));
-    $('#sessionShowAllDates').addEventListener('click', () => { $('#sessionDateFilter').value = ''; const project = activeProject(); if (project) renderSessionPlanner(project); });
+    $('#sessionRosterView').addEventListener('change', async (event) => { const project = activeProject(); if (!project) return; project.data.scheduleRules.rosterViewId = event.target.value || null; selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null; refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 대상 명단 변경 · 문제 ${project.data.conflicts.length}건`); await persist('일정 단계 명단 변경됨'); renderSchedulePage(); });
+    ['sessionRoleSelect', 'sessionGroupFilter', 'sessionDateFilter'].forEach((id) => $(`#${id}`).addEventListener('change', () => { pendingSessionChange = null; const project = activeProject(); if (project) renderSessionPlanner(project); }));
+    $('#sessionPersonSearch').addEventListener('input', () => { const project = activeProject(); if (project) renderSessionPlanner(project); });
+    $('#sessionShowAllDates').addEventListener('click', () => { $('#sessionDateFilter').value = ''; pendingSessionChange = null; const project = activeProject(); if (project) renderSessionPlanner(project); });
     $('#sessionAddEmptyTime').addEventListener('click', () => void addSessionFromText());
-    $('#sessionPersonPool').addEventListener('click', (event) => { const chip = event.target.closest('[data-session-person]'); if (!chip) return; selectedSessionPersonId = selectedSessionPersonId === chip.dataset.sessionPerson ? null : chip.dataset.sessionPerson; const project = activeProject(); if (project) renderSessionPlanner(project); });
-    $('#sessionPersonPool').addEventListener('dragstart', (event) => { const chip = event.target.closest('[data-session-person]'); if (!chip) return; event.dataTransfer.setData('application/x-cmoe-person', chip.dataset.sessionPerson); event.dataTransfer.effectAllowed = 'copy'; });
+    $('#sessionPersonPool').addEventListener('click', (event) => { const chip = event.target.closest('[data-session-person]'); if (!chip) return; const project = activeProject(); if (!project) return; if (selectedSessionPersonId === chip.dataset.sessionPerson) { selectedSessionPersonId = null; selectedSessionAssignmentId = null; } else { selectedSessionPersonId = chip.dataset.sessionPerson; const assignments = project.data.assignments.filter((item) => item.personId === selectedSessionPersonId); selectedSessionAssignmentId = assignments.length === 0 ? 'new' : assignments.length === 1 ? assignments[0].id : null; } pendingSessionChange = null; renderSessionPlanner(project); });
+    $('#sessionPersonPool').addEventListener('dragstart', (event) => { const chip = event.target.closest('[data-session-person]'); if (!chip) return; const project = activeProject(); const assignments = project?.data.assignments.filter((item) => item.personId === chip.dataset.sessionPerson) || []; if (assignments.length > 1) { event.preventDefault(); selectedSessionPersonId = chip.dataset.sessionPerson; selectedSessionAssignmentId = null; pendingSessionChange = null; renderSessionPlanner(project); showToast('변경할 현재 일정을 먼저 선택해주세요.'); return; } event.dataTransfer.setData('application/x-cmoe-person', chip.dataset.sessionPerson); if (assignments.length === 1) event.dataTransfer.setData('application/x-cmoe-assignment', assignments[0].id); event.dataTransfer.effectAllowed = assignments.length ? 'move' : 'copy'; });
     $('#sessionCalendarBoard').addEventListener('dragstart', (event) => { const chip = event.target.closest('[data-session-assignment]'); if (!chip) return; event.dataTransfer.setData('application/x-cmoe-assignment', chip.dataset.sessionAssignment); event.dataTransfer.setData('application/x-cmoe-person', chip.dataset.sessionPerson); event.dataTransfer.effectAllowed = 'move'; });
+    $('#sessionCalendarBoard').addEventListener('keydown', (event) => { const chip = event.target.closest('[data-session-assignment]'); if (!chip || !['Enter', ' '].includes(event.key) || event.target.closest('button')) return; event.preventDefault(); selectedSessionPersonId = chip.dataset.sessionPerson; selectedSessionAssignmentId = chip.dataset.sessionAssignment; pendingSessionChange = null; const project = activeProject(); if (project) renderSessionPlanner(project); });
     $('#sessionCalendarBoard').addEventListener('dragover', (event) => { const target = event.target.closest('[data-session-slot], [data-session-empty-drop]'); if (!target) return; event.preventDefault(); target.classList.add('drag-over'); });
     $('#sessionCalendarBoard').addEventListener('dragleave', (event) => { event.target.closest('[data-session-slot]')?.classList.remove('drag-over'); });
-    $('#sessionCalendarBoard').addEventListener('drop', async (event) => { const target = event.target.closest('[data-session-slot], [data-session-empty-drop]'); if (!target) return; event.preventDefault(); target.classList.remove('drag-over'); const personId = event.dataTransfer.getData('application/x-cmoe-person'); const assignmentId = event.dataTransfer.getData('application/x-cmoe-assignment'); if (!personId) return; if (target.dataset.sessionEmptyDrop) { const slot = await addSessionFromText(); if (slot) await assignPersonToSession(personId, slot.id, assignmentId); } else await assignPersonToSession(personId, target.dataset.sessionSlot, assignmentId); });
+    $('#sessionCalendarBoard').addEventListener('drop', async (event) => { const target = event.target.closest('[data-session-slot], [data-session-empty-drop]'); if (!target) return; event.preventDefault(); target.classList.remove('drag-over'); let project = activeProject(); const personId = event.dataTransfer.getData('application/x-cmoe-person'); const assignmentId = event.dataTransfer.getData('application/x-cmoe-assignment'); if (!project || !personId) return; const projectId = project.id; selectedSessionPersonId = personId; selectedSessionAssignmentId = assignmentId || 'new'; if (target.dataset.sessionEmptyDrop) { const slot = await requestSessionSlot(); project = projectById(projectId); if (slot && project) previewSessionChange(project, { personId, assignmentId, toSlotId: slot.id, newSlot: slot }); } else previewSessionChange(project, { personId, assignmentId, toSlotId: target.dataset.sessionSlot }); });
     $('#sessionCalendarBoard').addEventListener('click', async (event) => {
-      const project = activeProject(); if (!project) return;
+      await flushSchedulePersist(); const project = activeProject(); if (!project) return;
       if (event.target.closest('[data-session-empty-drop]')) { await addSessionFromText(); return; }
-      const unassign = event.target.closest('[data-session-unassign]'); if (unassign) { pushScheduleHistory(project); project.data.assignments = project.data.assignments.filter((item) => item.id !== unassign.dataset.sessionUnassign); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 인원 제외됨'); renderSchedulePage(); return; }
-      const edit = event.target.closest('[data-session-edit]'); if (edit) { const slot = project.data.slots.find((item) => item.id === edit.dataset.sessionEdit); const value = await requestName('세션 시간 변경', `${slot.date} ${slot.startTime}-${slot.endTime} ${slot.label || ''}`); if (!value) return; const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '날짜와 시간을 확인해주세요.', 'error'); return; } pushScheduleHistory(project); const next = parsed.slots[0]; Object.assign(slot, { date: next.date, startTime: next.startTime, endTime: next.endTime, label: next.label, status: 'changed' }); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 시간 변경됨'); renderSchedulePage(); return; }
-      const remove = event.target.closest('[data-session-remove]'); if (remove) { const slot = project.data.slots.find((item) => item.id === remove.dataset.sessionRemove); const count = project.data.assignments.filter((item) => item.slotId === slot?.id).length; if (!slot || !await showConfirm(`${slot.date} ${slot.startTime} 세션을 삭제할까요? 배정 인원 ${count}명은 원본·단계 명단에서 삭제되지 않습니다.`, { title: '세션 삭제', action: '삭제' })) return; pushScheduleHistory(project); project.data.slots = project.data.slots.filter((item) => item.id !== slot.id); project.data.assignments = project.data.assignments.filter((item) => item.slotId !== slot.id); refreshScheduleConflicts(project); state = Core.updateProject(state, project.id, { data: project.data }); await persist('세션 삭제됨'); renderSchedulePage(); return; }
-      const card = event.target.closest('[data-session-slot]'); if (card && selectedSessionPersonId) { const personId = selectedSessionPersonId; selectedSessionPersonId = null; await assignPersonToSession(personId, card.dataset.sessionSlot); }
+      const unassign = event.target.closest('[data-session-unassign]'); if (unassign) { const assignment = project.data.assignments.find((item) => item.id === unassign.dataset.sessionUnassign); if (assignment) { selectedSessionPersonId = assignment.personId; selectedSessionAssignmentId = assignment.id; previewSessionChange(project, { personId: assignment.personId, assignmentId: assignment.id, action: 'remove' }); } return; }
+      const assignmentChip = event.target.closest('[data-session-assignment]'); if (assignmentChip) { selectedSessionPersonId = assignmentChip.dataset.sessionPerson; selectedSessionAssignmentId = assignmentChip.dataset.sessionAssignment; pendingSessionChange = null; renderSessionPlanner(project); return; }
+      const edit = event.target.closest('[data-session-edit]'); if (edit) { const projectId = project.id; const slotId = edit.dataset.sessionEdit; let currentProject = project; let slot = currentProject.data.slots.find((item) => item.id === slotId); if (!slot) return; if (slot.locked) { showToast('잠긴 세션은 잠금을 해제한 뒤 시간을 변경해주세요.', 'error'); return; } const value = await requestName('세션 시간 변경', `${slot.date} ${slot.startTime}-${slot.endTime} ${slot.label || ''}`); if (!value) return; const parsed = Ops.parseSlots(value); if (!parsed.slots.length) { showToast(parsed.errors[0] || '날짜와 시간을 확인해주세요.', 'error'); return; } currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot) { showToast('다른 창에서 해당 세션이 삭제되었습니다.', 'error'); renderSchedulePage(); return; } if (slot.locked) { showToast('다른 창에서 세션이 잠겼습니다.', 'error'); renderSchedulePage(); return; } const personIds = currentProject.data.assignments.filter((item) => item.slotId === slot.id).map((item) => item.personId); const confirmSignature = scheduleChangeSignature(currentProject); if (!await showConfirm(`${personIds.length}명의 일정과 연결된 Zoom·메일을 다시 확인해야 합니다. 시간을 변경할까요?`, { title: '세션 시간 변경', action: '변경', danger: false })) return; currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot || slot.locked || scheduleChangeSignature(currentProject) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 시도해주세요.'); renderSchedulePage(); return; } pushScheduleHistory(currentProject); const next = parsed.slots[0]; Object.assign(slot, { date: next.date, startTime: next.startTime, endTime: next.endTime, label: next.label, status: 'changed' }); const impact = { changedSlotIds: [slot.id], zoomReviewSlotIds: [slot.id], affectedPersonIds: personIds }; markScheduleChangeStale(currentProject, impact); refreshScheduleConflicts(currentProject); syncScheduleProjectState(currentProject, `세션 시간 변경 · 문제 ${currentProject.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('세션 시간 변경됨'); return; }
+      const remove = event.target.closest('[data-session-remove]'); if (remove) { const projectId = project.id; const slotId = remove.dataset.sessionRemove; let currentProject = project; let slot = currentProject.data.slots.find((item) => item.id === slotId); let assignments = currentProject.data.assignments.filter((item) => item.slotId === slotId); if (slot?.locked) { showToast('잠긴 세션은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; } if (!slot) return; const confirmSignature = scheduleChangeSignature(currentProject); if (!await showConfirm(`${slot.date} ${slot.startTime} 세션을 삭제할까요? 배정 인원 ${assignments.length}명의 Zoom·메일도 다시 확인해야 합니다.`, { title: '세션 삭제', action: '삭제' })) return; currentProject = projectById(projectId); slot = currentProject?.data.slots.find((item) => item.id === slotId); if (!currentProject || !slot || slot.locked || scheduleChangeSignature(currentProject) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 다시 시도해주세요.'); renderSchedulePage(); return; } assignments = currentProject.data.assignments.filter((item) => item.slotId === slot.id); pushScheduleHistory(currentProject); const impact = { changedSlotIds: [slot.id], zoomReviewSlotIds: [slot.id], affectedPersonIds: assignments.map((item) => item.personId) }; markScheduleChangeStale(currentProject, impact); currentProject.data.slots = currentProject.data.slots.filter((item) => item.id !== slot.id); currentProject.data.assignments = currentProject.data.assignments.filter((item) => item.slotId !== slot.id); refreshScheduleConflicts(currentProject); syncScheduleProjectState(currentProject, `세션 삭제 · 문제 ${currentProject.data.conflicts.length}건`, impact); renderSchedulePage(); await persist('세션 삭제됨'); return; }
+      const card = event.target.closest('[data-session-slot]'); if (card && selectedSessionPersonId) { if (!selectedSessionAssignmentId) { showToast('변경할 현재 일정을 먼저 선택해주세요.'); return; } previewSessionChange(project, { personId: selectedSessionPersonId, assignmentId: selectedSessionAssignmentId, toSlotId: card.dataset.sessionSlot }); }
     });
+    $('#sessionSelectedPersonPanel').addEventListener('click', (event) => { const project = activeProject(); if (!project) return; if (event.target.closest('[data-session-clear-person]')) { selectedSessionPersonId = null; selectedSessionAssignmentId = null; pendingSessionChange = null; renderSessionPlanner(project); return; } const origin = event.target.closest('[data-session-origin-assignment]'); if (origin) { selectedSessionAssignmentId = origin.dataset.sessionOriginAssignment; pendingSessionChange = null; renderSessionPlanner(project); return; } if (event.target.closest('[data-session-origin-new]')) { selectedSessionAssignmentId = 'new'; pendingSessionChange = null; renderSessionPlanner(project); } });
+    $('#sessionCancelChange').addEventListener('click', () => { pendingSessionChange = null; const project = activeProject(); if (project) renderSessionPlanner(project); });
+    $('#sessionApplyChange').addEventListener('click', () => void applyPendingSessionChange());
     scheduleTable.addEventListener('click', (event) => {
       if (event.target.closest('[data-schedule-add-column-inline]')) { void addScheduleColumn(); return; }
       const remove = event.target.closest('[data-schedule-remove-column]'); if (remove) void removeScheduleColumn(remove.dataset.scheduleRemoveColumn);
     });
     scheduleTable.addEventListener('dblclick', (event) => { const rename = event.target.closest('[data-schedule-rename-column]'); if (rename) void renameScheduleColumn(rename.dataset.scheduleRenameColumn); });
-    $('#scheduleUndo').addEventListener('click', () => scheduleTable.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true })));
-    $('#scheduleRedo').addEventListener('click', () => scheduleTable.dispatchEvent(new KeyboardEvent('keydown', { key: 'y', ctrlKey: true, bubbles: true })));
+    $('#scheduleUndo').addEventListener('click', () => void moveScheduleHistory(activeProject(), true));
+    $('#scheduleRedo').addEventListener('click', () => void moveScheduleHistory(activeProject(), false));
+    $('#sessionUndo').addEventListener('click', () => void moveScheduleHistory(activeProject(), true));
+    $('#sessionRedo').addEventListener('click', () => void moveScheduleHistory(activeProject(), false));
     $('#scheduleImportExcel').addEventListener('click', async () => {
       if (!globalThis.workspaceDesktop?.chooseSpreadsheet) { showToast('Excel 가져오기는 데스크톱 앱에서 사용할 수 있습니다.', 'error'); return; }
       try { const result = await globalThis.workspaceDesktop.chooseSpreadsheet(); if (result.canceled) return; const sheets = result.sheets?.length ? result.sheets : [{ name: result.sheetName, matrix: result.matrix }]; const choice = await chooseWorkbookSheet(sheets); if (choice) await importScheduleMatrix(sheets[choice.index].matrix, choice.mode); }
@@ -2514,23 +3022,28 @@
       renderSchedulePage();
     });
     $('#addSlotsButton').addEventListener('click', async () => {
-      const project = activeProject(); if (!project) return;
+      await flushSchedulePersist(); const project = activeProject(); if (!project) return;
       const parsed = Ops.parseSlots($('#slotBulkInput').value);
       $('#slotParseErrors').hidden = parsed.errors.length === 0;
       $('#slotParseErrors').textContent = parsed.errors.join('\n');
       if (!parsed.slots.length) { if (!parsed.errors.length) showToast('추가할 시간대를 입력해주세요.', 'error'); return; }
       const keys = new Set(project.data.slots.map(Ops.slotKey));
       const additions = parsed.slots.filter((slot) => !keys.has(Ops.slotKey(slot)));
+      if (!additions.length) { showToast('이미 있는 시간대입니다.'); return; }
+      pushScheduleHistory(project);
       project.data.slots.push(...additions);
-      state = Core.updateProject(state, project.id, { data: project.data });
+      refreshScheduleConflicts(project); syncScheduleProjectState(project, `시간대 추가 · 문제 ${project.data.conflicts.length}건`);
       await persist(); renderAll(); $('#slotBulkInput').value = '';
       showToast(`${additions.length}개 시간대를 추가했습니다.`, 'success');
     });
     $('#clearSlotsButton').addEventListener('click', async () => {
-      const project = activeProject(); if (!project || !project.data.slots.length) return;
+      await flushSchedulePersist(); let project = activeProject(); if (!project || !project.data.slots.length) return; const projectId = project.id;
+      if (project.data.slots.some((slot) => slot.locked)) { showToast('잠긴 세션이 있습니다. 잠금을 해제한 뒤 전체 삭제해주세요.', 'error'); return; }
+      const confirmSignature = scheduleChangeSignature(project);
       if (!await showConfirm('모든 시간대와 현재 배정을 지울까요?', { title: '시간대 전체 삭제', action: '삭제' })) return;
-      project.data.slots = []; project.data.availability = {}; project.data.assignments = []; project.data.conflicts = [];
-      state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll();
+      project = projectById(projectId); if (!project || scheduleChangeSignature(project) !== confirmSignature) { showToast('다른 창의 일정 변경을 반영했습니다. 전체 삭제를 다시 눌러주세요.'); renderSchedulePage(); return; }
+      const beforeSnapshot = scheduleSnapshot(project); pushScheduleHistory(project); project.data.slots = []; project.data.availability = {}; project.data.assignments = []; refreshScheduleConflicts(project);
+      const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, '모든 시간대 삭제', impact); await persist(); renderAll();
     });
     $('#generateScheduleButton').addEventListener('click', () => void generateSchedule());
     $('#saveScheduleVersion').addEventListener('click', () => void saveScheduleSnapshot());
@@ -2606,39 +3119,57 @@
     $('#prepareZoomMeetings').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
       const problems = [];
-      project.data.slots.forEach((slot) => {
+      const activeSlots = project.data.slots.filter((slot) => slot.status !== 'cancelled');
+      const cancelledWithMeeting = project.data.slots.filter((slot) => slot.status === 'cancelled' && project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status !== 'superseded')).length;
+      activeSlots.forEach((slot) => {
         const connectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
         const connection = state.connections.find((item) => item.id === connectionId && item.type === 'zoom');
         if (!connection) problems.push(`${Ops.slotKey(slot)} · Zoom 계정 미지정`);
         else if (connection.status !== 'connected') problems.push(`${Ops.slotKey(slot)} · ${connection.label} 로그인 필요`);
         if (!project.data.assignments.some((assignment) => assignment.slotId === slot.id)) problems.push(`${Ops.slotKey(slot)} · 배정 인원 없음`);
       });
-      const message = problems.length ? problems.slice(0, 20).join('\n') : `${project.data.slots.length}개 회의를 생성할 준비가 되었습니다.`;
+      const cancelledNotice = cancelledWithMeeting ? `\n취소 일정 ${cancelledWithMeeting}건의 기존 회의는 Zoom에서 직접 취소해주세요.` : '';
+      const message = `${problems.length ? problems.slice(0, 20).join('\n') : `${activeSlots.length}개 회의를 생성할 준비가 되었습니다.`}${cancelledNotice}`;
       $('#zoomReadiness').textContent = message;
-      state = Core.setModuleStatus(state, project.id, 'zoom', problems.length ? 'needsReview' : 'inProgress', problems.length ? `${problems.length}건 확인 필요` : '회의를 만들 준비 완료');
+      const reviewCount = problems.length + cancelledWithMeeting;
+      state = Core.setModuleStatus(state, project.id, 'zoom', reviewCount ? 'needsReview' : 'inProgress', reviewCount ? `${reviewCount}건 확인 필요` : '회의를 만들 준비 완료');
       await persist(); renderDashboard();
-      showToast(problems.length ? `Zoom 회의를 만들기 전에 확인할 항목이 ${problems.length}건 있습니다.` : '모든 일정에 Zoom 회의를 만들 준비가 되었습니다.', problems.length ? 'normal' : 'success');
+      showToast(reviewCount ? `Zoom 회의를 만들거나 정리하기 전에 확인할 항목이 ${reviewCount}건 있습니다.` : '모든 일정에 Zoom 회의를 만들 준비가 되었습니다.', reviewCount ? 'normal' : 'success');
     });
     $('#createZoomMeetings').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
-      const pending = project.data.slots.filter((slot) => project.data.assignments.some((assignment) => assignment.slotId === slot.id) && !project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created'));
+      const pending = project.data.slots.filter((slot) => slot.status !== 'cancelled' && project.data.assignments.some((assignment) => assignment.slotId === slot.id) && !project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status === 'created'));
       const invalid = pending.filter((slot) => !state.connections.some((item) => item.id === (slot.zoomConnectionId || defaultConnectionId(project, 'zoom')) && item.type === 'zoom' && item.status === 'connected'));
       if (!pending.length) { showToast('새로 생성할 Zoom 회의가 없습니다.'); return; }
       if (invalid.length) { showToast(`로그인이 필요한 Zoom 계정이 사용된 일정 ${invalid.length}건을 먼저 확인해주세요.`, 'error'); return; }
-      if (!await showConfirm(`${pending.length}개의 Zoom 회의를 만들까요? 이미 참가 링크가 있는 일정은 건너뜁니다.`, { title: 'Zoom 회의 만들기', action: '회의 만들기' })) return;
-      let createdCount = 0; const failures = [];
-      for (const slot of pending) {
-        const connectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
-        const start = new Date(`${slot.date}T${slot.startTime}:00`); const end = new Date(`${slot.date}T${slot.endTime}:00`);
-        try {
-          const meeting = await globalThis.workspaceDesktop.createZoomMeeting(connectionId, { topic: `${project.name}${slot.label ? ` · ${slot.label}` : ''}`, date: slot.date, startTime: slot.startTime, duration: Math.max(1, Math.round((end - start) / 60000)), timezone: 'Asia/Seoul', agenda: `${project.name} 일정` });
-          project.data.externalArtifacts.push({ kind: 'zoom', slotId: slot.id, connectionId, status: 'created', externalId: String(meeting.id), joinUrl: meeting.join_url || '', startUrl: meeting.start_url || '', password: meeting.password || '', createdAt: new Date().toISOString() });
-          createdCount += 1; $('#zoomReadiness').textContent = `${createdCount}/${pending.length} 생성 완료`;
-        } catch (error) { failures.push(`${Ops.slotKey(slot)}: ${error.message}`); }
-      }
-      state = Core.updateProject(state, project.id, { data: project.data });
-      state = Core.setModuleStatus(state, project.id, 'zoom', failures.length ? 'needsReview' : 'complete', failures.length ? `${createdCount}개 생성, ${failures.length}개 실패` : `${createdCount}개 생성 완료`);
-      await persist(); renderAll(); showToast(failures.length ? `Zoom ${createdCount}개 생성, ${failures.length}개 실패` : `Zoom 회의 ${createdCount}개를 생성했습니다.`, failures.length ? 'error' : 'success');
+      const replacementCount = pending.filter((slot) => project.data.externalArtifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id)).length;
+      const replacementNotice = replacementCount ? ` 이 중 ${replacementCount}건은 일정이 바뀌어 새 회의를 만들며, 이전 회의는 Zoom에서 직접 정리해야 합니다.` : ' 이미 정상 참가 링크가 있는 일정은 건너뜁니다.';
+      if (!await showConfirm(`${pending.length}개의 Zoom 회의를 만들까요?${replacementNotice}`, { title: 'Zoom 회의 만들기', action: '회의 만들기' })) return;
+      beginExternalOperation();
+      try {
+        const projectId = project.id; const baseSignature = scheduleChangeSignature(project); const createdArtifacts = []; let createdCount = 0; const failures = [];
+        for (const slot of pending) {
+          const connectionId = slot.zoomConnectionId || defaultConnectionId(project, 'zoom');
+          const start = new Date(`${slot.date}T${slot.startTime}:00`); const end = new Date(`${slot.date}T${slot.endTime}:00`);
+          try {
+            const meeting = await globalThis.workspaceDesktop.createZoomMeeting(connectionId, { topic: `${project.name}${slot.label ? ` · ${slot.label}` : ''}`, date: slot.date, startTime: slot.startTime, duration: Math.max(1, Math.round((end - start) / 60000)), timezone: 'Asia/Seoul', agenda: `${project.name} 일정` });
+            createdArtifacts.push({ kind: 'zoom', slotId: slot.id, connectionId, status: 'created', externalId: String(meeting.id), joinUrl: meeting.join_url || '', startUrl: meeting.start_url || '', password: meeting.password || '', createdAt: new Date().toISOString() });
+            createdCount += 1; $('#zoomReadiness').textContent = `${createdCount}/${pending.length} 생성 완료`;
+          } catch (error) { failures.push(`${Ops.slotKey(slot)}: ${error.message}`); }
+        }
+        const currentProject = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId);
+        if (!currentProject) throw new Error('회의 생성 결과를 반영할 프로젝트를 찾지 못했습니다.');
+        const scheduleChanged = scheduleChangeSignature(currentProject) !== baseSignature;
+        const artifacts = currentProject.data.externalArtifacts.map((item) => ({ ...item }));
+        createdArtifacts.forEach((artifact) => {
+          if (!scheduleChanged) artifacts.filter((item) => item.kind === 'zoom' && item.slotId === artifact.slotId && !['created', 'superseded'].includes(item.status)).forEach((item) => { item.status = 'superseded'; item.replacedAt ||= new Date().toISOString(); });
+          artifacts.push({ ...artifact, status: scheduleChanged ? 'stale' : 'created' });
+        });
+        const unresolved = artifacts.some((item) => item.kind === 'zoom' && item.status === 'stale') || currentProject.data.slots.some((slot) => slot.status === 'cancelled' && artifacts.some((item) => item.kind === 'zoom' && item.slotId === slot.id && item.status !== 'superseded'));
+        state = Core.updateProject(state, projectId, { data: { externalArtifacts: artifacts } });
+        state = Core.setModuleStatus(state, projectId, 'zoom', failures.length || scheduleChanged || unresolved ? 'needsReview' : 'complete', scheduleChanged ? `${createdCount}개 생성 · 도중 일정 변경으로 재확인 필요` : failures.length ? `${createdCount}개 생성, ${failures.length}개 실패` : unresolved ? `${createdCount}개 생성 · 기존 회의 정리 필요` : `${createdCount}개 생성 완료`);
+        renderAll(); await persist(); showToast(scheduleChanged ? '회의 생성 중 일정이 바뀌어 새 회의를 확인 대상으로 표시했습니다.' : failures.length ? `Zoom ${createdCount}개 생성, ${failures.length}개 실패` : `Zoom 회의 ${createdCount}개를 생성했습니다.`, scheduleChanged || failures.length ? 'error' : unresolved ? 'normal' : 'success');
+      } finally { endExternalOperation(); }
     });
     $('#prepareMailPackage').addEventListener('click', async () => {
       const project = activeProject(); if (!project) return;
@@ -2667,26 +3198,36 @@
       const needsNewDraft = pending.some((entry) => !project.data.externalArtifacts.some((item) => item.kind === 'gmailDraft' && item.personId === entry.personId));
       if (needsNewDraft && !connection) { showToast('메일을 만들 Gmail 계정에 먼저 로그인해주세요.', 'error'); navigate('connections'); return; }
       if (!await showConfirm(`${pending.length}명의 메일을 Gmail 임시보관함에 만들거나 기존 내용을 수정할까요? 아직 실제 발송은 하지 않습니다.`, { title: 'Gmail 임시보관함에 저장', action: '저장하기' })) return;
-      let createdCount = 0; let updatedCount = 0; const failures = [];
-      for (const entry of pending) {
-        try {
-          const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === entry.personId);
-          if (artifact) {
-            const artifactConnection = state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected');
-            if (!artifactConnection) throw new Error('기존 메일을 만든 Gmail 계정에 다시 로그인해야 합니다.');
-            const draft = await globalThis.workspaceDesktop.updateGmailDraft(artifactConnection.id, artifact.externalId, entry);
-            artifact.messageId = draft.message?.id || artifact.messageId; artifact.status = 'created'; artifact.updatedAt = new Date().toISOString(); updatedCount += 1;
-          } else {
-            const draft = await globalThis.workspaceDesktop.createGmailDraft(connection.id, entry);
-            project.data.externalArtifacts.push({ kind: 'gmailDraft', personId: entry.personId, connectionId: connection.id, status: 'created', externalId: draft.id, messageId: draft.message?.id || '', createdAt: new Date().toISOString() }); createdCount += 1;
-          }
-          $('#mailPackageStatus').textContent = `${createdCount + updatedCount}/${pending.length} Gmail 저장 완료`;
-        } catch (error) { failures.push(`${entry.email}: ${error.message}`); }
-      }
-      project.data.communication.lastPreparedAt = new Date().toISOString();
-      state = Core.updateProject(state, project.id, { data: project.data });
-      state = Core.setModuleStatus(state, project.id, 'gmailFlow', failures.length ? 'needsReview' : 'complete', failures.length ? `${createdCount}개 생성, ${updatedCount}개 수정, ${failures.length}개 실패` : `${createdCount}개 생성, ${updatedCount}개 수정`);
-      await persist(); renderAll(); showToast(failures.length ? `Gmail 임시보관함: 새 메일 ${createdCount}개, 수정 ${updatedCount}개, 실패 ${failures.length}개` : `Gmail 임시보관함에 새 메일 ${createdCount}개를 만들고 기존 메일 ${updatedCount}개를 수정했습니다.`, failures.length ? 'error' : 'success');
+      beginExternalOperation();
+      try {
+        const projectId = project.id; const baseSignature = scheduleChangeSignature(project); const artifactUpdates = []; let createdCount = 0; let updatedCount = 0; const failures = [];
+        for (const entry of pending) {
+          try {
+            const artifact = project.data.externalArtifacts.find((item) => item.kind === 'gmailDraft' && item.personId === entry.personId);
+            if (artifact) {
+              const artifactConnection = state.connections.find((item) => item.id === artifact.connectionId && item.status === 'connected');
+              if (!artifactConnection) throw new Error('기존 메일을 만든 Gmail 계정에 다시 로그인해야 합니다.');
+              const draft = await globalThis.workspaceDesktop.updateGmailDraft(artifactConnection.id, artifact.externalId, entry);
+              artifactUpdates.push({ ...artifact, messageId: draft.message?.id || artifact.messageId, status: 'created', updatedAt: new Date().toISOString() }); updatedCount += 1;
+            } else {
+              const draft = await globalThis.workspaceDesktop.createGmailDraft(connection.id, entry);
+              artifactUpdates.push({ kind: 'gmailDraft', personId: entry.personId, connectionId: connection.id, status: 'created', externalId: draft.id, messageId: draft.message?.id || '', createdAt: new Date().toISOString() }); createdCount += 1;
+            }
+            $('#mailPackageStatus').textContent = `${createdCount + updatedCount}/${pending.length} Gmail 저장 완료`;
+          } catch (error) { failures.push(`${entry.email}: ${error.message}`); }
+        }
+        const currentProject = state.projects.find((item) => item.id === projectId) || Object.values(state.quickWorkspaces || {}).find((item) => item.id === projectId);
+        if (!currentProject) throw new Error('메일 생성 결과를 반영할 프로젝트를 찾지 못했습니다.');
+        const scheduleChanged = scheduleChangeSignature(currentProject) !== baseSignature;
+        let artifacts = currentProject.data.externalArtifacts.map((item) => ({ ...item }));
+        if (previousSubject !== project.data.communication.subjectTemplate || previousHtml !== project.data.communication.bodyHtmlTemplate) artifacts = artifacts.map((item) => item.kind === 'gmailDraft' ? { ...item, status: 'stale' } : item);
+        artifacts = mergeExternalArtifactUpdates(artifacts, artifactUpdates.map((item) => scheduleChanged ? { ...item, status: 'stale' } : item));
+        const communication = { ...currentProject.data.communication, subjectTemplate: project.data.communication.subjectTemplate, bodyHtmlTemplate: project.data.communication.bodyHtmlTemplate, bodyTemplate: project.data.communication.bodyTemplate, lastPreparedAt: new Date().toISOString() };
+        const unresolved = artifacts.some((item) => item.kind === 'gmailDraft' && item.status === 'stale');
+        state = Core.updateProject(state, projectId, { data: { communication, externalArtifacts: artifacts } });
+        state = Core.setModuleStatus(state, projectId, 'gmailFlow', failures.length || scheduleChanged || unresolved ? 'needsReview' : 'complete', scheduleChanged ? `${createdCount}개 생성, ${updatedCount}개 수정 · 도중 일정 변경으로 재확인 필요` : failures.length ? `${createdCount}개 생성, ${updatedCount}개 수정, ${failures.length}개 실패` : unresolved ? `${createdCount}개 생성, ${updatedCount}개 수정 · 남은 메일 확인 필요` : `${createdCount}개 생성, ${updatedCount}개 수정`);
+        renderAll(); await persist(); showToast(scheduleChanged ? '메일 저장 중 일정이 바뀌어 해당 초안을 확인 대상으로 표시했습니다.' : failures.length ? `Gmail 임시보관함: 새 메일 ${createdCount}개, 수정 ${updatedCount}개, 실패 ${failures.length}개` : `Gmail 임시보관함에 새 메일 ${createdCount}개를 만들고 기존 메일 ${updatedCount}개를 수정했습니다.`, scheduleChanged || failures.length ? 'error' : unresolved ? 'normal' : 'success');
+      } finally { endExternalOperation(); }
     });
     $('#downloadMailPackage').addEventListener('click', () => {
       const project = activeProject(); if (!project) return; const pkg = Ops.buildMailPackage(project);
@@ -2723,31 +3264,36 @@
       if (event.target.matches('[data-person-active]')) {
         const person = project.data.people.find((item) => item.id === event.target.dataset.personActive); if (person) person.active = event.target.checked;
       }
+      if (event.target.matches('[data-person-role-check], [data-person-active]')) {
+        refreshScheduleConflicts(project); syncScheduleProjectState(project, `명단 배정 조건 변경 · 문제 ${project.data.conflicts.length}건`); await persist('명단 배정 조건 변경됨'); renderPeoplePage(); return;
+      }
       if (event.target.matches('[data-availability-all]')) {
+        pushScheduleHistory(project);
         project.data.availability[event.target.dataset.availabilityAll] = event.target.checked ? project.data.slots.map((slot) => slot.id) : [];
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderSchedulePage();
+        refreshScheduleConflicts(project); syncScheduleProjectState(project, `가능 시간 변경 · 문제 ${project.data.conflicts.length}건`); await persist(); renderSchedulePage(); return;
       }
       if (event.target.matches('[data-availability-person]')) {
         const personId = event.target.dataset.availabilityPerson; const slotId = event.target.dataset.availabilitySlot;
+        pushScheduleHistory(project);
         const selected = new Set(project.data.availability[personId] || []); if (event.target.checked) selected.add(slotId); else selected.delete(slotId); project.data.availability[personId] = [...selected];
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist();
+        refreshScheduleConflicts(project); syncScheduleProjectState(project, `가능 시간 변경 · 문제 ${project.data.conflicts.length}건`); await persist(); renderSchedulePage(); return;
       }
       if (event.target.matches('[data-assignment-slot]')) {
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project);
         const slotId = event.target.dataset.assignmentSlot; const roleId = event.target.dataset.assignmentRole; const position = Number(event.target.dataset.assignmentPosition);
         const matches = project.data.assignments.filter((assignment) => assignment.slotId === slotId && assignment.roleId === roleId);
         const existing = matches[position]; if (existing) project.data.assignments = project.data.assignments.filter((assignment) => assignment.id !== existing.id);
         if (event.target.value) project.data.assignments.push({ id: `assignment-${Date.now().toString(36)}-${position}`, slotId, roleId, personId: event.target.value, locked: false, source: 'manual' });
-        project.data.conflicts = Ops.validateAssignments({ assignments: project.data.assignments, people: project.data.people, roles: project.data.roles, slots: project.data.slots }).map((message) => ({ type: 'validation', message }));
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderScheduleBoard(Core.getActiveProject(state));
+        refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 배정 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderSchedulePage(); return;
       }
       if (event.target.matches('[data-slot-lock]')) {
-        const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLock); if (slot) slot.locked = event.target.checked; project.data.assignments.filter((assignment) => assignment.slotId === slot?.id).forEach((assignment) => { assignment.locked = event.target.checked; }); state = Core.updateProject(state, project.id, { data: project.data }); await persist();
+        pushScheduleHistory(project); const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLock); if (slot) slot.locked = event.target.checked; project.data.assignments.filter((assignment) => assignment.slotId === slot?.id).forEach((assignment) => { assignment.locked = event.target.checked; }); refreshScheduleConflicts(project); syncScheduleProjectState(project, `일정 잠금 변경 · 문제 ${project.data.conflicts.length}건`); await persist(); return;
       }
       if (event.target.matches('[data-slot-status]')) {
-        const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotStatus); if (slot) slot.status = event.target.value; state = Core.updateProject(state, project.id, { data: project.data }); await persist();
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotStatus); if (slot) slot.status = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 상태 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
       }
       if (event.target.matches('[data-slot-label]')) {
-        const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLabel); if (slot) slot.label = event.target.value; state = Core.updateProject(state, project.id, { data: project.data }); await persist();
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); const slot = project.data.slots.find((item) => item.id === event.target.dataset.slotLabel); if (slot) slot.label = event.target.value; refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `세션명 변경 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); return;
       }
       if (event.target.matches('[data-zoom-slot-connection]')) {
         const slot = project.data.slots.find((item) => item.id === event.target.dataset.zoomSlotConnection); if (slot) slot.zoomConnectionId = event.target.value || null;
@@ -2764,10 +3310,12 @@
         const project = activeProject(); if (!project) return;
         const person = project.data.people.find((item) => item.id === personRemove.dataset.personRemove);
         if (await showConfirm(`“${person?.name || '이름 없는 사람'}”을 명단에서 삭제할까요? 연결된 가능 시간과 일정 배정도 삭제됩니다.`, { title: '명단 삭제', action: '삭제' })) {
+          const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
+          clearScheduleHistory();
           project.data.people = project.data.people.filter((item) => item.id !== personRemove.dataset.personRemove);
           delete project.data.availability[personRemove.dataset.personRemove];
           project.data.assignments = project.data.assignments.filter((assignment) => assignment.personId !== personRemove.dataset.personRemove);
-          state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll();
+          refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `명단 삭제 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderAll();
         }
         return;
       }
@@ -2784,18 +3332,20 @@
         const project = activeProject(); if (!project) return;
         const slot = project.data.slots.find((item) => item.id === slotRemove.dataset.slotRemove);
         if (slot?.locked) { showToast('잠긴 세션은 잠금을 해제한 뒤 삭제해주세요.', 'error'); return; }
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project));
+        pushScheduleHistory(project);
         project.data.slots = project.data.slots.filter((item) => item.id !== slotRemove.dataset.slotRemove);
         project.data.assignments = project.data.assignments.filter((assignment) => assignment.slotId !== slotRemove.dataset.slotRemove);
         Object.keys(project.data.availability).forEach((personId) => { project.data.availability[personId] = project.data.availability[personId].filter((id) => id !== slotRemove.dataset.slotRemove); });
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); return;
+        refreshScheduleConflicts(project); const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `세션 삭제 후 일정 확인 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderAll(); return;
       }
       const versionRestore = event.target.closest('[data-version-restore]');
       if (versionRestore) {
         const project = activeProject(); if (!project) return;
         const version = project.data.versions[Number(versionRestore.dataset.versionRestore)]; if (!version) return;
         if (!await showConfirm(`“${version.name}” 상태로 일정을 복원할까요? 현재 상태는 먼저 별도 버전으로 저장하는 것을 권장합니다.`, { title: '일정 버전 복원', action: '복원', danger: false })) return;
-        project.data.slots = JSON.parse(JSON.stringify(version.slots)); project.data.assignments = JSON.parse(JSON.stringify(version.assignments)); project.data.conflicts = JSON.parse(JSON.stringify(version.conflicts));
-        state = Core.updateProject(state, project.id, { data: project.data }); await persist(); renderAll(); showToast('일정 버전을 복원했습니다.', 'success'); return;
+        const beforeSnapshot = takeSchedulePersistBaseline(project, scheduleSnapshot(project)); pushScheduleHistory(project); project.data.slots = JSON.parse(JSON.stringify(version.slots)); project.data.assignments = JSON.parse(JSON.stringify(version.assignments)); refreshScheduleConflicts(project);
+        const impact = applyScheduleMutationImpact(project, beforeSnapshot); syncScheduleProjectState(project, `일정 버전 복원 · 문제 ${project.data.conflicts.length}건`, impact); await persist(); renderAll(); showToast('일정 버전을 복원했습니다.', 'success'); return;
       }
       const navLink = event.target.closest('[data-nav-link]');
       if (navLink) { navigate(navLink.dataset.navLink); return; }
@@ -2951,12 +3501,12 @@
       globalThis.workspaceDesktop.onStateChanged((nextState) => {
         const normalized = Core.normalizeState(nextState);
         if (normalized.updatedAt !== state.updatedAt) {
-          state = normalized;
-          if (mailEditorDirty && currentPage === 'gmailFlow') {
-            showToast('다른 창의 변경사항을 받았습니다. 작성 중인 메일은 그대로 보호됩니다.');
-            renderGmailPage();
-            renderConnectionsPage();
-          } else renderAll();
+          if (schedulePersistBaseline || persistSaving) {
+            deferredWorkspaceState = normalized;
+            if (schedulePersistBaseline && !persistSaving) void flushSchedulePersist();
+            return;
+          }
+          applyIncomingWorkspaceState(normalized);
         }
       });
       window.addEventListener('focus', async () => {
@@ -2967,6 +3517,19 @@
       });
     }
   }
+
+  globalThis.flushWorkspaceEdits = async () => {
+    clearTimeout(mailDraftTimer);
+    await waitForExternalOperations();
+    try { await flushSchedulePersist(); } catch (_) {}
+    if (mailEditorDirty) await saveMailEditorDraft();
+    await waitForPersistIdle();
+    if (schedulePersistBaseline) await flushSchedulePersist();
+    if (persistDirty || pendingScheduleMergeHints.size) await persist('종료 전 변경사항 저장됨');
+    await waitForPersistIdle();
+    if (persistDirty || schedulePersistBaseline || pendingScheduleMergeHints.size) throw new Error('변경사항을 저장하지 못했습니다.');
+    return true;
+  };
 
   void initialize();
 })();

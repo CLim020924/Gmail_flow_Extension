@@ -183,9 +183,13 @@
 
   function generateSchedule({ people, roles, slots, availability, existingAssignments = [], historyPairs = [], rules = {} }) {
     const activePeople = (people || []).filter((person) => person.active !== false);
-    const orderedSlots = (slots || []).slice().sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
+    const orderedSlots = (slots || []).filter((slot) => slot.status !== 'cancelled').sort((a, b) => slotKey(a).localeCompare(slotKey(b)));
+    const orderedSlotMap = new Map(orderedSlots.map((slot) => [slot.id, slot]));
     const orderedRoles = (roles || []).filter((role) => role.active !== false);
-    const assignments = existingAssignments.filter((assignment) => assignment.locked || orderedSlots.find((slot) => slot.id === assignment.slotId)?.locked).map((item) => ({ ...item }));
+    const assignments = existingAssignments.filter((assignment) => {
+      const slot = orderedSlotMap.get(assignment.slotId);
+      return Boolean(slot && (assignment.locked || slot.locked));
+    }).map((item) => ({ ...item }));
     const assignmentCounts = new Map();
     const pairCounts = new Map();
     const assignedByPerson = new Map();
@@ -290,7 +294,7 @@
       if (!roleMap.has(assignment.roleId)) errors.push(`없는 역할에 연결된 배정 ${assignment.id}`);
     }
     for (const person of people) {
-      const personAssignments = assignments.filter((assignment) => assignment.personId === person.id);
+      const personAssignments = assignments.filter((assignment) => assignment.personId === person.id && slotMap.get(assignment.slotId)?.status !== 'cancelled');
       for (let index = 0; index < personAssignments.length; index += 1) {
         for (let other = index + 1; other < personAssignments.length; other += 1) {
           const a = slotMap.get(personAssignments[index].slotId);
@@ -300,6 +304,181 @@
       }
     }
     return [...new Set(errors)];
+  }
+
+  function roleAllowsPerson(role, person) {
+    const filter = role?.candidateFilter || 'manual';
+    if (filter === 'all') return true;
+    if (filter.startsWith('column:')) {
+      const [, columnId, encoded = ''] = filter.split(':');
+      let expected = encoded;
+      try { expected = decodeURIComponent(encoded); } catch (_) { /* Keep malformed legacy values readable. */ }
+      return String(person?.values?.[columnId] || '').trim() === expected;
+    }
+    return (person?.roleIds || []).includes(role?.id);
+  }
+
+  function validateScheduleConstraints({ assignments = [], people = [], roles = [], slots = [], availability = {}, rules = {}, targetPersonIds = null }) {
+    const issues = [];
+    const personMap = new Map(people.map((person) => [person.id, person]));
+    const roleMap = new Map(roles.map((role) => [role.id, role]));
+    const slotMap = new Map(slots.map((slot) => [slot.id, slot]));
+    const activeAssignments = assignments.filter((assignment) => {
+      const slot = slotMap.get(assignment.slotId);
+      const person = personMap.get(assignment.personId);
+      const role = roleMap.get(assignment.roleId);
+      return Boolean(slot && person && role && slot.status !== 'cancelled' && person.active !== false && role.active !== false);
+    });
+
+    assignments.forEach((assignment) => {
+      const person = personMap.get(assignment.personId);
+      const role = roleMap.get(assignment.roleId);
+      const slot = slotMap.get(assignment.slotId);
+      if (!person || !role || !slot) return;
+      if (slot.status === 'cancelled') { issues.push({ type: 'cancelledSlot', personId: person.id, slotId: slot.id, roleId: role.id, message: `${slot.label || slotKey(slot)}은 취소된 일정이지만 ${person.name || '이름 없음'} 고객이 배정되어 있습니다.` }); return; }
+      if (person.active === false) issues.push({ type: 'inactivePerson', personId: person.id, slotId: slot.id, roleId: role.id, message: `${person.name || '이름 없음'} 고객은 현재 명단에서 제외되어 있지만 일정에 배정되어 있습니다.` });
+      if (role.active === false) issues.push({ type: 'inactiveRole', personId: person.id, slotId: slot.id, roleId: role.id, message: `${person.name || '이름 없음'} 고객이 사용 중지된 역할 “${role.name}”에 배정되어 있습니다.` });
+      if (!roleAllowsPerson(role, person)) issues.push({ type: 'roleEligibility', personId: person.id, slotId: slot.id, roleId: role.id, message: `${person.name || '이름 없음'} 고객은 ${role.name} 배정 대상으로 설정되어 있지 않습니다.` });
+      const selected = availability?.[person.id];
+      const available = Array.isArray(selected) ? selected.includes(slot.id) : Boolean(rules.unmarkedMeansAvailable);
+      if (!available) issues.push({ type: 'unavailable', personId: person.id, slotId: slot.id, roleId: role.id, message: `${person.name || '이름 없음'} 고객이 가능한 시간으로 표시하지 않은 ${slot.label || slotKey(slot)}에 배정되어 있습니다.` });
+    });
+
+    slots.filter((slot) => slot.status !== 'cancelled').forEach((slot) => {
+      roles.filter((role) => role.active !== false).forEach((role) => {
+        const count = activeAssignments.filter((assignment) => assignment.slotId === slot.id && assignment.roleId === role.id).length;
+        const minimum = Number(role.minPerSession) || 0;
+        const maximum = Math.max(Number(role.maxPerSession) || 0, minimum);
+        if (count < minimum) issues.push({ type: 'slotMinimum', slotId: slot.id, roleId: role.id, amount: minimum - count, message: `${slot.label || slotKey(slot)} · ${role.name} 최소 인원보다 ${minimum - count}명 부족` });
+        if (maximum && count > maximum) issues.push({ type: 'slotMaximum', slotId: slot.id, roleId: role.id, amount: count - maximum, message: `${slot.label || slotKey(slot)} · ${role.name} 정원을 ${count - maximum}명 초과` });
+      });
+    });
+
+    const targetPeople = Array.isArray(targetPersonIds) ? new Set(targetPersonIds) : null;
+    people.filter((person) => person.active !== false && (!targetPeople || targetPeople.has(person.id))).forEach((person) => {
+      roles.filter((role) => role.active !== false && roleAllowsPerson(role, person) && Number(role.targetSessions) > 0).forEach((role) => {
+        const count = activeAssignments.filter((assignment) => assignment.personId === person.id && assignment.roleId === role.id).length;
+        const target = Number(role.targetSessions) || 0;
+        if (count < target) issues.push({ type: 'personTarget', personId: person.id, roleId: role.id, amount: target - count, message: `${person.name || '이름 없음'} 고객 · ${role.name} 목표보다 ${target - count}회 부족` });
+        if (count > target) issues.push({ type: 'personTargetMaximum', personId: person.id, roleId: role.id, amount: count - target, message: `${person.name || '이름 없음'} 고객 · ${role.name} 목표보다 ${count - target}회 많음` });
+      });
+    });
+
+    const unique = new Map();
+    issues.forEach((issue) => unique.set([issue.type, issue.personId || '', issue.slotId || '', issue.roleId || '', issue.message].join('|'), issue));
+    return [...unique.values()];
+  }
+
+  function scheduleConstraintIssueKey(issue) {
+    return [issue.type, issue.personId || '', issue.slotId || '', issue.roleId || ''].join('|');
+  }
+
+  function scheduleConstraintIssueAmount(issue) {
+    return Number.isFinite(Number(issue.amount)) ? Number(issue.amount) : 1;
+  }
+
+  function diffScheduleDependencies({ beforeSlots = [], beforeAssignments = [], afterSlots = [], afterAssignments = [] } = {}) {
+    const beforeById = new Map(beforeSlots.map((slot) => [slot.id, slot]));
+    const afterById = new Map(afterSlots.map((slot) => [slot.id, slot]));
+    const slotIds = [...new Set([...beforeById.keys(), ...afterById.keys()])];
+    const assignmentSignature = (items, slotId) => items.filter((item) => item.slotId === slotId).map((item) => `${item.personId || item.personName || ''}|${item.roleId || item.roleName || ''}`).sort().join(',');
+    const scheduleSignature = (slot) => slot ? [slot.date || '', slot.startTime || '', slot.endTime || '', slot.label || '', slot.status === 'cancelled'].join('|') : '__missing__';
+    const changedSlotIds = slotIds.filter((slotId) => scheduleSignature(beforeById.get(slotId)) !== scheduleSignature(afterById.get(slotId)) || assignmentSignature(beforeAssignments, slotId) !== assignmentSignature(afterAssignments, slotId));
+    const zoomReviewSlotIds = changedSlotIds.filter((slotId) => {
+      if (scheduleSignature(beforeById.get(slotId)) !== scheduleSignature(afterById.get(slotId))) return true;
+      return beforeAssignments.some((item) => item.slotId === slotId) !== afterAssignments.some((item) => item.slotId === slotId);
+    });
+    const affectedPersonIds = [...new Set([...beforeAssignments, ...afterAssignments].filter((item) => changedSlotIds.includes(item.slotId)).map((item) => item.personId).filter(Boolean))];
+    return { changedSlotIds, zoomReviewSlotIds, affectedPersonIds };
+  }
+
+  function planScheduleChange({ assignments = [], people = [], roles = [], slots = [], availability = {}, rules = {}, targetPersonIds = null, change = {} }) {
+    const action = ['add', 'move', 'remove'].includes(change.action) ? change.action : 'move';
+    const nextAssignments = assignments.map((assignment) => ({ ...assignment }));
+    const assignment = change.assignmentId ? nextAssignments.find((item) => item.id === change.assignmentId) : null;
+    const personId = assignment?.personId || change.personId || '';
+    const roleId = assignment?.roleId || change.roleId || '';
+    const person = people.find((item) => item.id === personId);
+    const role = roles.find((item) => item.id === roleId);
+    const fromSlot = assignment ? slots.find((item) => item.id === assignment.slotId) : null;
+    const toSlot = change.toSlotId ? slots.find((item) => item.id === change.toSlotId) : null;
+    const blockers = [];
+    const warningMap = new Map();
+    const addWarning = (warning) => {
+      const key = [warning.code || '', warning.personId || '', warning.slotId || '', warning.roleId || '', warning.message || ''].join('|');
+      if (!warningMap.has(key)) warningMap.set(key, warning);
+    };
+
+    if (!person) blockers.push({ code: 'missingPerson', message: '변경할 사람을 명단에서 찾지 못했습니다.' });
+    else if (action !== 'remove' && person.active === false) blockers.push({ code: 'inactivePerson', message: '현재 명단에서 제외된 고객입니다.' });
+    if (action !== 'add' && !assignment) blockers.push({ code: 'missingAssignment', message: '변경할 기존 일정을 찾지 못했습니다.' });
+    if (assignment && !fromSlot) blockers.push({ code: 'missingSource', message: '기존 일정 정보를 찾지 못했습니다.' });
+    if (action !== 'remove' && !toSlot) blockers.push({ code: 'missingTarget', message: '옮길 일정을 선택해주세요.' });
+    if (!role) blockers.push({ code: 'missingRole', message: '배정 역할을 확인해주세요.' });
+    else if (action !== 'remove' && role.active === false) blockers.push({ code: 'inactiveRole', message: '사용 중지된 역할에는 새로 배정할 수 없습니다.' });
+    if (assignment?.locked || fromSlot?.locked) blockers.push({ code: 'lockedSource', message: '기존 일정이 잠겨 있어 먼저 잠금을 풀어야 합니다.' });
+    if (action !== 'remove' && toSlot?.locked) blockers.push({ code: 'lockedTarget', message: '선택한 일정이 잠겨 있어 배정할 수 없습니다.' });
+    if (action !== 'remove' && toSlot?.status === 'cancelled') blockers.push({ code: 'cancelledTarget', message: '취소된 일정에는 배정할 수 없습니다.' });
+    if (action === 'move' && fromSlot?.id === toSlot?.id) blockers.push({ code: 'sameSlot', message: '현재 일정과 다른 일정을 선택해주세요.' });
+    if (action !== 'remove' && assignments.some((item) => item.id !== assignment?.id && item.personId === personId && item.slotId === toSlot?.id)) {
+      blockers.push({ code: 'duplicateTarget', message: '이미 이 일정에 배정된 고객입니다.' });
+    }
+
+    if (!blockers.length) {
+      if (action === 'remove') nextAssignments.splice(nextAssignments.findIndex((item) => item.id === assignment.id), 1);
+      else if (action === 'move') assignment.slotId = toSlot.id;
+      else nextAssignments.push({
+        id: change.nextAssignmentId || makeId('assignment'),
+        slotId: toSlot.id,
+        personId,
+        roleId,
+        roleName: role.name,
+        locked: false,
+        source: 'session-board'
+      });
+
+      const beforeErrors = new Set(validateAssignments({ assignments, people, roles, slots }));
+      validateAssignments({ assignments: nextAssignments, people, roles, slots }).forEach((message) => {
+        if (!beforeErrors.has(message)) addWarning({ code: 'newConflict', message });
+      });
+
+      const constraintInput = { people, roles, slots, availability, rules, targetPersonIds };
+      const beforeConstraints = new Map(validateScheduleConstraints({ ...constraintInput, assignments }).map((issue) => [scheduleConstraintIssueKey(issue), issue]));
+      validateScheduleConstraints({ ...constraintInput, assignments: nextAssignments }).forEach((issue) => {
+        const beforeIssue = beforeConstraints.get(scheduleConstraintIssueKey(issue));
+        if (!beforeIssue || scheduleConstraintIssueAmount(issue) > scheduleConstraintIssueAmount(beforeIssue)) addWarning({ ...issue, code: issue.type });
+      });
+    }
+
+    const changedSlotIds = [...new Set([fromSlot?.id, toSlot?.id].filter(Boolean))];
+    const zoomReviewSlotIds = changedSlotIds.filter((slotId) => {
+      const beforeCount = assignments.filter((item) => item.slotId === slotId).length;
+      const afterCount = nextAssignments.filter((item) => item.slotId === slotId).length;
+      return (beforeCount === 0) !== (afterCount === 0);
+    });
+    const affectedPersonIds = [...new Set([
+      personId,
+      ...assignments.filter((item) => changedSlotIds.includes(item.slotId)).map((item) => item.personId),
+      ...nextAssignments.filter((item) => changedSlotIds.includes(item.slotId)).map((item) => item.personId)
+    ].filter(Boolean))];
+
+    return {
+      action,
+      canApply: blockers.length === 0,
+      blockers,
+      warnings: [...warningMap.values()],
+      nextAssignments,
+      impact: {
+        personId,
+        roleId,
+        assignmentId: assignment?.id || null,
+        fromSlotId: fromSlot?.id || null,
+        toSlotId: toSlot?.id || null,
+        changedSlotIds,
+        zoomReviewSlotIds,
+        affectedPersonIds
+      }
+    };
   }
 
   function escapeCsv(value) {
@@ -389,9 +568,10 @@
   function buildMailPackage(project) {
     const personMap = new Map(project.data.people.map((person) => [person.id, person]));
     const roleMap = new Map(project.data.roles.map((role) => [role.id, role]));
+    const slotMap = new Map(project.data.slots.map((slot) => [slot.id, slot]));
     const entries = project.data.people.filter((person) => person.active !== false && person.email).map((person) => {
-      const assignments = project.data.assignments.filter((assignment) => assignment.personId === person.id).map((assignment) => {
-        const slot = project.data.slots.find((candidate) => candidate.id === assignment.slotId);
+      const assignments = project.data.assignments.filter((assignment) => assignment.personId === person.id && slotMap.has(assignment.slotId) && slotMap.get(assignment.slotId).status !== 'cancelled').map((assignment) => {
+        const slot = slotMap.get(assignment.slotId);
         const peers = project.data.assignments.filter((candidate) => candidate.slotId === assignment.slotId && candidate.personId !== person.id).map((candidate) => personMap.get(candidate.personId)?.name).filter(Boolean);
         const artifact = project.data.externalArtifacts.find((candidate) => candidate.kind === 'zoom' && candidate.slotId === assignment.slotId && candidate.status === 'created');
         return { date: slot?.date || '', startTime: slot?.startTime || '', endTime: slot?.endTime || '', label: slot?.label || '', role: roleMap.get(assignment.roleId)?.name || '', peers, zoomJoinUrl: artifact?.joinUrl || '' };
@@ -422,6 +602,9 @@
     slotKey,
     generateSchedule,
     validateAssignments,
+    validateScheduleConstraints,
+    diffScheduleDependencies,
+    planScheduleChange,
     scheduleToCsv,
     scheduleToExcelXml,
     buildGoogleFormDefinition,
