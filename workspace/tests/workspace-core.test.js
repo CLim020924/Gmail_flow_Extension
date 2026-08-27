@@ -6,6 +6,16 @@ function run() {
 
   let state = Core.createEmptyState();
   assert.equal(state.projects.length, 0);
+  const firstNormalizedBuiltins = Core.normalizeState(state).library.workflowTemplates;
+  const secondNormalizedBuiltins = Core.normalizeState(Core.normalizeState(state)).library.workflowTemplates;
+  assert.deepEqual(secondNormalizedBuiltins, firstNormalizedBuiltins, '기본 업무 템플릿은 앱을 다시 열거나 정규화해도 ID와 시각이 바뀌지 않아야 한다');
+  assert.equal(new Set(firstNormalizedBuiltins.flatMap((template) => template.steps.map((step) => step.id))).size, firstNormalizedBuiltins.reduce((count, template) => count + template.steps.length, 0), '기본 업무 템플릿 단계 ID는 서로 겹치지 않아야 한다');
+  const concurrentlyNormalizedBuiltins = Core.threeWayMerge(
+    { library: { workflowTemplates: firstNormalizedBuiltins } },
+    { library: { workflowTemplates: Core.normalizeState(state).library.workflowTemplates } },
+    { library: { workflowTemplates: Core.normalizeState(state).library.workflowTemplates } }
+  );
+  assert.equal(concurrentlyNormalizedBuiltins.library.workflowTemplates.find((template) => template.id === 'template-kac').steps.length, 6, '여러 창의 기본 업무 템플릿 병합이 KAC 단계를 중복시키지 않아야 한다');
 
   let result = Core.createProject(state, { id: 'project-a', name: '프로젝트 A', preset: 'schedule' });
   state = result.state;
@@ -116,6 +126,8 @@ function run() {
   assert.ok(state.library.workflowTemplates.some((template) => template.id === 'template-kac'));
   result = Core.createProject(state, { id: 'project-kac', name: 'KAC 4차', templateId: 'template-kac' });
   state = result.state;
+  const projectKacStepIds = result.project.workflow.map((step) => step.id);
+  assert.deepEqual(Core.normalizeState(state).projects.find((project) => project.id === 'project-kac').workflow.map((step) => step.id), projectKacStepIds, '기존 프로젝트 단계 ID는 기본 템플릿 정규화와 별개로 유지되어야 한다');
   assert.equal(result.project.workflowTemplate.familyId, 'kac');
   assert.ok(result.project.workflow.some((step) => step.type === 'documentReview'));
   const checklistStep = result.project.workflow.find((step) => step.type === 'checklist');

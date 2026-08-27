@@ -91,54 +91,56 @@
     { id: 'report', name: '결과 정리·보고서', description: '기존 방식, 테스트 결과, 개선점과 적용 가능성을 정리합니다.', icon: '결' }
   ];
 
+  const BUILTIN_WORKFLOW_TIMESTAMP = '2026-08-19T00:00:00.000Z';
+
   const BUILTIN_WORKFLOW_TEMPLATES = [
     {
       id: 'template-blank', familyId: 'blank', version: 1, builtin: true,
       name: '빈 프로젝트', description: '명단부터 시작해 필요한 작업만 직접 추가합니다.', category: '기본',
-      steps: [{ type: 'people', name: '명단·자료 준비' }]
+      steps: [{ id: 'template-blank-step-people', type: 'people', name: '명단·자료 준비' }]
     },
     {
       id: 'template-kac', familyId: 'kac', version: 1, builtin: true,
       name: 'KAC 응시자 관리', description: '응시자 명단, 제출 확인, 문서 검토와 안내 업무를 순서대로 관리합니다.', category: 'CMOE 업무',
       steps: [
-        { type: 'people', name: '응시자 명단 준비' },
-        { type: 'checklist', name: '제출서류·진행상황 확인' },
-        { type: 'documentReview', name: '코칭일지 검토' },
-        { type: 'aiReview', name: 'AI 검토 결과 확인' },
-        { type: 'gmailFlow', name: '응시자 안내 메일' },
-        { type: 'layout', name: '최종 응시자 현황표' }
+        { id: 'template-kac-step-people', type: 'people', name: '응시자 명단 준비' },
+        { id: 'template-kac-step-checklist', type: 'checklist', name: '제출서류·진행상황 확인' },
+        { id: 'template-kac-step-document-review', type: 'documentReview', name: '코칭일지 검토' },
+        { id: 'template-kac-step-ai-review', type: 'aiReview', name: 'AI 검토 결과 확인' },
+        { id: 'template-kac-step-gmail', type: 'gmailFlow', name: '응시자 안내 메일' },
+        { id: 'template-kac-step-layout', type: 'layout', name: '최종 응시자 현황표' }
       ]
     },
     {
       id: 'template-education', familyId: 'education', version: 1, builtin: true,
       name: '교육 프로그램 운영', description: '교육생 명단부터 일정·출결·수료·안내 결과까지 관리합니다.', category: 'CMOE 업무',
       steps: [
-        { type: 'people', name: '교육생 명단 준비' },
-        { type: 'forms', name: '신청·가능 시간 조사' },
-        { type: 'schedule', name: '교육 일정 편성' },
-        { type: 'checklist', name: '출결·수료 진행상황' },
-        { type: 'gmailFlow', name: '교육 전후 안내 메일' },
-        { type: 'layout', name: '교육 운영 결과표' }
+        { id: 'template-education-step-people', type: 'people', name: '교육생 명단 준비' },
+        { id: 'template-education-step-forms', type: 'forms', name: '신청·가능 시간 조사' },
+        { id: 'template-education-step-schedule', type: 'schedule', name: '교육 일정 편성' },
+        { id: 'template-education-step-checklist', type: 'checklist', name: '출결·수료 진행상황' },
+        { id: 'template-education-step-gmail', type: 'gmailFlow', name: '교육 전후 안내 메일' },
+        { id: 'template-education-step-layout', type: 'layout', name: '교육 운영 결과표' }
       ]
     },
     {
       id: 'template-communication', familyId: 'communication', version: 1, builtin: true,
       name: '안내문·메일 업무', description: '명단을 정리하고 대상자별 안내문과 Gmail 초안을 만듭니다.', category: '빠른 시작',
-      steps: [{ type: 'people', name: '받는 사람 명단' }, { type: 'gmailFlow', name: '안내 메일 작성' }]
+      steps: [{ id: 'template-communication-step-people', type: 'people', name: '받는 사람 명단' }, { id: 'template-communication-step-gmail', type: 'gmailFlow', name: '안내 메일 작성' }]
     },
     {
       id: 'template-document-review', familyId: 'document-review', version: 1, builtin: true,
       name: '문서·AI 검토 실험', description: '검토 기준과 AI 프롬프트, 결과 및 사람의 확인 내용을 함께 기록합니다.', category: 'AI 업무',
       steps: [
-        { type: 'documentReview', name: '문서 검토 기준 정하기' },
-        { type: 'aiReview', name: 'AI로 직접 테스트하기' },
-        { type: 'report', name: '테스트 결과 정리' }
+        { id: 'template-document-review-step-review', type: 'documentReview', name: '문서 검토 기준 정하기' },
+        { id: 'template-document-review-step-ai', type: 'aiReview', name: 'AI로 직접 테스트하기' },
+        { id: 'template-document-review-step-report', type: 'report', name: '테스트 결과 정리' }
       ]
     },
     {
       id: 'template-data-cleanup', familyId: 'data-cleanup', version: 1, builtin: true,
       name: 'Excel·명단 정리', description: '데이터를 붙여넣고 누락·중복을 확인한 뒤 결과표로 저장합니다.', category: '데이터 업무',
-      steps: [{ type: 'people', name: '데이터 가져오기' }, { type: 'validation', name: '누락·중복 확인' }, { type: 'layout', name: '정리 결과 저장' }]
+      steps: [{ id: 'template-data-cleanup-step-people', type: 'people', name: '데이터 가져오기' }, { id: 'template-data-cleanup-step-validation', type: 'validation', name: '누락·중복 확인' }, { id: 'template-data-cleanup-step-layout', type: 'layout', name: '정리 결과 저장' }]
     }
   ];
 
@@ -389,7 +391,11 @@
   }
 
   function builtinWorkflowTemplates() {
-    return BUILTIN_WORKFLOW_TEMPLATES.map(normalizeWorkflowTemplate);
+    return BUILTIN_WORKFLOW_TEMPLATES.map((template, index) => normalizeWorkflowTemplate({
+      ...template,
+      createdAt: BUILTIN_WORKFLOW_TIMESTAMP,
+      updatedAt: BUILTIN_WORKFLOW_TIMESTAMP
+    }, index));
   }
 
   function normalizeWorkflowTemplates(input = []) {
