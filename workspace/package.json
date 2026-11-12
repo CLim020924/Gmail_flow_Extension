@@ -69,6 +69,7 @@
       }
     ],
     "win": {
+      "icon": "../assets/icon-master.png",
       "target": [
         "portable"
       ]
