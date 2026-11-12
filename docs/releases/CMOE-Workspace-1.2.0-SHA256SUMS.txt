@@ -1,0 +1,5 @@
+cbf61b8fa6fdbd9e5e5fe15dc29df5a46d5e1ed6f5aff35946eb2581d9bab596  CMOE-Workspace-Setup-1.2.0-Windows.exe
+5408c263874b0d8312d8276442a125b69b17cdc6dc92a1b9be73a1e3be947b20  CMOE-Workspace-1.2.0-Windows.exe
+f82ec6be7b771fb3b803882d99f656bf1187877e57ae7281d1c9fa91f5180c58  CMOE-Workspace-1.2.0-Online-Scheduler-Setup.zip
+43870df90c5685f3382438e5d61e24dafda7db02e191bfb0a3babb396e9d840f  CMOE-Workspace-1.2.0-User-Guide-ko.txt
+2aa4d0c7eb42d6bea148c325e36586c0c233cbc18704c736ae1a683d93c524cb  CMOE-Workspace-1.2.0-Release-Notes-ko.txt
