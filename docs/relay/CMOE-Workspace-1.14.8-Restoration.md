@@ -251,3 +251,9 @@
 - 이 PC에는 1.15.40을 기준 설치했다. 1.15.41 설치형은 크기 `111,031,096` bytes, SHA-256 `F24DAB46FE4DBE915B1955B71D14B8E123F92E6174B6C526A5F748809C85CDFF`, FileVersion 1.15.41이며 실제 앱 자동 업데이트 최종 검증용이다.
 - 실제 종단 시험에서 helper 로그가 `helper ready`, `app processes stopped`, `installer starting`, `installer exited 0`, `verified 1.15.41` 순서로 완료됐다. 새 설치 EXE가 `--updated`로 자동 재실행됐으며 실행 버전은 1.15.41이다.
 - 핵심 사용자 데이터 지문은 전후 `5AE8B3C90DB7B8AF09EB42A705B21C62D75BCFA33D40E5AB18DD7E53B0258F0D`로 일치했다. 이번 자동 설치·검증·재실행 경로는 실제 통과다.
+
+## 1.15.42 사용자 재시험 후속판
+
+- 사용자가 1.15.41에서 수정된 자동 업데이트를 직접 다시 확인할 수 있도록 기능·데이터 구조 변경 없는 1.15.42를 배포한다.
+- 현재 PC의 1.15.41은 유지한다. 1.15.42를 직접 설치하지 않고 앱 내부 업데이트로만 시험한다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.42-Windows.exe`, 크기 `111,031,146` bytes, SHA-256 `C04EF78BC62EABA520EF2D70E7253DB95B16C457D62F031E37420A1BD9D5782C`, FileVersion 1.15.42, 서명 없음.
