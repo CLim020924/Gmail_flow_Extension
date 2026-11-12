@@ -222,3 +222,10 @@
 - 전체 Node 테스트·빌드 사전검사·PowerShell helper 구문 검사·전체 스모크를 통과했다. 첫 스모크에서 문서 편집 Undo 타이밍 검사가 한 번 실패했지만 같은 소스의 즉시 재실행에서 11개 가이드·215단계 전체가 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.36-Windows.exe`, 크기 `111,030,666` bytes, SHA-256 `5E09133AA14B6020768BF1B17522B491F06F06E4164D404ED07120C592293C42`, FileVersion 1.15.36, 서명 없음.
 - 이 PC에 `/S`로 기준 설치해 exit 0, 핵심 사용자 데이터 지문 `C5473782A22BD9B07E8F52C9B5C530EB62162A0AB103F7BF596CD2ED6BED8234` 전후 일치, 바탕화면·시작 메뉴와 실제 EXE 1.15.36을 확인했다. 다음 무변경 시험 버전으로 앱 내부 전체 흐름을 검증한다.
+
+## 1.15.37 자동 업데이트 시험용 후속 버전
+
+- 1.15.36 네이티브 helper의 전체 동작을 실제 앱 내부에서 확인하기 위한 무변경 후속 버전이다.
+- 현재 PC는 1.15.36에 유지하고 1.15.37만 GitHub Release와 Cresero 고정 피드에 게시한다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.37-Windows.exe`, 크기 `111,030,789` bytes, SHA-256 `F9344ABD6325B927F90D3A8E34EBAEAC1FAC92CF0CF507C7AA693F458AA18248`, FileVersion 1.15.37, 서명 없음.
+- 사용자는 환경 설정에서 업데이트를 시작한 뒤 앱이 꺼져도 별도 `CMOE Workspace 업데이트` 창이 닫힐 때까지 앱이나 바탕화면 아이콘을 다시 누르지 않는다. 설치 완료 뒤 1.15.37이 자동으로 열리고 같은 업데이트가 재표시되지 않아야 통과다.
