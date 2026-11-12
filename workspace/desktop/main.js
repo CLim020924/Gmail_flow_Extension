@@ -1,6 +1,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { spawn } = require('node:child_process');
 const { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { JsonStorage } = require('./storage');
 const { readWorkbookSheets, exportProjectWorkbook, exportWorkItemWorkbook } = require('./spreadsheet');
@@ -15,6 +16,7 @@ const { DriveSyncGuardStore, connectionGuardKey, drivePayloadsEqual, isUsableDri
 const { fetchAllFormResponses } = require('./google-forms');
 const WorkspaceCore = require('../workspace-core');
 const OperationsCore = require('../operations-core');
+const UpdateService = require('./update-service');
 
 const isSmokeTest = process.env.CMOE_SMOKE === '1' || process.argv.includes('--smoke-test') || app.commandLine.hasSwitch('smoke-test');
 const smokeResultPath = path.join(app.getPath('temp'), 'cmoe-workspace-smoke-result.json');
@@ -51,6 +53,9 @@ let mainDriveSyncRevision = 0;
 let mainDriveSyncPromise = null;
 let mainDriveSyncError = null;
 let driveSyncGuards;
+let lastUpdateCheck = null;
+let updateDownloadPromise = null;
+let pendingUpdateLaunch = null;
 const externalArtifactReservations = new Map();
 const externalReservationOwners = new Set();
 const runWorkspaceStateTransaction = createTransactionQueue();
@@ -500,6 +505,29 @@ function registerIpc() {
     return { ok: true, state: next, merged: mergedState.merged, externalConflict, externalConflictReason };
   }));
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
+  ipcMain.handle('workspace:update-status', () => ({ currentVersion: app.getVersion(), packaged: app.isPackaged, portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR), checked: lastUpdateCheck }));
+  ipcMain.handle('workspace:update-check', async () => {
+    lastUpdateCheck = await UpdateService.checkForUpdate(app.getVersion());
+    return { ...lastUpdateCheck, packaged: app.isPackaged, portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR) };
+  });
+  ipcMain.handle('workspace:update-install', async (event) => {
+    if (!app.isPackaged) throw new Error('개발 실행에서는 업데이트 설치를 시작하지 않습니다.');
+    if (process.env.PORTABLE_EXECUTABLE_DIR) throw new Error('휴대형은 자동 설치하지 않습니다. 다운로드 페이지에서 새 휴대형 파일을 받아주세요.');
+    if (!lastUpdateCheck?.available) throw new Error('먼저 새 버전 확인을 완료해주세요.');
+    if (updateDownloadPromise) return updateDownloadPromise;
+    const feed = lastUpdateCheck.feed;
+    const updateRoot = path.join(app.getPath('temp'), 'cmoe-workspace-update', feed.version);
+    const installerPath = path.join(updateRoot, path.basename(new URL(feed.url).pathname));
+    updateDownloadPromise = UpdateService.downloadInstaller(feed, installerPath, globalThis.fetch, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send('workspace:update-progress', progress);
+    }).then((downloadedPath) => {
+      pendingUpdateLaunch = { installerPath: downloadedPath, expectedSha256: feed.sha256, appPath: process.execPath, pid: process.pid };
+      setTimeout(() => app.quit(), 300);
+      return { ready: true, version: feed.version };
+    }).finally(() => { updateDownloadPromise = null; });
+    return updateDownloadPromise;
+  });
+  ipcMain.handle('workspace:update-open-downloads', () => shell.openExternal('https://cresero.com/downloads/cmoe-workspace'));
   ipcMain.handle('workspace:external-reserve', (event, payload = {}) => {
     pruneExternalReservations();
     const projectId = String(payload.projectId || '').trim(); const kind = String(payload.kind || '').trim();
@@ -815,7 +843,17 @@ function registerIpc() {
 
 app.setAppUserModelId('kr.co.cmoe.workspace');
 app.on('before-quit', (event) => {
-  if (quitReady) { isQuitting = true; return; }
+  if (quitReady) {
+    isQuitting = true;
+    if (pendingUpdateLaunch) {
+      const command = UpdateService.helperCommand(pendingUpdateLaunch);
+      pendingUpdateLaunch = null;
+      const encoded = Buffer.from(command, 'utf16le').toString('base64');
+      const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], { detached: true, stdio: 'ignore', windowsHide: true });
+      helper.unref();
+    }
+    return;
+  }
   event.preventDefault();
   if (quitFlushInProgress) return;
   quitFlushInProgress = true;

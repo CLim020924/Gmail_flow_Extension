@@ -1,6 +1,6 @@
 {
   "name": "cmoe-workspace",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "명단, 일정, 계정과 업무 모듈을 프로젝트 단위로 관리하는 Windows Workspace",
   "main": "desktop/main.js",
   "author": "CLim020924",
@@ -9,7 +9,7 @@
   "scripts": {
     "postinstall": "npm --prefix vendor ci --omit=dev",
     "desktop": "electron .",
-    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/google-forms.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node tests/drive-sync-guard.test.js && node tests/transaction-queue.test.js && node tests/gmail-flow-host.test.js && node tests/external-commit.test.js && node ../tests/cloud-sync-revision.test.js && node ../tests/oauth-optional-secret.test.js && node ../tests/background-attachment.test.js && node ../tests/oauth-login-hint.test.js && node ../tests/desktop-storage.test.js && node ../tests/online-scheduler-client.test.js && node ../tests/background-online-scheduler.test.js && node ../tests/apps-script-scheduler.test.js",
+    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/google-forms.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node tests/drive-sync-guard.test.js && node tests/transaction-queue.test.js && node tests/gmail-flow-host.test.js && node tests/external-commit.test.js && node tests/update-service.test.js && node ../tests/cloud-sync-revision.test.js && node ../tests/oauth-optional-secret.test.js && node ../tests/background-attachment.test.js && node ../tests/oauth-login-hint.test.js && node ../tests/desktop-storage.test.js && node ../tests/online-scheduler-client.test.js && node ../tests/background-online-scheduler.test.js && node ../tests/apps-script-scheduler.test.js",
     "smoke": "node scripts/run-smoke.js",
     "preflight:build": "node scripts/preflight-build.js",
     "prebuild:windows": "npm run preflight:build",
@@ -85,7 +85,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "CMOE Workspace",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "allowElevation": false,
+      "include": "build/installer.nsh"
     }
   }
 }

@@ -8,7 +8,7 @@ const scheduler = require('../online-scheduler-client.js');
     secret: '12345678901234567890123456789012'
   };
 
-  assert.deepEqual(scheduler.normalizeConfig({ mode: 'anything', url: ' x ', secret: ' y ' }), { mode: 'local', url: 'x', secret: 'y' });
+  assert.deepEqual(scheduler.normalizeConfig({ mode: 'anything', url: ' x ', secret: ' y ' }), { mode: 'online', url: 'x', secret: 'y' });
   assert.throws(() => scheduler.validateConfig({ ...config, url: 'http://example.com' }), /Apps Script/);
   assert.throws(() => scheduler.validateConfig({ ...config, secret: 'short' }), /연결 키/);
 

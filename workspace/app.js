@@ -84,6 +84,7 @@
   let workflowEditorDraft = [];
   let workflowEditorTemplateDraft = null;
   let gmailFlowSummary = { connected: false, email: '', rosters: 0, templates: 0, structures: 0 };
+  let appUpdateState = { currentVersion: '', packaged: false, portable: false, checking: false, installing: false, checked: null, progress: null, error: '' };
   const navigationTrace = [];
   if (smokeDiagnostics) globalThis.__workspaceNavigationTrace = navigationTrace;
 
@@ -3166,6 +3167,32 @@
           : selectedDrive ? `${selectedDrive.label} 계정에 Workspace 전체를 저장합니다.` : 'Google Drive에 연결한 계정이 있어야 사용할 수 있습니다.';
     $('#showArchivedSetting').checked = Boolean(state.preferences.showArchivedProjects);
     $('#toggleArchived').textContent = state.preferences.showArchivedProjects ? '진행만' : '보관함';
+    renderAppUpdate();
+  }
+
+  function renderAppUpdate() {
+    const status = $('#appVersionStatus'); if (!status) return;
+    const install = $('#installAppUpdate'); const check = $('#checkAppUpdate'); const progress = $('#appUpdateProgress');
+    const available = Boolean(appUpdateState.checked?.available); const latest = appUpdateState.checked?.feed?.version || '';
+    status.textContent = appUpdateState.error
+      ? `현재 ${appUpdateState.currentVersion || '—'} · 확인 실패: ${appUpdateState.error}`
+      : appUpdateState.checking ? `현재 ${appUpdateState.currentVersion || '—'} · 새 버전을 확인하고 있습니다…`
+      : available ? `현재 ${appUpdateState.currentVersion} · 새 버전 ${latest}`
+      : appUpdateState.checked ? `현재 ${appUpdateState.currentVersion} · 최신 버전입니다.`
+      : `현재 버전 ${appUpdateState.currentVersion || '확인 중'}`;
+    check.disabled = appUpdateState.checking || appUpdateState.installing;
+    install.hidden = !available; install.disabled = appUpdateState.installing;
+    install.textContent = appUpdateState.portable ? '새 휴대형 받기' : appUpdateState.installing ? '업데이트 준비 중…' : '다운로드 후 업데이트';
+    progress.hidden = !appUpdateState.progress;
+    if (appUpdateState.progress) progress.textContent = `다운로드 ${Math.round(appUpdateState.progress.percent || 0)}% · ${Math.round((appUpdateState.progress.received || 0) / 1024 / 1024)}MB / ${Math.round((appUpdateState.progress.total || 0) / 1024 / 1024)}MB`;
+  }
+
+  async function checkAppUpdate({ quiet = false } = {}) {
+    if (!globalThis.workspaceDesktop?.checkForUpdates || appUpdateState.checking) return;
+    appUpdateState.checking = true; appUpdateState.error = ''; renderAppUpdate();
+    try { appUpdateState.checked = await globalThis.workspaceDesktop.checkForUpdates(); appUpdateState.portable = Boolean(appUpdateState.checked.portable); }
+    catch (error) { appUpdateState.error = error.message; if (!quiet) showToast(`업데이트를 확인하지 못했습니다: ${error.message}`, 'error'); }
+    finally { appUpdateState.checking = false; renderAppUpdate(); }
   }
 
   function renderAll() {
@@ -4058,6 +4085,14 @@
     $('#workflowTaskComplete').addEventListener('click', () => void saveWorkflowTask('complete'));
     $('#projectSettingsForm').addEventListener('submit', saveProjectSettings);
     $('#connectionForm').addEventListener('submit', addConnectionFromForm);
+    $('#checkAppUpdate').addEventListener('click', () => void checkAppUpdate());
+    $('#installAppUpdate').addEventListener('click', async () => {
+      if (appUpdateState.portable) { await globalThis.workspaceDesktop.openUpdateDownloads(); return; }
+      if (!await showConfirm(`CMOE Workspace ${appUpdateState.checked?.feed?.version || ''}을 내려받아 검증한 뒤 업데이트할까요?\n작업 내용을 저장하고 앱을 종료한 다음 같은 위치에 설치하고 한 번만 다시 실행합니다.`, { title: '프로그램 업데이트', action: '업데이트' })) return;
+      appUpdateState.installing = true; appUpdateState.error = ''; renderAppUpdate();
+      try { await globalThis.workspaceDesktop.installUpdate(); }
+      catch (error) { appUpdateState.installing = false; appUpdateState.error = error.message; renderAppUpdate(); showToast(`업데이트를 시작하지 못했습니다: ${error.message}`, 'error'); }
+    });
     $('#mailEditForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const submitButton = $('#mailEditForm button[type="submit"]');
@@ -5086,6 +5121,11 @@
     if (globalThis.workspaceDesktop) {
       const info = await globalThis.workspaceDesktop.getAppInfo();
       $('#appVersion').textContent = `CMOE Workspace ${info.version}`;
+      appUpdateState = { ...appUpdateState, currentVersion: info.version };
+      try { appUpdateState = { ...appUpdateState, ...(await globalThis.workspaceDesktop.getUpdateStatus()) }; } catch (_) {}
+      globalThis.workspaceDesktop.onUpdateProgress((progress) => { appUpdateState.progress = progress; renderAppUpdate(); });
+      renderAppUpdate();
+      if (appUpdateState.packaged && !smokeDiagnostics) setTimeout(() => void checkAppUpdate({ quiet: true }), 1500);
       globalThis.workspaceDesktop.onStateChanged((nextState) => {
         const normalized = Core.normalizeState(nextState);
         const incomingRevision = Number(normalized._revision || 0); const currentRevision = Number(state._revision || 0);

@@ -108,8 +108,8 @@ async function getOnlineSchedulerConfig() {
 }
 
 async function saveOnlineSchedulerConfig(config) {
-  const normalized = GmailFlowOnlineScheduler.normalizeConfig(config);
-  if (normalized.mode === 'online') GmailFlowOnlineScheduler.validateConfig(normalized);
+  const normalized = GmailFlowOnlineScheduler.normalizeConfig({ ...config, mode: 'online' });
+  GmailFlowOnlineScheduler.validateConfig(normalized);
   const saved = { ...normalized, verifiedAt: '' };
   await chrome.storage.local.set({ [ONLINE_SCHEDULER_CONFIG_KEY]: saved });
   return { ...saved, secretConfigured: Boolean(normalized.secret) };
@@ -951,8 +951,7 @@ async function enqueueOnlineBatch(payload) {
 }
 
 async function enqueueBatch(payload) {
-  const config = await getOnlineSchedulerConfig();
-  if (payload.method === '예약 발송' && config.mode === 'online') return enqueueOnlineBatch(payload);
+  if (payload.method === '예약 발송') return enqueueOnlineBatch(payload);
   return enqueueLocalBatch(payload);
 }
 

@@ -45,7 +45,8 @@ npm run build:installer
 - 명단·템플릿·프로젝트 데이터는 기본적으로 Electron `userData` 폴더에 저장됩니다.
 - 사용자가 선택하면 Google Drive 동기화를 사용할 수 있습니다.
 - Google 및 Zoom 계정은 기능별로 별도 등록할 수 있습니다.
-- Gmail Flow 예약 발송은 기존 로컬 방식과 Google Apps Script 온라인 방식 중 선택할 수 있습니다. 온라인 방식은 등록 후 PC가 꺼져도 동작하지만 사용자 계정에 Apps Script를 최초 1회 배포해야 합니다.
+- Gmail Flow 예약 발송은 Google Apps Script 온라인 방식으로만 등록합니다. 예약 시 Gmail 초안을 만들고 등록 후 PC가 꺼져도 동작합니다. 사용자 계정에 Apps Script를 최초 한 번 배포하고 연결한 뒤에는 실행 방식을 다시 선택하지 않습니다.
+- Windows 설치판은 기존 설치가 구버전이면 업데이트·제거·닫기, 동일하거나 더 최신이면 제거·닫기를 표시합니다. 환경 설정에서 고정 Cresero 업데이트 정보를 확인하고 공식 설치 파일의 크기와 SHA-256을 검증해 업데이트합니다. 휴대형은 자동 설치 대신 새 휴대형 다운로드 페이지를 엽니다.
 - OAuth 비밀번호·토큰과 `desktop/oauth-credentials.local.js`는 Git 저장소와 설치 파일에 포함하지 않습니다. Gmail Flow의 데스크톱 PKCE 로그인은 로컬 Client Secret 파일이 없어도 시작되며, 값이 없으면 토큰 요청에서도 해당 필드를 생략합니다.
 
 ## 포함 구조

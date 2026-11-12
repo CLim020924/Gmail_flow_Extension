@@ -9,6 +9,15 @@ contextBridge.exposeInMainWorld('workspaceDesktop', {
   saveSharedRoster: (roster) => ipcRenderer.invoke('workspace:roster:library-save', roster),
   deleteSharedRoster: (rosterId) => ipcRenderer.invoke('workspace:roster:library-delete', rosterId),
   getAppInfo: () => ipcRenderer.invoke('workspace:app-info'),
+  getUpdateStatus: () => ipcRenderer.invoke('workspace:update-status'),
+  checkForUpdates: () => ipcRenderer.invoke('workspace:update-check'),
+  installUpdate: () => ipcRenderer.invoke('workspace:update-install'),
+  openUpdateDownloads: () => ipcRenderer.invoke('workspace:update-open-downloads'),
+  onUpdateProgress: (listener) => {
+    const wrapped = (_event, progress) => listener(progress);
+    ipcRenderer.on('workspace:update-progress', wrapped);
+    return () => ipcRenderer.removeListener('workspace:update-progress', wrapped);
+  },
   reserveExternalArtifacts: (projectId, kind, keys) => ipcRenderer.invoke('workspace:external-reserve', { projectId, kind, keys }),
   releaseExternalArtifacts: (token) => ipcRenderer.invoke('workspace:external-release', token),
   gmailFlowSummary: () => ipcRenderer.invoke('gmail-flow:summary'),

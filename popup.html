@@ -323,13 +323,8 @@
         <p class="muted">Drive 동기화에는 명단·구조·메일 템플릿·작성 설정만 포함됩니다. 발송 작업과 로그인 정보는 동기화하지 않습니다.</p>
       </div>
       <div class="sync-settings">
-        <label class="field">예약 발송 실행 방식
-          <select id="onlineSchedulerMode">
-            <option value="local">이 PC에서 실행 · 앱이 켜져 있어야 함</option>
-            <option value="online">온라인 실행 · PC가 꺼져도 발송</option>
-          </select>
-        </label>
-        <div id="onlineSchedulerFields" hidden>
+        <div class="field"><strong>온라인 예약 발송</strong><span class="muted">예약 메일은 Gmail 초안으로 저장되고, 예약 시각에 Google Apps Script가 발송합니다.</span></div>
+        <div id="onlineSchedulerFields">
           <label class="field">Apps Script 웹 앱 주소
             <input id="onlineSchedulerUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/.../exec">
           </label>
@@ -338,8 +333,8 @@
           </label>
           <div class="toolbar"><button id="testOnlineScheduler" class="button" type="button">연결 테스트</button></div>
         </div>
-        <p id="onlineSchedulerStatus" class="muted">현재 PC에서 예약 시간을 확인합니다. 앱과 PC가 꺼지면 발송되지 않습니다.</p>
-        <p class="muted">온라인 설정은 이 PC에만 저장되며 Drive 동기화에 포함되지 않습니다. 최초 1회 Apps Script 배포가 필요합니다.</p>
+        <p id="onlineSchedulerStatus" class="muted">Apps Script 주소와 연결 키를 입력하고 최초 한 번 연결을 확인해주세요.</p>
+        <p class="muted">연결 후 모든 예약 발송은 온라인으로 등록되며 앱과 PC를 꺼도 발송됩니다. 연결 정보는 이 PC에만 저장되고 Drive 동기화에는 포함되지 않습니다.</p>
       </div>
     </form>
   </dialog>

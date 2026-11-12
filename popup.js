@@ -90,7 +90,7 @@ const state = {
   connectedEmail: '',
   rememberedEmail: '',
   dataStorageMode: 'local',
-  onlineSchedulerConfig: { mode: 'local', url: '', secret: '', verifiedAt: '' },
+  onlineSchedulerConfig: { mode: 'online', url: '', secret: '', verifiedAt: '' },
   cloudSyncMeta: null,
   attachments: [],
   draftEditAttachments: [],
@@ -588,25 +588,24 @@ function renderCloudSyncStatus(message = '') {
 }
 
 function renderOnlineSchedulerStatus(message = '') {
-  const config = state.onlineSchedulerConfig || { mode: 'local', url: '', secret: '', verifiedAt: '' };
-  $('#onlineSchedulerMode').value = config.mode === 'online' ? 'online' : 'local';
-  $('#onlineSchedulerFields').hidden = config.mode !== 'online';
+  const config = state.onlineSchedulerConfig || { mode: 'online', url: '', secret: '', verifiedAt: '' };
+  $('#onlineSchedulerFields').hidden = false;
   $('#onlineSchedulerUrl').value = config.url || '';
   $('#onlineSchedulerSecret').value = config.secret || '';
-  $('#onlineSchedulerStatus').textContent = message || (config.mode === 'online'
-    ? (config.verifiedAt ? `온라인 연결 확인됨 · ${formatDateTime(config.verifiedAt)}` : (config.url && config.secret ? '연결 테스트를 완료해야 온라인 예약을 등록할 수 있습니다.' : 'Apps Script 주소와 연결 키를 입력해주세요.'))
-    : '현재 PC에서 예약 시간을 확인합니다. 앱과 PC가 꺼지면 발송되지 않습니다.');
+  $('#onlineSchedulerStatus').textContent = message || (config.verifiedAt
+    ? `온라인 연결 확인됨 · ${formatDateTime(config.verifiedAt)}`
+    : (config.url && config.secret ? '연결 테스트를 완료해야 예약 발송을 등록할 수 있습니다.' : 'Apps Script 주소와 연결 키를 입력해주세요.'));
 }
 
 async function saveOnlineSchedulerSettings({ test = false } = {}) {
   const config = {
-    mode: $('#onlineSchedulerMode').value === 'online' ? 'online' : 'local',
+    mode: 'online',
     url: $('#onlineSchedulerUrl').value.trim(),
     secret: $('#onlineSchedulerSecret').value.trim()
   };
   const saved = await sendRuntimeMessage({ type: 'online-scheduler-config-save', config });
   state.onlineSchedulerConfig = { mode: saved.mode, url: saved.url, secret: saved.secret, verifiedAt: saved.verifiedAt || '' };
-  renderOnlineSchedulerStatus(test ? '설정을 저장했습니다. 연결을 확인하고 있습니다…' : '예약 발송 방식을 저장했습니다.');
+  renderOnlineSchedulerStatus(test ? '설정을 저장했습니다. 연결을 확인하고 있습니다…' : '온라인 예약 발송 연결 정보를 저장했습니다.');
   updateComposeState();
   return state.onlineSchedulerConfig;
 }
@@ -1164,17 +1163,16 @@ function updateComposeState() {
       : (emptyCount ? `받는 사람 없는 빈 초안 ${emptyCount}개를 만듭니다.` : '명단을 선택하거나 빈 초안 기능을 켜주세요.'));
   } else if (method === '예약 발송') {
     $('#composeAction').textContent = '예약 발송 등록';
-    const online = state.onlineSchedulerConfig?.mode === 'online';
-    const onlineMissing = online && (!state.onlineSchedulerConfig.url || !state.onlineSchedulerConfig.secret || !state.onlineSchedulerConfig.verifiedAt);
+    const onlineMissing = !state.onlineSchedulerConfig?.url || !state.onlineSchedulerConfig?.secret || !state.onlineSchedulerConfig?.verifiedAt;
     $('#composeHint').textContent = work.validation.errors[0] || (onlineMissing
       ? '설정에서 Apps Script 주소와 연결 키를 입력하고 연결 테스트를 완료해주세요.'
-      : `${recipientCount}명에게 ${online ? '온라인으로 예약합니다. 등록 후 PC를 꺼도 발송됩니다.' : '이 PC에서 예약 발송합니다. 발송 때까지 앱을 켜두세요.'}`);
+      : `${recipientCount}명에게 온라인으로 예약합니다. Gmail 초안 저장 후 PC를 꺼도 발송됩니다.`);
   } else {
     $('#composeAction').textContent = '즉시 발송';
     $('#composeHint').textContent = work.validation.errors[0] || `${recipientCount}명에게 지금 바로 발송합니다.`;
   }
   $('#composeHint').classList.toggle('error-text', work.validation.errors.length > 0);
-  $('#composeAction').disabled = !work.validation.valid || (method === '예약 발송' && state.onlineSchedulerConfig?.mode === 'online' && (!state.onlineSchedulerConfig.url || !state.onlineSchedulerConfig.secret || !state.onlineSchedulerConfig.verifiedAt));
+  $('#composeAction').disabled = !work.validation.valid || (method === '예약 발송' && (!state.onlineSchedulerConfig?.url || !state.onlineSchedulerConfig?.secret || !state.onlineSchedulerConfig?.verifiedAt));
   renderComposeVariableStatus();
   scheduleWorkspaceSave();
 }
@@ -2735,7 +2733,7 @@ function bindEvents() {
       if (!await showConfirm(`${count}개의 Gmail 초안을 생성할까요?`, '초안 생성 확인', '생성')) return;
     } else {
       const firstWarning = method === '예약 발송'
-        ? `예약 발송 형식입니다.\n${count}명에게 ${formatDateTime(scheduledAt)}에 발송하시겠습니까?\n실행 위치: ${state.onlineSchedulerConfig?.mode === 'online' ? '온라인 · 등록 후 PC를 꺼도 됨' : '이 PC · 발송 때까지 앱을 켜두어야 함'}`
+        ? `예약 발송 형식입니다.\n${count}명에게 ${formatDateTime(scheduledAt)}에 발송하시겠습니까?\nGmail 초안으로 저장한 뒤 온라인에서 발송하므로 등록 후 PC를 꺼도 됩니다.`
         : `즉시 발송 형식입니다.\n${count}명에게 지금 바로 발송하시겠습니까?`;
       if (!await showConfirm(firstWarning, '발송 확인', method === '예약 발송' ? '예약' : '계속')) return;
       const individuallyApproved = await openSendReview(rechecked.items, method, scheduledAt, connection.email || '');
@@ -2762,7 +2760,7 @@ function bindEvents() {
       await refreshMailActivity();
       state.attachments = [];
       renderAttachments();
-      await showAlert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}\n실행 위치: ${batch.schedulerMode === 'online' ? '온라인 · PC를 꺼도 발송됨' : '이 PC · 앱을 켜두어야 함'}`);
+      await showAlert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}\nGmail 초안 저장 완료 · 예약 시각에는 온라인에서 발송됩니다.`);
       showPage(method === '예약 발송' ? 'queue' : 'history');
     } catch (error) {
       await showAlert(error.message);
@@ -3081,17 +3079,6 @@ function bindEvents() {
     renderCloudSyncStatus();
     try { await updateConnectionStatus(); } catch (error) { $('#gmailConnectionStatus').textContent = error.message; }
   });
-  $('#onlineSchedulerMode').addEventListener('change', async () => {
-    state.onlineSchedulerConfig = {
-      ...state.onlineSchedulerConfig,
-      mode: $('#onlineSchedulerMode').value === 'online' ? 'online' : 'local'
-    };
-    renderOnlineSchedulerStatus();
-    if (state.onlineSchedulerConfig.mode === 'local') {
-      try { await saveOnlineSchedulerSettings(); } catch (error) { await showAlert(error.message, '예약 발송 설정'); }
-    }
-    updateComposeState();
-  });
   $('#onlineSchedulerUrl').addEventListener('input', () => { state.onlineSchedulerConfig.url = $('#onlineSchedulerUrl').value; state.onlineSchedulerConfig.verifiedAt = ''; updateComposeState(); });
   $('#onlineSchedulerSecret').addEventListener('input', () => { state.onlineSchedulerConfig.secret = $('#onlineSchedulerSecret').value; state.onlineSchedulerConfig.verifiedAt = ''; updateComposeState(); });
   $('#testOnlineScheduler').addEventListener('click', async () => {
@@ -3298,9 +3285,9 @@ async function init() {
   state.dataStorageMode = await storage.get(DATA_STORAGE_MODE_KEY, 'local') === 'drive' ? 'drive' : 'local';
   try {
     const scheduler = await sendRuntimeMessage({ type: 'online-scheduler-config-get' });
-    state.onlineSchedulerConfig = { mode: scheduler.mode, url: scheduler.url, secret: scheduler.secret, verifiedAt: scheduler.verifiedAt || '' };
+    state.onlineSchedulerConfig = { mode: 'online', url: scheduler.url, secret: scheduler.secret, verifiedAt: scheduler.verifiedAt || '' };
   } catch (_) {
-    state.onlineSchedulerConfig = { mode: 'local', url: '', secret: '', verifiedAt: '' };
+    state.onlineSchedulerConfig = { mode: 'online', url: '', secret: '', verifiedAt: '' };
   }
   if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'canceled'].includes(batch.status))) {
     try {

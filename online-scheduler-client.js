@@ -7,15 +7,14 @@
 
   function normalizeConfig(config = {}) {
     return {
-      mode: config.mode === 'online' ? 'online' : 'local',
+      mode: 'online',
       url: String(config.url || '').trim(),
       secret: String(config.secret || '').trim()
     };
   }
 
-  function validateConfig(config, { requireOnline = true } = {}) {
+  function validateConfig(config) {
     const normalized = normalizeConfig(config);
-    if (requireOnline && normalized.mode !== 'online') throw new Error('온라인 예약 발송이 선택되지 않았습니다.');
     let parsed;
     try { parsed = new URL(normalized.url); } catch (_) { throw new Error('Apps Script 웹 앱 주소가 올바르지 않습니다.'); }
     if (parsed.protocol !== 'https:' || !['script.google.com', 'script.googleusercontent.com'].includes(parsed.hostname)) {

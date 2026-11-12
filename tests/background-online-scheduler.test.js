@@ -66,8 +66,10 @@ function send(message) {
 }
 
 (async () => {
-  const config = { mode: 'online', url: 'https://script.google.com/macros/s/test/exec', secret: '12345678901234567890123456789012' };
-  assert.equal((await send({ type: 'online-scheduler-config-save', config })).ok, true);
+  const config = { mode: 'local', url: 'https://script.google.com/macros/s/test/exec', secret: '12345678901234567890123456789012' };
+  const savedConfig = await send({ type: 'online-scheduler-config-save', config });
+  assert.equal(savedConfig.ok, true);
+  assert.equal(savedConfig.data.mode, 'online', 'legacy local preference must migrate to online-only scheduling');
   const health = await send({ type: 'online-scheduler-test' });
   assert.equal(health.ok, true);
   assert.equal(health.data.triggerReady, true);
