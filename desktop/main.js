@@ -442,6 +442,8 @@ app.whenReady().then(async () => {
             document.querySelector('#draftEditDialog').close();
 
             assert(document.querySelector('#dataStorageMode option[value="local"]') && document.querySelector('#dataStorageMode option[value="drive"]'), 'local and Google Drive storage choices');
+            assert(document.querySelector('#onlineSchedulerMode option[value="local"]') && document.querySelector('#onlineSchedulerMode option[value="online"]'), 'local and online scheduler choices');
+            assert(document.querySelector('#onlineSchedulerUrl') && document.querySelector('#onlineSchedulerSecret') && document.querySelector('#testOnlineScheduler'), 'online scheduler connection controls');
             const originalRuntimeSend = chrome.runtime.sendMessage;
             let uploadedCloudSnapshot = null;
             chrome.runtime.sendMessage = async (message) => {

@@ -15,7 +15,7 @@ CMOE Workspace는 명단을 먼저 입력하고, 그 명단을 일정 편성·�
 
 ## 사용자 설치
 
-검증된 `CMOE-Workspace-Setup-1.1.16-Windows.exe`를 실행합니다. 설치형은 바탕화면과 시작 메뉴에 바로가기를 만들며, 사용자 데이터는 프로그램 업데이트 후에도 유지됩니다. 현재 설치 파일에는 상용 코드 서명 인증서가 적용되지 않아 다른 PC의 Windows SmartScreen이 게시자 경고를 표시할 수 있습니다. 이 저장소는 아직 설치 파일을 GitHub Releases에 자동 게시하지 않으므로, 배포 담당자가 smoke 검사를 통과한 설치 파일을 별도로 전달하거나 수동으로 게시해야 합니다.
+검증된 `CMOE-Workspace-Setup-1.2.0-Windows.exe`를 실행합니다. 설치형은 바탕화면과 시작 메뉴에 바로가기를 만들며, 사용자 데이터는 프로그램 업데이트 후에도 유지됩니다. 현재 설치 파일에는 상용 코드 서명 인증서가 적용되지 않아 다른 PC의 Windows SmartScreen이 게시자 경고를 표시할 수 있습니다. 이 저장소는 아직 설치 파일을 GitHub Releases에 자동 게시하지 않으므로, 배포 담당자가 smoke 검사를 통과한 설치 파일을 별도로 전달하거나 수동으로 게시해야 합니다.
 
 ## 개발 실행
 
@@ -45,6 +45,7 @@ npm run build:installer
 - 명단·템플릿·프로젝트 데이터는 기본적으로 Electron `userData` 폴더에 저장됩니다.
 - 사용자가 선택하면 Google Drive 동기화를 사용할 수 있습니다.
 - Google 및 Zoom 계정은 기능별로 별도 등록할 수 있습니다.
+- Gmail Flow 예약 발송은 기존 로컬 방식과 Google Apps Script 온라인 방식 중 선택할 수 있습니다. 온라인 방식은 등록 후 PC가 꺼져도 동작하지만 사용자 계정에 Apps Script를 최초 1회 배포해야 합니다.
 - OAuth 비밀번호·토큰과 `desktop/oauth-credentials.local.js`는 Git 저장소와 설치 파일에 포함하지 않습니다. Gmail Flow의 데스크톱 PKCE 로그인은 로컬 Client Secret 파일이 없어도 시작되며, 값이 없으면 토큰 요청에서도 해당 필드를 생략합니다.
 
 ## 포함 구조

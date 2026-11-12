@@ -1,5 +1,11 @@
+if (!globalThis.GmailFlowOnlineScheduler) {
+  if (typeof importScripts === 'function') importScripts('online-scheduler-client.js');
+  else if (typeof require === 'function') globalThis.GmailFlowOnlineScheduler = require('./online-scheduler-client.js');
+}
+
 const BATCHES_KEY = 'mailBatches';
 const BATCH_CANCEL_REQUESTS_KEY = 'mailBatchCancelRequests';
+const ONLINE_SCHEDULER_CONFIG_KEY = 'onlineSchedulerConfig';
 const QUEUE_ALARM = 'gmail-flow-queue';
 const MAX_ATTEMPTS = 3;
 const BATCH_SIZE = 40;
@@ -14,7 +20,9 @@ const MAIL_MUTATION_MESSAGES = new Set([
   'update-draft-batch',
   'check-draft-batch-status',
   'cancel-mail-batch',
-  'delete-mail-batch'
+  'delete-mail-batch',
+  'online-scheduler-test',
+  'online-scheduler-config-save'
 ]);
 let queueRunning = false;
 let queueRunPromise = null;
@@ -91,6 +99,24 @@ async function getBatches() {
 
 async function saveBatches(batches) {
   await chrome.storage.local.set({ [BATCHES_KEY]: batches });
+}
+
+async function getOnlineSchedulerConfig() {
+  const result = await chrome.storage.local.get(ONLINE_SCHEDULER_CONFIG_KEY);
+  const stored = result[ONLINE_SCHEDULER_CONFIG_KEY] || {};
+  return { ...GmailFlowOnlineScheduler.normalizeConfig(stored), verifiedAt: String(stored.verifiedAt || '') };
+}
+
+async function saveOnlineSchedulerConfig(config) {
+  const normalized = GmailFlowOnlineScheduler.normalizeConfig(config);
+  if (normalized.mode === 'online') GmailFlowOnlineScheduler.validateConfig(normalized);
+  const saved = { ...normalized, verifiedAt: '' };
+  await chrome.storage.local.set({ [ONLINE_SCHEDULER_CONFIG_KEY]: saved });
+  return { ...saved, secretConfigured: Boolean(normalized.secret) };
+}
+
+async function requestOnlineScheduler(action, payload = {}, config = null) {
+  return GmailFlowOnlineScheduler.request(config || await getOnlineSchedulerConfig(), action, payload);
 }
 
 async function getCancelRequests() {
@@ -683,7 +709,7 @@ async function scheduleNextRun(batches) {
   await chrome.alarms.clear(QUEUE_ALARM);
   if (queuePausedForQuit) return;
   const times = [];
-  batches.forEach((batch) => batch.items.forEach((item) => {
+  batches.filter((batch) => batch.schedulerMode !== 'online').forEach((batch) => batch.items.forEach((item) => {
     if (item.status === 'queued') times.push(item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : Date.now() + 1000);
     if (item.status === 'scheduled') times.push(Math.max(new Date(item.scheduledAt).getTime(), item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : 0));
   }));
@@ -734,6 +760,7 @@ async function processQueueExclusive() {
     let processed = 0;
     const now = Date.now();
     for (const batch of batches) {
+      if (batch.schedulerMode === 'online') continue;
       if (cancelRequestedBatches.has(batch.id)) {
         await cancelBatchInPlace(batch);
         await saveBatches(batches);
@@ -822,7 +849,7 @@ async function resumeMailQueueAfterQuitCanceled() {
   return { resumed: true };
 }
 
-async function enqueueBatch(payload) {
+async function enqueueLocalBatch(payload) {
   const batchId = await runMailBatchOperation(() => runAccountOperation(async () => {
     const account = await verifiedGmailContext(payload.senderEmail);
     const batches = await getBatches();
@@ -873,6 +900,89 @@ async function enqueueBatch(payload) {
   });
 }
 
+function mergeOnlineBatch(localBatch, remoteBatch) {
+  return {
+    ...localBatch,
+    ...remoteBatch,
+    schedulerMode: 'online',
+    onlineJobId: remoteBatch.onlineJobId || remoteBatch.id || localBatch?.onlineJobId || localBatch?.id,
+    attachments: localBatch?.attachments || [],
+    subjectTemplate: localBatch?.subjectTemplate || '',
+    bodyTemplate: localBatch?.bodyTemplate || '',
+    postscriptTemplate: localBatch?.postscriptTemplate || ''
+  };
+}
+
+async function enqueueOnlineBatch(payload) {
+  const account = await verifiedGmailContext(payload.senderEmail);
+  const config = await getOnlineSchedulerConfig();
+  GmailFlowOnlineScheduler.validateConfig(config);
+  if (!config.verifiedAt) throw new Error('설정에서 온라인 예약 발송 연결 테스트를 먼저 완료해주세요.');
+  const createdAt = nowIso();
+  const jobId = crypto.randomUUID();
+  const remoteBatch = await requestOnlineScheduler('enqueue', {
+    job: {
+      id: jobId,
+      name: String(payload.name || payload.label || payload.subject || '예약 발송').trim(),
+      senderEmail: account.email,
+      scheduledAt: payload.scheduledAt,
+      attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+      items: payload.items
+    }
+  }, config);
+  const localDetails = {
+    id: jobId,
+    name: String(payload.name || payload.label || payload.subject || '예약 발송').trim(),
+    method: '예약 발송',
+    senderEmail: account.email,
+    scheduledAt: payload.scheduledAt,
+    createdAt,
+    updatedAt: createdAt,
+    attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+    subjectTemplate: String(payload.subjectTemplate ?? payload.subject ?? ''),
+    bodyTemplate: String(payload.bodyTemplate ?? ''),
+    postscriptTemplate: String(payload.postscriptTemplate ?? '')
+  };
+  const batch = mergeOnlineBatch(localDetails, remoteBatch);
+  const batches = await getBatches();
+  batches.unshift(batch);
+  await saveBatches(batches);
+  return batch;
+}
+
+async function enqueueBatch(payload) {
+  const config = await getOnlineSchedulerConfig();
+  if (payload.method === '예약 발송' && config.mode === 'online') return enqueueOnlineBatch(payload);
+  return enqueueLocalBatch(payload);
+}
+
+async function syncOnlineBatches() {
+  const batches = await getBatches();
+  const online = batches.filter((batch) => batch.schedulerMode === 'online' && !isTerminal(batch.status));
+  if (!online.length) return { synced: 0, batches };
+  const result = await requestOnlineScheduler('status', { jobIds: online.map((batch) => batch.onlineJobId || batch.id) });
+  const remoteById = new Map((result?.jobs || []).map((batch) => [String(batch.onlineJobId || batch.id), batch]));
+  let synced = 0;
+  const merged = batches.map((batch) => {
+    if (batch.schedulerMode !== 'online') return batch;
+    const remote = remoteById.get(String(batch.onlineJobId || batch.id));
+    if (!remote) return batch;
+    synced += 1;
+    return mergeOnlineBatch(batch, remote);
+  });
+  await saveBatches(merged);
+  return { synced, checkedAt: result?.checkedAt || nowIso(), batches: merged };
+}
+
+async function cancelOnlineBatch(batch) {
+  const remote = await requestOnlineScheduler('cancel', { jobId: batch.onlineJobId || batch.id });
+  const batches = await getBatches();
+  const index = batches.findIndex((item) => item.id === batch.id);
+  if (index >= 0) batches[index] = mergeOnlineBatch(batches[index], remote);
+  await saveBatches(batches);
+  return index >= 0 ? batches[index] : remote;
+}
+
 async function resumeWaitingAuth() {
   await runMailBatchOperation(() => runAccountOperation(async () => {
     const account = await verifiedGmailContext();
@@ -901,6 +1011,7 @@ async function requestBatchCancellation(batchId) {
   const batch = batches.find((item) => item.id === batchId);
   if (!batch) throw new Error('작업을 찾을 수 없습니다.');
   if (batch.items.every((item) => isTerminal(item.status))) return batch;
+  if (batch.schedulerMode === 'online') return cancelOnlineBatch(batch);
   cancelRequestedBatches.add(batchId);
   await updateCancelRequests((requests) => requests.add(batchId));
   await chrome.alarms.create(QUEUE_ALARM, { when: Date.now() + 1000 });
@@ -935,6 +1046,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     if (queuePausedForQuit && MAIL_MUTATION_MESSAGES.has(message.type)) throw mailQueueShutdownError();
     if (message.type === 'connection-status') return connectionStatus();
+    if (message.type === 'online-scheduler-config-get') {
+      const config = await getOnlineSchedulerConfig();
+      return { ...config, secretConfigured: Boolean(config.secret) };
+    }
+    if (message.type === 'online-scheduler-config-save') return saveOnlineSchedulerConfig(message.config || {});
+    if (message.type === 'online-scheduler-test') {
+      const config = message.config ? GmailFlowOnlineScheduler.normalizeConfig(message.config) : await getOnlineSchedulerConfig();
+      GmailFlowOnlineScheduler.validateConfig(config);
+      const health = await requestOnlineScheduler('health', {}, config);
+      const account = await verifiedGmailContext();
+      if (health.senderEmail && normalizeEmail(health.senderEmail) !== account.email) throw accountMismatchError(account.email, normalizeEmail(health.senderEmail));
+      const verifiedAt = nowIso();
+      await chrome.storage.local.set({ [ONLINE_SCHEDULER_CONFIG_KEY]: { ...config, verifiedAt } });
+      return { ...health, verifiedAt };
+    }
+    if (message.type === 'sync-online-mail-batches') return syncOnlineBatches();
     if (message.type === 'authorize-drive-sync') {
       const drive = await verifiedDriveContext(message.expectedAccount, true);
       return { authorized: true, email: drive.email };

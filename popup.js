@@ -90,6 +90,7 @@ const state = {
   connectedEmail: '',
   rememberedEmail: '',
   dataStorageMode: 'local',
+  onlineSchedulerConfig: { mode: 'local', url: '', secret: '', verifiedAt: '' },
   cloudSyncMeta: null,
   attachments: [],
   draftEditAttachments: [],
@@ -584,6 +585,30 @@ function renderCloudSyncStatus(message = '') {
   $('#cloudSyncStatus').textContent = message || (state.dataStorageMode === 'drive'
     ? `Google Drive 동기화 사용 중${state.cloudSyncMeta?.syncedAt ? ` · ${formatDateTime(state.cloudSyncMeta.syncedAt)}` : ''}`
     : '명단과 템플릿은 이 PC에만 저장됩니다.');
+}
+
+function renderOnlineSchedulerStatus(message = '') {
+  const config = state.onlineSchedulerConfig || { mode: 'local', url: '', secret: '', verifiedAt: '' };
+  $('#onlineSchedulerMode').value = config.mode === 'online' ? 'online' : 'local';
+  $('#onlineSchedulerFields').hidden = config.mode !== 'online';
+  $('#onlineSchedulerUrl').value = config.url || '';
+  $('#onlineSchedulerSecret').value = config.secret || '';
+  $('#onlineSchedulerStatus').textContent = message || (config.mode === 'online'
+    ? (config.verifiedAt ? `온라인 연결 확인됨 · ${formatDateTime(config.verifiedAt)}` : (config.url && config.secret ? '연결 테스트를 완료해야 온라인 예약을 등록할 수 있습니다.' : 'Apps Script 주소와 연결 키를 입력해주세요.'))
+    : '현재 PC에서 예약 시간을 확인합니다. 앱과 PC가 꺼지면 발송되지 않습니다.');
+}
+
+async function saveOnlineSchedulerSettings({ test = false } = {}) {
+  const config = {
+    mode: $('#onlineSchedulerMode').value === 'online' ? 'online' : 'local',
+    url: $('#onlineSchedulerUrl').value.trim(),
+    secret: $('#onlineSchedulerSecret').value.trim()
+  };
+  const saved = await sendRuntimeMessage({ type: 'online-scheduler-config-save', config });
+  state.onlineSchedulerConfig = { mode: saved.mode, url: saved.url, secret: saved.secret, verifiedAt: saved.verifiedAt || '' };
+  renderOnlineSchedulerStatus(test ? '설정을 저장했습니다. 연결을 확인하고 있습니다…' : '예약 발송 방식을 저장했습니다.');
+  updateComposeState();
+  return state.onlineSchedulerConfig;
 }
 
 function hasLocalSyncData(data) {
@@ -1139,13 +1164,17 @@ function updateComposeState() {
       : (emptyCount ? `받는 사람 없는 빈 초안 ${emptyCount}개를 만듭니다.` : '명단을 선택하거나 빈 초안 기능을 켜주세요.'));
   } else if (method === '예약 발송') {
     $('#composeAction').textContent = '예약 발송 등록';
-    $('#composeHint').textContent = work.validation.errors[0] || `${recipientCount}명에게 예약 발송합니다.`;
+    const online = state.onlineSchedulerConfig?.mode === 'online';
+    const onlineMissing = online && (!state.onlineSchedulerConfig.url || !state.onlineSchedulerConfig.secret || !state.onlineSchedulerConfig.verifiedAt);
+    $('#composeHint').textContent = work.validation.errors[0] || (onlineMissing
+      ? '설정에서 Apps Script 주소와 연결 키를 입력하고 연결 테스트를 완료해주세요.'
+      : `${recipientCount}명에게 ${online ? '온라인으로 예약합니다. 등록 후 PC를 꺼도 발송됩니다.' : '이 PC에서 예약 발송합니다. 발송 때까지 앱을 켜두세요.'}`);
   } else {
     $('#composeAction').textContent = '즉시 발송';
     $('#composeHint').textContent = work.validation.errors[0] || `${recipientCount}명에게 지금 바로 발송합니다.`;
   }
   $('#composeHint').classList.toggle('error-text', work.validation.errors.length > 0);
-  $('#composeAction').disabled = !work.validation.valid;
+  $('#composeAction').disabled = !work.validation.valid || (method === '예약 발송' && state.onlineSchedulerConfig?.mode === 'online' && (!state.onlineSchedulerConfig.url || !state.onlineSchedulerConfig.secret || !state.onlineSchedulerConfig.verifiedAt));
   renderComposeVariableStatus();
   scheduleWorkspaceSave();
 }
@@ -2143,6 +2172,9 @@ async function sendRuntimeMessage(message) {
 }
 
 async function refreshMailActivity() {
+  if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'canceled'].includes(batch.status))) {
+    try { await sendRuntimeMessage({ type: 'sync-online-mail-batches' }); } catch (_) {}
+  }
   state.mailBatches = await storage.get('mailBatches', []);
   renderHistory();
   renderQueue();
@@ -2180,7 +2212,7 @@ function renderHistory() {
     button.className = 'list-row';
     button.dataset.historyBatchId = batch.id;
     button.title = '클릭하여 대상별 기록 보기';
-    button.innerHTML = `<span>${escapeHtml(batch.name)}<br><small class="muted">${escapeHtml(formatDateTime(batch.createdAt))} · ${escapeHtml(batch.method)}</small></span><span class="badge">${escapeHtml(statusText(batch.status))} ${batch.completed || 0}/${batch.total || batch.items.length}</span>`;
+    button.innerHTML = `<span>${escapeHtml(batch.name)}<br><small class="muted">${escapeHtml(formatDateTime(batch.createdAt))} · ${escapeHtml(batch.method)}${batch.schedulerMode === 'online' ? ' · 온라인' : ''}</small></span><span class="badge">${escapeHtml(statusText(batch.status))} ${batch.completed || 0}/${batch.total || batch.items.length}</span>`;
     return button;
   }));
 }
@@ -2199,7 +2231,7 @@ function renderQueue() {
     const total = batch.total || batch.items.length;
     const current = batch.items.find((item) => item.id === batch.currentItemId);
     const currentText = current ? ` · ${current.variables?.이름 || current.email || '대상'} 처리 중` : '';
-    row.innerHTML = `<span class="queue-summary"><strong>${escapeHtml(batch.name)}</strong><small class="muted">${escapeHtml(statusText(batch.status))} · ${processed}/${total}${escapeHtml(currentText)}${batch.scheduledAt ? ` · ${escapeHtml(formatDateTime(batch.scheduledAt))}` : ''}</small><progress max="${total || 1}" value="${processed}"></progress></span><button class="button danger compact-action" type="button" data-cancel-batch-id="${escapeHtml(batch.id)}">취소</button>`;
+    row.innerHTML = `<span class="queue-summary"><strong>${escapeHtml(batch.name)}</strong><small class="muted">${escapeHtml(statusText(batch.status))} · ${batch.schedulerMode === 'online' ? '온라인' : '이 PC'} · ${processed}/${total}${escapeHtml(currentText)}${batch.scheduledAt ? ` · ${escapeHtml(formatDateTime(batch.scheduledAt))}` : ''}</small><progress max="${total || 1}" value="${processed}"></progress></span><button class="button danger compact-action" type="button" data-cancel-batch-id="${escapeHtml(batch.id)}">취소</button>`;
     return row;
   }));
 }
@@ -2703,7 +2735,7 @@ function bindEvents() {
       if (!await showConfirm(`${count}개의 Gmail 초안을 생성할까요?`, '초안 생성 확인', '생성')) return;
     } else {
       const firstWarning = method === '예약 발송'
-        ? `예약 발송 형식입니다.\n${count}명에게 ${formatDateTime(scheduledAt)}에 발송하시겠습니까?`
+        ? `예약 발송 형식입니다.\n${count}명에게 ${formatDateTime(scheduledAt)}에 발송하시겠습니까?\n실행 위치: ${state.onlineSchedulerConfig?.mode === 'online' ? '온라인 · 등록 후 PC를 꺼도 됨' : '이 PC · 발송 때까지 앱을 켜두어야 함'}`
         : `즉시 발송 형식입니다.\n${count}명에게 지금 바로 발송하시겠습니까?`;
       if (!await showConfirm(firstWarning, '발송 확인', method === '예약 발송' ? '예약' : '계속')) return;
       const individuallyApproved = await openSendReview(rechecked.items, method, scheduledAt, connection.email || '');
@@ -2730,7 +2762,7 @@ function bindEvents() {
       await refreshMailActivity();
       state.attachments = [];
       renderAttachments();
-      await showAlert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}`);
+      await showAlert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}\n실행 위치: ${batch.schedulerMode === 'online' ? '온라인 · PC를 꺼도 발송됨' : '이 PC · 앱을 켜두어야 함'}`);
       showPage(method === '예약 발송' ? 'queue' : 'history');
     } catch (error) {
       await showAlert(error.message);
@@ -3049,6 +3081,37 @@ function bindEvents() {
     renderCloudSyncStatus();
     try { await updateConnectionStatus(); } catch (error) { $('#gmailConnectionStatus').textContent = error.message; }
   });
+  $('#onlineSchedulerMode').addEventListener('change', async () => {
+    state.onlineSchedulerConfig = {
+      ...state.onlineSchedulerConfig,
+      mode: $('#onlineSchedulerMode').value === 'online' ? 'online' : 'local'
+    };
+    renderOnlineSchedulerStatus();
+    if (state.onlineSchedulerConfig.mode === 'local') {
+      try { await saveOnlineSchedulerSettings(); } catch (error) { await showAlert(error.message, '예약 발송 설정'); }
+    }
+    updateComposeState();
+  });
+  $('#onlineSchedulerUrl').addEventListener('input', () => { state.onlineSchedulerConfig.url = $('#onlineSchedulerUrl').value; state.onlineSchedulerConfig.verifiedAt = ''; updateComposeState(); });
+  $('#onlineSchedulerSecret').addEventListener('input', () => { state.onlineSchedulerConfig.secret = $('#onlineSchedulerSecret').value; state.onlineSchedulerConfig.verifiedAt = ''; updateComposeState(); });
+  $('#testOnlineScheduler').addEventListener('click', async () => {
+    const button = $('#testOnlineScheduler');
+    button.disabled = true;
+    button.textContent = '확인 중';
+    try {
+      const config = await saveOnlineSchedulerSettings({ test: true });
+      const result = await sendRuntimeMessage({ type: 'online-scheduler-test', config });
+      state.onlineSchedulerConfig.verifiedAt = result.verifiedAt || new Date().toISOString();
+      renderOnlineSchedulerStatus(`연결됨 · ${result.senderEmail || 'Google 계정'} · ${result.triggerReady ? '1분 트리거 정상' : '트리거 확인 필요'}`);
+      updateComposeState();
+    } catch (error) {
+      renderOnlineSchedulerStatus(`연결 실패 · ${error.message}`);
+      await showAlert(error.message, '온라인 예약 발송 연결 실패');
+    } finally {
+      button.disabled = false;
+      button.textContent = '연결 테스트';
+    }
+  });
   $('#dataStorageMode').addEventListener('change', async (event) => {
     const requestedMode = event.target.value;
     if (requestedMode === 'local') {
@@ -3233,6 +3296,18 @@ async function init() {
   state.structureTemplates = await storage.get('structureTemplates', []);
   state.mailBatches = await storage.get('mailBatches', []);
   state.dataStorageMode = await storage.get(DATA_STORAGE_MODE_KEY, 'local') === 'drive' ? 'drive' : 'local';
+  try {
+    const scheduler = await sendRuntimeMessage({ type: 'online-scheduler-config-get' });
+    state.onlineSchedulerConfig = { mode: scheduler.mode, url: scheduler.url, secret: scheduler.secret, verifiedAt: scheduler.verifiedAt || '' };
+  } catch (_) {
+    state.onlineSchedulerConfig = { mode: 'local', url: '', secret: '', verifiedAt: '' };
+  }
+  if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'canceled'].includes(batch.status))) {
+    try {
+      await sendRuntimeMessage({ type: 'sync-online-mail-batches' });
+      state.mailBatches = await storage.get('mailBatches', []);
+    } catch (_) {}
+  }
   state.cloudSyncMeta = await storage.get(CLOUD_SYNC_META_KEY, null);
   await restoreWorkspace();
   await restoreWorkspaceRoster();
@@ -3251,6 +3326,7 @@ async function init() {
   renderOperationStatus();
   renderAttachments();
   renderCloudSyncStatus();
+  renderOnlineSchedulerStatus();
   updateComposeState();
   showPage(rosterManagerMode ? 'roster' : state.page);
   restoringWorkspace = false;
