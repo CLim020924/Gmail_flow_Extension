@@ -1,6 +1,6 @@
 {
   "name": "cmoe-workspace",
-  "version": "1.15.35",
+  "version": "1.15.36",
   "description": "프로젝트 명단·일정·계정 업무와 연결 가능한 독립 도구를 함께 관리하는 Windows Workspace",
   "main": "desktop/main.js",
   "author": "CLim020924",

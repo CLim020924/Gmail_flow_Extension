@@ -140,7 +140,49 @@ function helperCommand({ installerPath, expectedSha256, expectedBytes, expectedV
   const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
   const numericPid = Number(pid);
   const numericBytes = Number(expectedBytes);
-  return `$ErrorActionPreference='Stop'; $app=${quote(appPath)}; try { $target=Get-Process -Id ${numericPid} -ErrorAction SilentlyContinue; if($target){$targetPath=$null; try{$targetPath=$target.Path}catch{}; if($targetPath -and [IO.Path]::GetFullPath($targetPath) -ne [IO.Path]::GetFullPath($app)){throw 'APP_IDENTITY_MISMATCH'}; Wait-Process -Id ${numericPid} -ErrorAction SilentlyContinue}; $installer=${quote(installerPath)}; if(!(Test-Path -LiteralPath $installer -PathType Leaf)){throw 'INSTALLER_MISSING'}; if((Get-Item -LiteralPath $installer).Length -ne ${numericBytes}){throw 'INSTALLER_SIZE_MISMATCH'}; if((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ${quote(expectedSha256)}){throw 'INSTALLER_HASH_MISMATCH'}; $process=Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru; if($process.ExitCode -ne 0){throw ('INSTALLER_EXIT_'+$process.ExitCode)}; if(!(Test-Path -LiteralPath $app -PathType Leaf)){throw 'UPDATED_APP_MISSING'}; $installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($app).FileVersion; if(!$installedVersion -or $installedVersion.Split('+')[0] -ne ${quote(expectedVersion)}){throw 'UPDATED_VERSION_MISMATCH'}; Start-Process -FilePath $app -ArgumentList '--updated' } catch { if(Test-Path -LiteralPath $app -PathType Leaf){Start-Process -FilePath $app -ArgumentList '--update-failed'}; exit 40 }`;
+  return [
+    `$ErrorActionPreference='Stop'`,
+    `$app=${quote(appPath)}`,
+    `$installer=${quote(installerPath)}`,
+    `$log=Join-Path (Split-Path -Parent $installer) 'update-helper.log'`,
+    `$form=$null`,
+    `try {`,
+    `Set-Content -LiteralPath $log -Value ((Get-Date).ToString('o')+' helper started') -Encoding UTF8`,
+    `Add-Type -AssemblyName System.Windows.Forms`,
+    `$form=New-Object System.Windows.Forms.Form`,
+    `$form.Text='CMOE Workspace 업데이트'`,
+    `$form.Width=440`, `$form.Height=170`, `$form.StartPosition='CenterScreen'`,
+    `$form.FormBorderStyle='FixedDialog'`, `$form.MaximizeBox=$false`, `$form.MinimizeBox=$false`, `$form.ControlBox=$false`, `$form.TopMost=$true`,
+    `$label=New-Object System.Windows.Forms.Label`, `$label.Left=24`, `$label.Top=22`, `$label.Width=380`, `$label.Height=44`,
+    `$label.Text='앱을 종료하고 업데이트를 준비하고 있습니다. 잠시만 기다려주세요.'`,
+    `$progress=New-Object System.Windows.Forms.ProgressBar`, `$progress.Left=24`, `$progress.Top=78`, `$progress.Width=380`, `$progress.Height=18`, `$progress.Style='Marquee'`, `$progress.MarqueeAnimationSpeed=28`,
+    `$form.Controls.Add($label)`, `$form.Controls.Add($progress)`, `$form.Show()`, `[System.Windows.Forms.Application]::DoEvents()`,
+    `$target=Get-Process -Id ${numericPid} -ErrorAction SilentlyContinue`,
+    `if($target){$targetPath=$null; try{$targetPath=$target.Path}catch{}; if($targetPath -and [IO.Path]::GetFullPath($targetPath) -ne [IO.Path]::GetFullPath($app)){throw 'APP_IDENTITY_MISMATCH'}}`,
+    `$deadline=[DateTime]::UtcNow.AddSeconds(45)`,
+    `do {$running=@(Get-CimInstance Win32_Process -Filter "Name='CMOE Workspace.exe'" -ErrorAction SilentlyContinue | Where-Object {$_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq [IO.Path]::GetFullPath($app)}); if(!$running.Count){break}; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 200} while([DateTime]::UtcNow -lt $deadline)`,
+    `if($running.Count){throw 'APP_PROCESSES_STILL_RUNNING'}`,
+    `Add-Content -LiteralPath $log -Value ((Get-Date).ToString('o')+' app processes stopped') -Encoding UTF8`,
+    `if(!(Test-Path -LiteralPath $installer -PathType Leaf)){throw 'INSTALLER_MISSING'}`,
+    `if((Get-Item -LiteralPath $installer).Length -ne ${numericBytes}){throw 'INSTALLER_SIZE_MISMATCH'}`,
+    `if((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ${quote(expectedSha256)}){throw 'INSTALLER_HASH_MISMATCH'}`,
+    `$label.Text='업데이트를 설치하고 있습니다. 창을 닫거나 앱을 다시 실행하지 마세요.'`, `[System.Windows.Forms.Application]::DoEvents()`,
+    `Add-Content -LiteralPath $log -Value ((Get-Date).ToString('o')+' installer starting') -Encoding UTF8`,
+    `$process=Start-Process -FilePath $installer -ArgumentList '/S' -PassThru`,
+    `while(!$process.HasExited){[System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 200}`,
+    `if($process.ExitCode -ne 0){throw ('INSTALLER_EXIT_'+$process.ExitCode)}`,
+    `Add-Content -LiteralPath $log -Value ((Get-Date).ToString('o')+' installer exited '+$process.ExitCode) -Encoding UTF8`,
+    `if(!(Test-Path -LiteralPath $app -PathType Leaf)){throw 'UPDATED_APP_MISSING'}`,
+    `$installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($app).FileVersion`,
+    `if(!$installedVersion -or $installedVersion.Split('+')[0] -ne ${quote(expectedVersion)}){throw 'UPDATED_VERSION_MISMATCH'}`,
+    `$label.Text='업데이트가 완료되었습니다. 새 버전을 실행합니다.'`, `[System.Windows.Forms.Application]::DoEvents()`, `Start-Sleep -Milliseconds 700`,
+    `Add-Content -LiteralPath $log -Value ((Get-Date).ToString('o')+' verified '+$installedVersion) -Encoding UTF8`,
+    `$form.Close()`, `$form=$null`, `Start-Process -FilePath $app -ArgumentList '--updated'`,
+    `} catch {`,
+    `try{Add-Content -LiteralPath $log -Value ((Get-Date).ToString('o')+' ERROR '+$_.Exception.Message) -Encoding UTF8}catch{}`,
+    `if($form){$label.Text='업데이트를 완료하지 못했습니다. 기존 앱을 다시 실행합니다.'; $progress.Style='Blocks'; [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Seconds 2; $form.Close()}`,
+    `if(Test-Path -LiteralPath $app -PathType Leaf){Start-Process -FilePath $app -ArgumentList '--update-failed'}`, `exit 40`, `}`
+  ].join('; ');
 }
 
 module.exports = { PRODUCT, PLATFORM, FEED_URL, MAX_INSTALLER_BYTES, compareVersions, validateFeed, validateDownloadUrl, checkForUpdate, downloadInstaller, createUpdateDataBackup, helperCommand };

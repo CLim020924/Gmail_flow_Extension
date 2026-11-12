@@ -1799,7 +1799,7 @@ app.on('before-quit', (event) => {
       const command = UpdateService.helperCommand(pendingUpdateLaunch);
       pendingUpdateLaunch = null;
       const encoded = Buffer.from(command, 'utf16le').toString('base64');
-      const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], { detached: true, stdio: 'ignore', windowsHide: true });
+      const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Sta', '-EncodedCommand', encoded], { detached: true, stdio: 'ignore', windowsHide: true });
       helper.unref();
     }
     return;
