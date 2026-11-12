@@ -273,3 +273,12 @@
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.44-Windows.exe`, 크기 `111,031,645` bytes, SHA-256 `24645D6015511755741D34920A2F75E3DC85B98118A5AAA0E74CCCEA0BB45BC2`, FileVersion 1.15.44, 서명 없음.
 - 현재 PC는 1.15.43으로 유지하고 1.15.44를 앱 내부 업데이트로 시험한다.
 - GitHub Release와 Cresero Worker `b4f6ce3e-bc17-42a1-a36e-dfc6980c6c19`에 배포했다. 실제 앱 코드가 설치된 1.15.43에 1.15.44를 제안한다.
+
+## 1.15.45 앱과 같은 네이티브 업데이트 UI
+
+- 1.15.44 사용자 시험에서 자동 업데이트 자체는 완료됐지만, 앱 종료 뒤 기본 Windows 진행 막대가 움직이지 않아 멈춘 것처럼 보이는 문제가 확인됐다.
+- helper 창을 앱 내부 전역 업데이트 대화상자와 같은 `PROGRAM UPDATE` 헤더, 4단계 표시, 상태·상세 설명 구조로 바꿨다.
+- 설치기가 내부 퍼센트를 제공하지 않으므로 가짜 퍼센트를 표시하지 않는다. 설치 파일 해시 검증은 실제 읽은 바이트 기준 25~45%로 표시하고, NSIS 설치 중에는 직접 그린 막대가 계속 왕복하면서 `설치 중 · N초`가 갱신된다. 설치 후 EXE/FileVersion 확인과 완료는 95%, 100%로 표시한다.
+- 기본 `ProgressBar` 및 운영체제 marquee 애니메이션 의존성을 제거했다. 전체 Node 시험·빌드 사전검사, helper PowerShell 구문 분석, 실제 네이티브 창 생성과 응답 상태를 확인했다.
+- 1.15.45 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.45-Windows.exe`, 크기 `111,032,314` bytes, SHA-256 `1CEDCF60425DA9A7F0EDA0113775720C90E46621204DCB467A6BC0F1D9D8E6C8`, FileVersion 1.15.45, 서명 없음.
+- 배포 후 현재 설치된 1.15.44에서 사용자 화면의 전 구간 지속 표시를 최종 확인한다.
