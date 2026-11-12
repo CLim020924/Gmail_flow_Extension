@@ -714,7 +714,7 @@
 
         <div id="certificateEditor" class="certificate-editor" hidden>
           <section class="workbench-panel certificate-preview-panel" aria-labelledby="certificateBlockTitle">
-            <div class="section-heading"><div><h2 id="certificateBlockTitle">2. 바꿀 글자를 순서대로 클릭</h2><p>왼쪽에서 페이지를 고르고, 실제 슬라이드 위의 글자 영역을 누르세요. 그림·도형·배경은 원본 그대로 보호합니다.</p></div><label id="certificateSlideField" class="compact-field" hidden>페이지<select id="certificateSlideSelect"></select></label></div>
+            <div class="section-heading"><div><h2 id="certificateBlockTitle">2. 바꿀 글자를 드래그해 선택</h2><p>슬라이드의 텍스트 상자를 누른 뒤, 그 안에서 실제로 바뀔 이름·번호·날짜만 드래그하세요. 그림·도형·배경과 앞뒤 문구는 그대로 보호합니다.</p></div><label id="certificateSlideField" class="compact-field" hidden>페이지<select id="certificateSlideSelect"></select></label></div>
             <div class="certificate-ppt-viewer">
               <nav id="certificateSlideRail" class="certificate-slide-rail" aria-label="PowerPoint 페이지" hidden></nav>
               <div class="certificate-slide-workspace">
@@ -741,7 +741,7 @@
 
           <section class="workbench-panel certificate-field-panel" aria-labelledby="certificateFieldTitle">
             <div class="section-heading"><div><h2 id="certificateFieldTitle">선택한 항목</h2><p>필요한 글자만 고르고 열 이름을 알아보기 쉽게 바꾸세요.</p></div><button id="clearCertificateFields" class="text-button" type="button">선택 모두 지우기</button></div>
-            <div id="certificateFieldList" class="certificate-field-list"><div class="list-empty">미리보기에서 바꿀 글자를 클릭하세요.</div></div>
+            <div id="certificateFieldList" class="certificate-field-list"><div class="list-empty">미리보기에서 텍스트 상자를 누르고 바꿀 글자를 드래그하세요.</div></div>
             <div class="certificate-profile-actions"><button id="saveCertificateProfile" class="secondary-button" type="button" disabled>이 양식과 선택 순서 저장</button><span id="certificateTemplateStatus" class="field-help"></span></div>
           </section>
         </div>
@@ -1127,6 +1127,17 @@
 
   <dialog id="shortcutDialog" class="dialog confirm-dialog" aria-labelledby="shortcutDialogTitle">
     <form id="shortcutForm" method="dialog"><div class="dialog-header"><h2 id="shortcutDialogTitle">프로그램 바로가기</h2><button class="dialog-close" type="button" data-close-dialog="shortcutDialog" aria-label="닫기">×</button></div><div class="dialog-body"><input id="shortcutProgramId" type="hidden"><label class="check-row"><input id="shortcutDesktop" type="checkbox" checked> 바탕화면에 만들기</label><label class="check-row"><input id="shortcutStartMenu" type="checkbox" checked> 시작 메뉴에 만들기</label></div><div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="shortcutDialog">취소</button><button class="primary-button" type="submit">바로가기 만들기</button></div></form>
+  </dialog>
+
+  <dialog id="certificateTextRangeDialog" class="dialog certificate-text-range-dialog" aria-labelledby="certificateTextRangeTitle">
+    <div class="dialog-header"><div><span class="eyebrow">PPTX 글자 연결</span><h2 id="certificateTextRangeTitle">바꿀 글자 선택</h2><p id="certificateTextRangeDescription" class="dialog-subtitle">원문에서 실제로 바뀔 글자만 드래그하세요.</p></div><button class="dialog-close" type="button" data-close-certificate-text-range aria-label="닫기">×</button></div>
+    <div class="dialog-body certificate-text-range-body">
+      <label for="certificateTextRangeSource">텍스트 상자 원문</label>
+      <textarea id="certificateTextRangeSource" rows="7" readonly spellcheck="false" aria-describedby="certificateTextRangeHelp certificateTextRangeStatus"></textarea>
+      <p id="certificateTextRangeHelp" class="field-help">마우스로 이름·번호·날짜처럼 바뀔 부분만 선택하세요. 글자 수가 달라져도 선택한 부분만 값으로 교체됩니다.</p>
+      <div id="certificateTextRangeStatus" class="certificate-text-range-status" role="status">바꿀 글자를 마우스로 드래그하세요.</div>
+    </div>
+    <div class="dialog-footer"><button class="secondary-button" type="button" data-close-certificate-text-range>취소</button><button id="applyCertificateWholeBlock" class="secondary-button" type="button">상자 전체 연결</button><button id="applyCertificateTextRange" class="primary-button" type="button" disabled>선택한 글자 연결</button></div>
   </dialog>
 
   <dialog id="sheetChoiceDialog" class="dialog confirm-dialog" aria-labelledby="sheetChoiceDialogTitle">

@@ -1651,6 +1651,13 @@ body.guide-mode #saveStatus { color: #217452; font-weight: 700; }
 .certificate-preview-stage.fallback-preview .certificate-block { overflow: visible; border-color: #477b9e; background: rgba(255,255,255,.88); box-shadow: 0 1px 4px rgba(33,54,70,.15); }
 .certificate-preview-stage.fallback-preview .certificate-block-label { display: block; overflow: hidden; width: 100%; padding: 4px 6px; color: #24475f; font-size: 9px; font-weight: 700; line-height: 15px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .certificate-preview-stage.actual-preview .certificate-block-overlay { display: none; }
+.certificate-text-range-dialog { width: min(720px, calc(100vw - 32px)); }
+.certificate-text-range-body { display: grid; gap: 10px; }
+.certificate-text-range-body > label { color: #344b5c; font-weight: 800; }
+.certificate-text-range-body textarea { width: 100%; min-height: 170px; resize: vertical; padding: 14px; border: 1px solid #91a3b1; border-radius: 3px; background: #fff; color: #182a37; font: 500 16px/1.7 "Malgun Gothic", sans-serif; white-space: pre-wrap; }
+.certificate-text-range-body textarea:focus { border-color: #236f9d; outline: 2px solid rgba(35,111,157,.18); }
+.certificate-text-range-status { min-height: 22px; padding: 8px 10px; border-left: 3px solid #287e70; background: #edf7f5; color: #24534d; font-weight: 700; }
+.certificate-text-range-status.error { border-left-color: #ba4b47; background: #fff1f0; color: #8c3532; }
 .certificate-preview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; margin-top: 7px; color: var(--muted); font-size: 10px; }
 .certificate-font-notice { margin-top: 8px; padding: 9px 11px; border: 1px solid #d9c89a; background: #fff9e9; color: #705d2a; font-size: 10px; line-height: 1.5; }
 .certificate-font-notice.ready { border-color: #bad5cc; background: #f1f8f5; color: #32675c; }

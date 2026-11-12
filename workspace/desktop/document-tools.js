@@ -1272,6 +1272,23 @@ function certificatePreviewResult(jobId, preview, cacheHit = false) {
   };
 }
 
+function certificateReplacementMap(fields, values) {
+  const replacements = new Map();
+  fields.forEach((field, index) => {
+    const value = String(values[index] ?? '').slice(0, 4_000);
+    if (Number.isInteger(field.rangeStart) && Number.isInteger(field.rangeEnd)) {
+      const ranges = replacements.get(field.blockId) || [];
+      if (!Array.isArray(ranges)) throw new Error('텍스트 상자 전체 연결과 일부 글자 연결을 동시에 사용할 수 없습니다.');
+      ranges.push({ start: field.rangeStart, end: field.rangeEnd, selectedText: field.selectedText, value });
+      replacements.set(field.blockId, ranges);
+    } else {
+      if (replacements.has(field.blockId)) throw new Error('같은 텍스트 상자 전체를 두 번 연결할 수 없습니다.');
+      replacements.set(field.blockId, value);
+    }
+  });
+  return replacements;
+}
+
 function convertedZipError(code, message, cause) {
   const error = new Error(message);
   error.code = code;
@@ -6880,13 +6897,30 @@ class DocumentTools {
     const slide = inspected.slides.find((item) => item.number === Number(slideNumber));
     if (!slide) throw new Error('선택한 양식 슬라이드를 찾을 수 없습니다.');
     if (!Array.isArray(fields) || !fields.length || fields.length > MAX_CERTIFICATE_FIELDS) throw new Error('바꿀 텍스트 블록을 1개 이상 선택해주세요.');
-    const available = new Set(slide.blocks.map((block) => block.id));
-    const seen = new Set();
+    const available = new Map(slide.blocks.map((block) => [block.id, block]));
+    const rangesByBlock = new Map();
     const normalized = fields.map((field, index) => {
       const blockId = boundedText(field?.blockId, 160);
-      if (!available.has(blockId) || seen.has(blockId)) throw new Error('선택한 텍스트 블록 정보가 바뀌었습니다. 양식을 다시 확인해주세요.');
-      seen.add(blockId);
-      return { blockId, label: boundedText(field?.label, 80, `항목 ${index + 1}`) || `항목 ${index + 1}` };
+      const block = available.get(blockId);
+      if (!block) throw new Error('선택한 텍스트 블록 정보가 바뀌었습니다. 양식을 다시 확인해주세요.');
+      const label = boundedText(field?.label, 80, `항목 ${index + 1}`) || `항목 ${index + 1}`;
+      const hasRange = field?.rangeStart !== undefined || field?.rangeEnd !== undefined;
+      const prior = rangesByBlock.get(blockId) || [];
+      if (!hasRange) {
+        if (prior.length) throw new Error('같은 텍스트 상자에서 전체 연결과 일부 글자 연결을 함께 사용할 수 없습니다.');
+        rangesByBlock.set(blockId, [{ whole: true }]);
+        return { blockId, label };
+      }
+      const rangeStart = Number(field.rangeStart); const rangeEnd = Number(field.rangeEnd);
+      if (!Number.isInteger(rangeStart) || !Number.isInteger(rangeEnd) || rangeStart < 0 || rangeEnd <= rangeStart || rangeEnd > String(block.text || '').length) {
+        throw new Error('선택한 글자 범위가 올바르지 않습니다. 양식에서 다시 선택해주세요.');
+      }
+      const selectedText = String(block.text || '').slice(rangeStart, rangeEnd);
+      if (!selectedText || selectedText.includes('\n')) throw new Error('한 번에 한 문단 안의 글자만 연결해주세요.');
+      if (field.selectedText != null && String(field.selectedText) !== selectedText) throw new Error('양식의 선택한 글자가 바뀌었습니다. 범위를 다시 선택해주세요.');
+      if (prior.some((range) => range.whole || (rangeStart < range.end && rangeEnd > range.start))) throw new Error('같은 글자를 겹쳐서 두 열에 연결할 수 없습니다.');
+      prior.push({ start: rangeStart, end: rangeEnd }); rangesByBlock.set(blockId, prior);
+      return { blockId, label, rangeStart, rangeEnd, selectedText };
     });
     return { slide, fields: normalized };
   }
@@ -6902,7 +6936,7 @@ class DocumentTools {
         ? this.validateCertificateSelection(inspected, slideNumber, payload.fields)
         : { slide, fields: [] };
       const values = Array.isArray(payload.values) ? payload.values : [];
-      const replacements = new Map(selection.fields.map((field, index) => [field.blockId, String(values[index] ?? '').slice(0, 4_000)]));
+      const replacements = certificateReplacementMap(selection.fields, values);
       const sourcePreview = selection.fields.length === 0;
       const engineInfo = await this.selectedEngine();
       const sourceStats = sourcePreview ? await fs.promises.stat(source.filePath) : null;
@@ -7025,7 +7059,7 @@ class DocumentTools {
           const prepared = [];
           for (const plan of chunk) {
             try {
-              const replacements = new Map(selection.fields.map((field, fieldIndex) => [field.blockId, plan.values[fieldIndex]]));
+              const replacements = certificateReplacementMap(selection.fields, plan.values);
               const certificate = await buildCertificatePptx(buffer, { slideNumber: Number(payload.slideNumber), replacements });
               const temporaryPptx = path.join(root, `certificate-${String(plan.index + 1).padStart(5, '0')}.pptx`);
               const temporaryPdf = path.join(root, `certificate-${String(plan.index + 1).padStart(5, '0')}.pdf`);
@@ -7152,7 +7186,15 @@ class DocumentTools {
         name: boundedText(item.name, 80, '템플릿 양식'),
         sourceName: boundedText(item.sourceName, 160, 'template.pptx'),
         slideNumber: Math.max(1, Number(item.slideNumber) || 1),
-        fields: Array.isArray(item.fields) ? item.fields.slice(0, MAX_CERTIFICATE_FIELDS).map((field, index) => ({ blockId: boundedText(field.blockId, 160), label: boundedText(field.label, 80, `항목 ${index + 1}`) })) : [],
+        fields: Array.isArray(item.fields) ? item.fields.slice(0, MAX_CERTIFICATE_FIELDS).map((field, index) => ({
+          blockId: boundedText(field.blockId, 160),
+          label: boundedText(field.label, 80, `항목 ${index + 1}`),
+          ...(Number.isInteger(field.rangeStart) && Number.isInteger(field.rangeEnd) ? {
+            rangeStart: field.rangeStart,
+            rangeEnd: field.rangeEnd,
+            selectedText: boundedText(field.selectedText, 4_000)
+          } : {})
+        })) : [],
         filenameTemplate: boundedText(item.filenameTemplate, 160, '{A}') || '{A}',
         createdAt: item.createdAt || '',
         updatedAt: item.updatedAt || ''

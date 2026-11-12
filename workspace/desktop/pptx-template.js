@@ -348,6 +348,76 @@ function shapeText(shapeXml) {
   return { hasTextBody: true, hasTextNodes: allFragments.length > 0, text: paragraphs.length ? paragraphs.join('\n') : allFragments.join('') };
 }
 
+function textNodeRecords(bodyXml) {
+  const records = [];
+  let logicalText = '';
+  const paragraphs = [...String(bodyXml || '').matchAll(qualifiedElementPattern('p', 'gi'))];
+  for (const paragraph of paragraphs) {
+    const paragraphXml = paragraph[0];
+    const nodes = [...paragraphXml.matchAll(qualifiedElementPattern('t', 'gi'))];
+    if (!nodes.length) continue;
+    if (records.length) logicalText += '\n';
+    for (const node of nodes) {
+      const prefix = node[1] || drawingPrefixFor(bodyXml);
+      const value = decodeXmlText(node[0]
+        .replace(qualifiedOpenTagPattern('t'), '')
+        .replace(new RegExp(`<\/${XML_PREFIX_PATTERN}t\s*>$`, 'i'), ''));
+      const start = logicalText.length;
+      logicalText += value;
+      records.push({
+        start,
+        end: logicalText.length,
+        value,
+        prefix,
+        xmlStart: Number(paragraph.index || 0) + Number(node.index || 0),
+        xmlEnd: Number(paragraph.index || 0) + Number(node.index || 0) + node[0].length,
+        xml: node[0]
+      });
+    }
+  }
+  return { logicalText, records };
+}
+
+function textTagWithValue(record, value) {
+  const text = String(value ?? '');
+  let openTag = record.xml.match(qualifiedOpenTagPattern('t'))?.[0] || `<${record.prefix}t>`;
+  if (/\/\s*>$/.test(openTag)) openTag = openTag.replace(/\/\s*>$/, '>');
+  if (/^\s|\s$|\n/.test(text) && !/\bxml:space\s*=/.test(openTag)) openTag = openTag.replace(/>$/, ' xml:space="preserve">');
+  return `${openTag}${escapeXmlText(text)}</${record.prefix}t>`;
+}
+
+function replaceTextRange(sourceXml, replacement) {
+  const bodyMatch = String(sourceXml).match(qualifiedElementPattern('txBody'));
+  if (!bodyMatch) throw new Error('선택한 텍스트 상자에서 글자 내용을 찾지 못했습니다.');
+  const start = Number(replacement?.start);
+  const end = Number(replacement?.end);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) throw new Error('바꿀 글자 범위가 올바르지 않습니다.');
+  const { logicalText, records } = textNodeRecords(bodyMatch[0]);
+  if (end > logicalText.length) throw new Error('양식의 글자가 바뀌어 선택 범위를 찾지 못했습니다.');
+  const selectedText = logicalText.slice(start, end);
+  if (selectedText.includes('\n')) throw new Error('한 번에 한 문단 안의 글자만 연결해주세요. 줄을 나누어 각각 선택할 수 있습니다.');
+  if (replacement.selectedText != null && String(replacement.selectedText) !== selectedText) throw new Error('양식의 선택한 글자가 바뀌었습니다. 텍스트 범위를 다시 선택해주세요.');
+  const touched = records.filter((record) => record.end > start && record.start < end);
+  if (!touched.length) throw new Error('선택한 글자 범위를 PPTX에서 찾지 못했습니다.');
+  const value = validateReplacementText(replacement.value);
+  const first = touched[0];
+  const last = touched[touched.length - 1];
+  const changes = touched.map((record) => {
+    const localStart = Math.max(0, start - record.start);
+    const localEnd = Math.min(record.value.length, end - record.start);
+    const before = record === first ? record.value.slice(0, localStart) : '';
+    const after = record === last ? record.value.slice(localEnd) : '';
+    return { record, value: `${before}${record === first ? value : ''}${after}` };
+  });
+  let nextBody = bodyMatch[0];
+  for (const change of changes.sort((left, right) => right.record.xmlStart - left.record.xmlStart)) {
+    nextBody = `${nextBody.slice(0, change.record.xmlStart)}${textTagWithValue(change.record, change.value)}${nextBody.slice(change.record.xmlEnd)}`;
+  }
+  let updated = `${sourceXml.slice(0, bodyMatch.index)}${nextBody}${sourceXml.slice(bodyMatch.index + bodyMatch[0].length)}`;
+  if (KOREAN_TEXT_PATTERN.test(value)) updated = ensureKoreanTextRun(updated);
+  return updated;
+}
+
 function normalizeTypeface(value) {
   const normalized = String(value || '').normalize('NFKC').trim().replace(/^@+/, '').replace(/\s+/g, ' ');
   if (!normalized || normalized.startsWith('+')) return '';
@@ -1341,6 +1411,12 @@ function convertDynamicFieldsToRuns(bodyXml, fallbackPrefix) {
 }
 
 function replaceTextContainer(sourceXml, replacement) {
+  if (Array.isArray(replacement)) {
+    return replacement
+      .slice()
+      .sort((left, right) => Number(right.start) - Number(left.start))
+      .reduce((updated, range) => replaceTextRange(updated, range), sourceXml);
+  }
   let replaced = false;
   const text = validateReplacementText(replacement);
   const bodyMatch = String(sourceXml).match(qualifiedElementPattern('txBody'));

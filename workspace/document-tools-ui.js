@@ -376,6 +376,7 @@
     templatePreviewSequence: 0,
     rowPreviewSequence: 0,
     preserveSelectionOnFocus: false,
+    textRangeSelection: { blockId: '', start: 0, end: 0 },
     rosterImport: null,
     initialized: false
   };
@@ -4098,7 +4099,15 @@
       templateToken: certificate.template?.token || '',
       profileId: certificate.template?.profileId || '',
       slideNumber: certificate.slideNumber,
-      fields: certificate.fields.map((field) => ({ blockId: field.blockId, label: field.label })),
+      fields: certificate.fields.map((field) => ({
+        blockId: field.blockId,
+        label: field.label,
+        ...(Number.isInteger(field.rangeStart) && Number.isInteger(field.rangeEnd) ? {
+          rangeStart: field.rangeStart,
+          rangeEnd: field.rangeEnd,
+          selectedText: field.selectedText
+        } : {})
+      })),
       ...extra
     };
   }
@@ -4297,8 +4306,13 @@
     slide.blocks.filter((block) => certificate.showHiddenBlocks || !block.occluded).forEach((block) => {
       const button = element('button', 'certificate-block'); button.type = 'button'; button.dataset.certificateBlock = block.id;
       if (block.occluded) button.classList.add('occluded');
-      const selectedIndex = certificate.fields.findIndex((field) => field.blockId === block.id);
-      if (selectedIndex >= 0) { button.classList.add('selected'); button.append(element('span', 'certificate-block-order', String(selectedIndex + 1))); }
+      const selectedFields = certificate.fields.map((field, index) => ({ field, index })).filter((item) => item.field.blockId === block.id);
+      const selectedIndex = selectedFields[0]?.index ?? -1;
+      if (selectedIndex >= 0) {
+        button.classList.add('selected');
+        const order = selectedFields.length > 1 ? `${selectedIndex + 1}+${selectedFields.length - 1}` : String(selectedIndex + 1);
+        button.append(element('span', 'certificate-block-order', order));
+      }
       const left = Number(block.x) / size.width * 100;
       const top = Number(block.y) / size.height * 100;
       const width = Number(block.width) / size.width * 100;
@@ -4308,8 +4322,8 @@
       const layerOrder = { master: 0, layout: 100000, slide: 200000 }[block.sourceLayer] ?? 200000;
       const zOrder = Math.max(0, Math.min(99999, Math.trunc(Number(block.zOrder) || 0)));
       button.style.zIndex = String(layerOrder + zOrder);
-      button.title = ([block.name, block.text].filter(Boolean).join(' · ') || '빈 텍스트 상자').slice(0, 240);
-      button.setAttribute('aria-label', `${selectedIndex >= 0 ? `${selectedIndex + 1}번 선택됨` : '선택'}: ${button.title}`);
+      button.title = `${([block.name, block.text].filter(Boolean).join(' · ') || '빈 텍스트 상자').slice(0, 220)} · 눌러서 바꿀 글자를 드래그 선택`;
+      button.setAttribute('aria-label', `${selectedIndex >= 0 ? `${selectedFields.length}개 글자 범위 연결됨` : '글자 선택'}: ${button.title}`);
       button.setAttribute('aria-pressed', String(selectedIndex >= 0));
       button.disabled = certificate.running;
       button.append(element('span', 'certificate-block-label', fallbackBlockLabel(block)));
@@ -4318,11 +4332,17 @@
     updateCertificateSlideNavigation(); syncCertificateOverlayBounds();
   }
 
+  function certificateFieldKey(field) {
+    return Number.isInteger(field?.rangeStart) && Number.isInteger(field?.rangeEnd)
+      ? `${field.blockId}:${field.rangeStart}:${field.rangeEnd}`
+      : `${field?.blockId || ''}:*`;
+  }
+
   function updateRowsForFieldChange(previousFields) {
-    const oldIndexByBlock = new Map(previousFields.map((field, index) => [field.blockId, index]));
+    const oldIndexByBlock = new Map(previousFields.map((field, index) => [certificateFieldKey(field), index]));
     certificate.rows = (certificate.rows.length ? certificate.rows : [{ values: [] }]).map((row) => ({
       values: certificate.fields.map((field) => {
-        const oldIndex = oldIndexByBlock.get(field.blockId);
+        const oldIndex = oldIndexByBlock.get(certificateFieldKey(field));
         return oldIndex == null ? '' : String(row.values[oldIndex] ?? '');
       })
     }));
@@ -4333,7 +4353,7 @@
     if (certificate.running) return;
     const slide = selectedSlide(); const block = slide?.blocks.find((item) => item.id === blockId); if (!block) return;
     const previous = certificate.fields.map((field) => ({ ...field }));
-    const index = certificate.fields.findIndex((field) => field.blockId === blockId);
+    const index = certificate.fields.findIndex((field) => field.blockId === blockId && !Number.isInteger(field.rangeStart));
     if (index >= 0) certificate.fields.splice(index, 1);
     else {
       if (certificate.fields.length >= 80) { notify('한 양식에서는 바꿀 글자를 최대 80개까지 선택할 수 있습니다.', 'error'); return; }
@@ -4345,15 +4365,82 @@
     renderCertificateFields(); renderCertificateOverlay(); renderCertificateGrid(); updateCertificateReady();
   }
 
+  function updateCertificateTextRangeSelection() {
+    const input = $('#certificateTextRangeSource'); const status = $('#certificateTextRangeStatus'); const apply = $('#applyCertificateTextRange');
+    if (!input || !status || !apply) return;
+    const start = Math.min(input.selectionStart || 0, input.selectionEnd || 0);
+    const end = Math.max(input.selectionStart || 0, input.selectionEnd || 0);
+    const selected = input.value.slice(start, end);
+    certificate.textRangeSelection.start = start; certificate.textRangeSelection.end = end;
+    const valid = end > start && selected.trim() && !selected.includes('\n');
+    status.textContent = !selected
+      ? '바꿀 글자를 마우스로 드래그하세요.'
+      : selected.includes('\n')
+        ? '여러 줄을 한 번에 연결할 수 없습니다. 줄마다 따로 선택해주세요.'
+        : `선택: “${selected.replace(/\s+/g, ' ').slice(0, 80)}” · ${selected.length}글자`;
+    status.classList.toggle('error', Boolean(selected && !valid));
+    apply.disabled = !valid || certificate.running;
+  }
+
+  function openCertificateTextRange(blockId) {
+    if (certificate.running) return;
+    const block = selectedSlide()?.blocks.find((item) => item.id === blockId); if (!block) return;
+    const dialog = $('#certificateTextRangeDialog'); const input = $('#certificateTextRangeSource');
+    certificate.textRangeSelection = { blockId, start: 0, end: 0 };
+    $('#certificateTextRangeTitle').textContent = block.name || '텍스트 상자의 바꿀 글자 선택';
+    $('#certificateTextRangeDescription').textContent = '원문에서 실제로 바뀔 글자만 드래그하세요. 앞뒤 문구와 글꼴·색상·크기는 그대로 유지됩니다.';
+    input.value = String(block.text || ''); input.readOnly = true;
+    $('#applyCertificateWholeBlock').disabled = certificate.running || !input.value;
+    updateCertificateTextRangeSelection();
+    if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
+    requestAnimationFrame(() => { input.focus({ preventScroll: true }); input.setSelectionRange(0, 0); });
+  }
+
+  function addCertificateTextRange({ whole = false } = {}) {
+    const blockId = certificate.textRangeSelection.blockId;
+    const block = selectedSlide()?.blocks.find((item) => item.id === blockId); if (!block || certificate.running) return;
+    const start = whole ? null : certificate.textRangeSelection.start;
+    const end = whole ? null : certificate.textRangeSelection.end;
+    const selectedText = whole ? String(block.text || '') : String(block.text || '').slice(start, end);
+    if (!selectedText || (!whole && (!selectedText.trim() || selectedText.includes('\n')))) { updateCertificateTextRangeSelection(); return; }
+    const conflicts = certificate.fields.filter((field) => field.blockId === blockId);
+    const overlaps = whole
+      ? conflicts.length > 0
+      : conflicts.some((field) => !Number.isInteger(field.rangeStart) || (start < field.rangeEnd && end > field.rangeStart));
+    if (overlaps) { notify('이미 연결한 글자와 범위가 겹칩니다. 겹치지 않는 글자를 선택해주세요.', 'error'); return; }
+    if (certificate.fields.length >= 80) { notify('한 양식에서는 바꿀 글자를 최대 80개까지 선택할 수 있습니다.', 'error'); return; }
+    const previous = certificate.fields.map((field) => ({ ...field }));
+    const labelSource = selectedText.replace(/\s+/g, ' ').trim();
+    certificate.fields.push({
+      blockId,
+      label: labelSource && labelSource.length <= 24 ? labelSource : normalizeFieldLabel(block, certificate.fields.length),
+      sourceText: selectedText,
+      sourceName: block.name,
+      ...(whole ? {} : { rangeStart: start, rangeEnd: end, selectedText })
+    });
+    updateRowsForFieldChange(previous); restoreTemplatePreview(); renderCertificateFields(); renderCertificateOverlay(); renderCertificateGrid(); updateCertificateReady();
+    $('#certificateTextRangeDialog').close?.();
+  }
+
+  function removeCertificateField(index) {
+    if (certificate.running || !certificate.fields[index]) return;
+    const previous = certificate.fields.map((field) => ({ ...field }));
+    certificate.fields.splice(index, 1);
+    updateRowsForFieldChange(previous);
+    if (!certificate.fields.length) certificate.rosterImport = null;
+    restoreTemplatePreview(); renderCertificateFields(); renderCertificateOverlay(); renderCertificateGrid(); updateCertificateReady();
+  }
+
   function renderCertificateFields() {
     const container = $('#certificateFieldList'); container.replaceChildren();
-    if (!certificate.fields.length) container.append(element('div', 'list-empty', '미리보기에서 바꿀 글자를 클릭하세요.'));
+    if (!certificate.fields.length) container.append(element('div', 'list-empty', '미리보기에서 텍스트 상자를 누른 뒤 바꿀 글자만 드래그하세요.'));
     certificate.fields.forEach((field, index) => {
       const row = element('div', 'certificate-field-row');
       row.append(element('span', 'certificate-field-order', String(index + 1)));
       const input = element('input'); input.type = 'text'; input.maxLength = 80; input.value = field.label; input.dataset.certificateFieldLabel = String(index); input.setAttribute('aria-label', `${index + 1}번 열 이름`); input.disabled = certificate.running;
       const remove = element('button', '', '×'); remove.type = 'button'; remove.dataset.certificateFieldRemove = String(index); remove.setAttribute('aria-label', `${field.label} 선택 해제`); remove.disabled = certificate.running;
-      const source = element('span', 'certificate-field-source', [field.sourceName, field.sourceText].filter(Boolean).join(' · ') || '빈 텍스트 상자');
+      const rangeLabel = Number.isInteger(field.rangeStart) ? `선택 글자 “${String(field.selectedText || field.sourceText || '').replace(/\s+/g, ' ').slice(0, 80)}”` : '텍스트 상자 전체';
+      const source = element('span', 'certificate-field-source', [field.sourceName, rangeLabel].filter(Boolean).join(' · ') || '빈 텍스트 상자');
       row.append(input, remove, source); container.append(row);
     });
     $('#clearCertificateFields').disabled = certificate.running || !certificate.fields.length;
@@ -4710,7 +4797,7 @@
     const entry = certificate.previewCache[String(certificate.slideNumber)];
     if (!entry?.imageUrl) { void renderTemplatePreview(); return; }
     applyCertificateTemplatePreview(entry);
-    $('#certificatePreviewMode').textContent = '미리보기의 글자 영역을 클릭하면 1, 2, 3 순서로 선택됩니다.';
+    $('#certificatePreviewMode').textContent = '미리보기의 텍스트 상자를 누른 뒤 실제로 바꿀 글자만 드래그해 연결하세요.';
   }
 
   async function loadCertificateTemplate(result, profile = null) {
@@ -4732,8 +4819,21 @@
     certificate.slideNumber = Number(profile?.slideNumber || result.slides?.[0]?.number || 1);
     const slide = selectedSlide(); const available = new Map((slide?.blocks || []).map((block) => [block.id, block]));
     certificate.fields = (profile?.fields || []).filter((field) => available.has(field.blockId)).map((field, index) => {
-      const block = available.get(field.blockId); return { blockId: field.blockId, label: field.label || `항목 ${index + 1}`, sourceText: block.text, sourceName: block.name };
-    });
+      const block = available.get(field.blockId);
+      const declaresRange = field.rangeStart !== undefined || field.rangeEnd !== undefined || field.selectedText !== undefined;
+      const hasRange = Number.isInteger(field.rangeStart) && Number.isInteger(field.rangeEnd)
+        && field.rangeStart >= 0 && field.rangeEnd <= String(block.text || '').length && field.rangeEnd > field.rangeStart;
+      if (declaresRange && !hasRange) return null;
+      const selectedText = hasRange ? String(block.text || '').slice(field.rangeStart, field.rangeEnd) : String(block.text || '');
+      if (hasRange && field.selectedText && field.selectedText !== selectedText) return null;
+      return {
+        blockId: field.blockId,
+        label: field.label || `항목 ${index + 1}`,
+        sourceText: selectedText,
+        sourceName: block.name,
+        ...(hasRange ? { rangeStart: field.rangeStart, rangeEnd: field.rangeEnd, selectedText } : {})
+      };
+    }).filter(Boolean);
     certificate.filenameTemplate = String(profile?.filenameTemplate ?? '{A}').slice(0, 160);
     emptyCertificateRows(3); certificate.templatePreviewUrl = ''; saveCertificateSlideDraft();
     $('#certificateEditor').hidden = false;
@@ -5706,7 +5806,11 @@
     $('#certificateSlideRail').addEventListener('click', (event) => {
       const page = event.target.closest('[data-certificate-slide]'); if (page) void switchCertificateSlide(Number(page.dataset.certificateSlide), { focusViewport: true });
     });
-    $('#certificateBlockOverlay').addEventListener('click', (event) => { const block = event.target.closest('[data-certificate-block]'); if (block) toggleCertificateBlock(block.dataset.certificateBlock); });
+    $('#certificateBlockOverlay').addEventListener('click', (event) => {
+      const block = event.target.closest('[data-certificate-block]'); if (!block) return;
+      if (guideDemo.active) toggleCertificateBlock(block.dataset.certificateBlock);
+      else openCertificateTextRange(block.dataset.certificateBlock);
+    });
     previewImage.addEventListener('load', scheduleCertificateOverlayBounds);
     previewImage.addEventListener('error', () => { $('#certificateBlockOverlay').dataset.boundsReady = 'false'; });
     if (typeof ResizeObserver === 'function') {
@@ -5719,8 +5823,13 @@
     });
     $('#certificateFieldList').addEventListener('click', (event) => {
       const remove = event.target.closest('[data-certificate-field-remove]'); if (!remove) return;
-      const field = certificate.fields[Number(remove.dataset.certificateFieldRemove)]; if (field) toggleCertificateBlock(field.blockId);
+      removeCertificateField(Number(remove.dataset.certificateFieldRemove));
     });
+    const rangeSource = $('#certificateTextRangeSource');
+    ['select', 'mouseup', 'keyup'].forEach((eventName) => rangeSource.addEventListener(eventName, updateCertificateTextRangeSelection));
+    $('#applyCertificateTextRange').addEventListener('click', () => addCertificateTextRange());
+    $('#applyCertificateWholeBlock').addEventListener('click', () => addCertificateTextRange({ whole: true }));
+    $$('[data-close-certificate-text-range]').forEach((button) => button.addEventListener('click', () => $('#certificateTextRangeDialog').close?.()));
     $('#clearCertificateFields').addEventListener('click', async () => {
       if (certificate.running || !certificate.fields.length) return;
       if (hasCertificateData() && !await confirmAction('선택한 글자를 모두 지우면 현재 표의 정보도 사라집니다. 계속할까요?', { title: '글자 선택 지우기', action: '모두 지우기' })) return;
