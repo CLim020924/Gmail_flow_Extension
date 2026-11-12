@@ -305,7 +305,7 @@
 - 결정: 이 PC에 1.15.38을 직접 기준 설치하고 사용자 데이터 지문 보존을 확인한 뒤, 무변경 1.15.39를 게시해 실제 앱 내부 자동 업데이트를 다시 수행한다.
 - 통과 기준: `helper ready` 로그가 앱 종료 전에 생성되고, 부모 앱 종료 뒤 설치기가 실행되어 1.15.39가 설치되며 정확한 새 EXE가 자동 재실행된다.
 - 설치 파일: 111,031,475 bytes, SHA-256 `895D720F2DBE0A99B12E431BB26624DDFD668AB7C7822F75E5720D97F8DE8942`, FileVersion 1.15.39.
-- 상태: 진행 중
+- 상태: 1.15.39 검증에서 `Get-FileHash` 호환 문제를 발견해 REQ-20261113-07로 이어짐
 
 ### REQ-20261113-07 · 독립 PowerShell의 SHA-256 검사 호환
 
@@ -313,7 +313,10 @@
 - 수정: `Get-FileHash`를 제거하고 .NET `SHA256.Create()`와 `FileStream`으로 설치 파일 해시를 계산한다.
 - 검증: 합성 파일의 실제 해시가 일치한 뒤 로그가 `installer starting`까지 도달하는 Windows 독립 helper 시험을 통과했다. 1.15.40을 기준 설치하고 1.15.41로 실제 자동 업데이트를 최종 확인한다.
 - 1.15.41 설치 파일: 111,031,096 bytes, SHA-256 `F24DAB46FE4DBE915B1955B71D14B8E123F92E6174B6C526A5F748809C85CDFF`, FileVersion 1.15.41.
-- 상태: 진행 중
+- 실제 종단 검증: 1.15.40 실행 상태에서 독립 helper를 기동하고 기존 앱 프로세스를 종료했다. 로그가 `helper ready` → `app processes stopped` → `installer starting` → `installer exited 0` → `verified 1.15.41` 순서로 남았다. 새 앱은 정확한 설치 경로에서 `--updated`로 자동 재실행됐고 실제 EXE는 1.15.41이었다.
+- 데이터 보존: 핵심 사용자 데이터 지문은 업데이트 전후 `5AE8B3C90DB7B8AF09EB42A705B21C62D75BCFA33D40E5AB18DD7E53B0258F0D`로 일치했다.
+- 상태: 완료
+- 커밋: `76ee6cb`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
