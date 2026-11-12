@@ -113,4 +113,22 @@ Function CmoeChooseClose
   Quit
 FunctionEnd
 
+!macro customInstall
+  ; electron-builder normally keeps an existing shortcut during an update.
+  ; Recreate only shortcuts the user already had so their target and icon are
+  ; guaranteed to reference the just-installed executable, while respecting a
+  ; user who deliberately removed the desktop shortcut.
+  ${If} ${FileExists} "$newDesktopLink"
+    Delete "$newDesktopLink"
+    CreateShortCut "$newDesktopLink" "$appExe" "" "$appExe" 0 SW_SHOWNORMAL "" "CMOE Workspace"
+    WinShell::SetLnkAUMI "$newDesktopLink" "${APP_ID}"
+  ${EndIf}
+  ${If} ${FileExists} "$newStartMenuLink"
+    Delete "$newStartMenuLink"
+    CreateShortCut "$newStartMenuLink" "$appExe" "" "$appExe" 0 SW_SHOWNORMAL "" "CMOE Workspace"
+    WinShell::SetLnkAUMI "$newStartMenuLink" "${APP_ID}"
+  ${EndIf}
+  System::Call 'Shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
+!macroend
+
 !endif

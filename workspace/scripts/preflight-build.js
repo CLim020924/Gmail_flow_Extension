@@ -66,6 +66,7 @@ try {
   assert.equal(packageJson.build?.productName, 'CMOE Workspace', 'CMOE Workspace product name changed unexpectedly.');
   assert.equal(packageJson.build?.nsis?.include, 'build/installer.nsh', 'Installer maintenance UI must be included.');
   assert.equal(packageJson.build?.nsis?.deleteAppDataOnUninstall, false, 'Uninstall must preserve user data.');
+  assert.equal(packageJson.build?.nsis?.allowToChangeInstallationDirectory, false, 'The installed app must keep one stable per-user installation path.');
   assert.deepEqual(packageJson.build?.win?.target, ['nsis'], 'CMOE Workspace must be distributed as an installer only.');
   assert.equal(Object.hasOwn(packageJson.build || {}, 'portable'), false, 'Portable distribution configuration must remain disabled.');
   assert.equal(Object.hasOwn(packageJson.scripts || {}, 'build:windows'), false, 'Portable build scripts must remain disabled.');

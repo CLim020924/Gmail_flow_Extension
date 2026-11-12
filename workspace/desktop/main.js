@@ -35,6 +35,7 @@ const {
 const { withOperationTimeout } = require('./network-timeout');
 const { collectRemoteSyncWarnings, normalizeCloseFlushResult } = require('./close-sync-policy');
 const { safeShortcutLabel, shortcutPathInside } = require('./shortcut-path');
+const { repairInstalledAppShortcuts } = require('./install-shortcuts');
 const { DocumentTools } = require('./document-tools');
 const { createLoginBrowserLauncher } = require('./login-browser');
 const UpdateService = require('./update-service');
@@ -1879,6 +1880,7 @@ app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   const userDataPath = app.getPath('userData');
   const versionMarkerPath = path.join(userDataPath, 'installed-version.json');
+  const startedAfterUpdate = process.argv.includes('--updated');
   if (app.isPackaged && !isSmokeTest) {
     let previousVersion = '';
     try { previousVersion = String(JSON.parse(await fs.promises.readFile(versionMarkerPath, 'utf8'))?.version || ''); } catch (error) { if (error.code !== 'ENOENT') console.warn('이전 실행 버전 표시를 읽지 못했습니다.', error); }
@@ -1973,7 +1975,23 @@ app.whenReady().then(async () => {
   const startupWorkspaceState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
   if (startupWorkspaceState.preferences.storageMode === 'drive') markMainDriveStateDirty(startupWorkspaceState);
   const initialProgram = requestedProgram();
-  if (app.isPackaged && !isSmokeTest) await fs.promises.writeFile(versionMarkerPath, `${JSON.stringify({ version: app.getVersion(), confirmedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+  if (app.isPackaged && !isSmokeTest) {
+    if (startedAfterUpdate) {
+      try {
+        await repairInstalledAppShortcuts({
+          appPath: process.execPath,
+          desktopPath: app.getPath('desktop'),
+          appDataPath: app.getPath('appData'),
+          shellApi: shell
+        });
+      } catch (error) {
+        // A locked .lnk must not prevent the newly installed app from opening.
+        // The NSIS hook already performed the first repair attempt.
+        console.warn('업데이트된 바로가기를 다시 만들지 못했습니다.', error);
+      }
+    }
+    await fs.promises.writeFile(versionMarkerPath, `${JSON.stringify({ version: app.getVersion(), executablePath: process.execPath, confirmedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+  }
   if (initialProgram && !isSmokeTest) createProgramWindow(initialProgram, { projectId: requestedProjectId(), documentMode: requestedDocumentMode() }); else createWindow();
 
   if (isSmokeTest) {

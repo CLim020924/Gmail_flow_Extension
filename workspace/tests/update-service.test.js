@@ -25,7 +25,7 @@ const feed = {
   });
   assert.equal(checked.available, true);
   const command = updater.helperCommand({ installerPath: `C:/Temp/test's setup.exe`, expectedSha256: 'a'.repeat(64), expectedBytes: 123, expectedVersion: '1.5.10', appPath: 'C:/Apps/CMOE Workspace.exe', pid: 123 });
-  assert.match(command, /Get-Process -Id 123/); assert.match(command, /SilentlyContinue/); assert.match(command, /if\(\$target\)/); assert.match(command, /\.Path/); assert.match(command, /Wait-Process -Id 123/); assert.match(command, /\.Length -ne 123/); assert.match(command, /Get-FileHash/); assert.match(command, /FileVersion/); assert.match(command, /--update-failed/); assert.match(command, /1\.5\.10/); assert.match(command, /test''s setup\.exe/);
+  assert.match(command, /Get-Process -Id 123/); assert.match(command, /SilentlyContinue/); assert.match(command, /if\(\$target\)/); assert.match(command, /\.Path/); assert.match(command, /Wait-Process -Id 123/); assert.match(command, /\.Length -ne 123/); assert.match(command, /Get-FileHash/); assert.match(command, /FileVersion/); assert.match(command, /Start-Process -FilePath \$app -ArgumentList '--updated'/); assert.match(command, /--update-failed/); assert.match(command, /1\.5\.10/); assert.match(command, /test''s setup\.exe/);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cmoe-update-cancel-'));
   const cancelController = new AbortController(); cancelController.abort();
   const oneByte = Buffer.from([0]);
