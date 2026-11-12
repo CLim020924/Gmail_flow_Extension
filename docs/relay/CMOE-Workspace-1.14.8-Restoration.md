@@ -206,3 +206,9 @@
 - 같은 캐시 설치기를 앱 종료 상태에서 `/S`로 직접 실행하면 exit 0으로 성공했고 설치 EXE·등록 버전·두 기본 바로가기가 모두 1.15.33을 가리켰다. 새 앱도 해당 경로에서 `--updated`로 실행했다.
 - helper의 `Get-Process`와 `Wait-Process -ErrorAction Stop` 사이에 앱이 종료되는 경쟁 조건을 제거했다. 경로를 얻을 수 있을 때만 process identity를 확인하고, 이미 종료된 PID는 정상으로 취급한다. 설치기에는 `/S`만 전달하고 새 앱에만 `--updated`를 전달한다.
 - 1.15.34 설치형은 `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.34-Windows.exe`, 크기 `111,029,704` bytes, SHA-256 `07182921E044D6596F84E0F2312C08A7F10A3A067446F957D488133A6D6C740C`, FileVersion 1.15.34, 서명 없음이다.
+
+## 1.15.35 자동 업데이트 시험용 후속 버전
+
+- 사용자 요청에 따라 현재 PC의 설치된 1.15.34는 유지하고, 수정된 helper가 다음 버전을 실제로 자동 설치·재실행하는지 직접 시험할 수 있도록 기능·데이터 구조 변경 없는 1.15.35를 배포한다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.35-Windows.exe`, 크기 `111,029,756` bytes, SHA-256 `7597DC6358C9A0B373B72D2AF8C02302FD4E14AEFE118AC52BDB309DB36D380E`, FileVersion 1.15.35, 서명 없음.
+- 이 PC에는 1.15.35를 직접 설치하지 않는다. 사용자가 1.15.34의 환경 설정에서 업데이트를 시작해 다운로드·백업·종료·설치·바로가기·자동 재실행을 확인한다.
