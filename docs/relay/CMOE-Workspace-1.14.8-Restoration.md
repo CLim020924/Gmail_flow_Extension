@@ -258,3 +258,11 @@
 - 현재 PC의 1.15.41은 유지한다. 1.15.42를 직접 설치하지 않고 앱 내부 업데이트로만 시험한다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.42-Windows.exe`, 크기 `111,031,146` bytes, SHA-256 `C04EF78BC62EABA520EF2D70E7253DB95B16C457D62F031E37420A1BD9D5782C`, FileVersion 1.15.42, 서명 없음.
 - GitHub Release와 Cresero Worker `0ff7e14d-56ed-4058-af81-ab74be36327e`에 배포했다. 실제 앱 코드가 설치된 1.15.41에 1.15.42를 제안하며, 현재 PC는 사용자 시험을 위해 1.15.41로 유지했다.
+
+## 1.15.43 앱 종료 뒤 보이는 업데이트 진행 창
+
+- 자동 업데이트 자체는 1.15.42까지 정상 완료됐지만 앱 종료부터 재실행 사이에 진행 UI가 보이지 않아 사용자가 튕김과 정상 설치를 구분할 수 없었다.
+- 숨김 PowerShell의 첫 창 표시 제한을 Windows `ShowWindow`로 해제하고 작업 표시줄 표시를 활성화했다. 준비·파일 검증·설치·버전 확인·재실행 문구와 marquee 진행 표시를 유지한다.
+- 중첩 EncodedCommand의 Windows 길이 제한을 피하기 위해 helper를 BOM 포함 임시 스크립트 파일로 만들고 짧은 bootstrap에서 실행한다.
+- 실제 helper 프로세스의 윈도우 핸들, `CMOE Workspace 업데이트` 제목, 화면 내 좌표, visible 상태와 `helper ready` 로그를 확인했다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.43-Windows.exe`, 크기 `111,031,533` bytes, SHA-256 `574FC2F8EA18A0B9C3DA077A93A0DA534888CCF9B3EB436B325AF217CB9AA999`, FileVersion 1.15.43, 서명 없음.

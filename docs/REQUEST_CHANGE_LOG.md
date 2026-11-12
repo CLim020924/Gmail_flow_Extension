@@ -328,6 +328,16 @@
 - 배포: GitHub Release `cmoe-workspace-v1.15.42`, Cresero Worker `0ff7e14d-56ed-4058-af81-ab74be36327e`; 실제 앱 코드가 1.15.41에 1.15.42를 제안함을 확인했다.
 - 커밋: 앱 `b0c7f7d`, 사이트 `725d8f5`
 
+### REQ-20261113-09 · 앱 종료 뒤 업데이트 공백 제거
+
+- 사용자 요청: 업데이트를 누르면 앱이 꺼진 뒤 아무것도 보이지 않아 정상 진행인지 튕긴 것인지 알 수 없으므로 그동안 상태를 표시해달라.
+- 원인: helper에는 Windows Forms 창이 있었지만 bootstrap의 숨김 창 설정이 첫 top-level 창 표시에도 적용되어 실제 사용자 화면에는 보이지 않았다.
+- 수정: form을 만든 뒤 Windows `ShowWindow`와 `SetForegroundWindow`를 명시적으로 호출하고 작업 표시줄 표시를 활성화한다. 준비·최종 검증·설치·설치 버전 확인·재실행 단계마다 안내 문구를 바꾼다.
+- 추가 안정화: 표시 코드 추가로 중첩 EncodedCommand가 Windows 명령줄 제한을 넘는 문제를 시험 중 발견했다. helper 본문을 BOM 포함 임시 `update-helper.ps1`에 저장하고 짧은 bootstrap이 이를 실행하도록 변경했다.
+- 검증: helper 단위 시험, PowerShell 구문 분석, 전체 Node 시험과 빌드 사전검사를 통과했다. 실제 helper 프로세스의 MainWindowTitle·윈도우 핸들·화면 내 좌표·visible 상태와 `helper ready` 로그를 확인했다.
+- 설치 파일: 111,031,533 bytes, SHA-256 `574FC2F8EA18A0B9C3DA077A93A0DA534888CCF9B3EB436B325AF217CB9AA999`, FileVersion 1.15.43.
+- 상태: 기준판 준비
+
 ## 현재 미완료 또는 계속 개선할 항목
 
 - 임의 Excel 서식을 셀 병합·수식·인쇄 영역까지 보존하는 자유 출력 틀 편집기

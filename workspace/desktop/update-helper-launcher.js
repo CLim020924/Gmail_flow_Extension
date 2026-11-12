@@ -22,12 +22,14 @@ async function launchUpdateHelper(payload, options = {}) {
   const timeoutMs = Number(options.timeoutMs || 10_000);
   const pollMs = Number(options.pollMs || 100);
   const logPath = path.join(path.dirname(payload.installerPath), 'update-helper.log');
+  const scriptPath = path.join(path.dirname(payload.installerPath), 'update-helper.ps1');
+  await fileSystem.promises.mkdir(path.dirname(payload.installerPath), { recursive: true });
   await fileSystem.promises.rm(logPath, { force: true });
 
   const command = UpdateService.helperCommand(payload);
-  const encoded = Buffer.from(command, 'utf16le').toString('base64');
+  await fileSystem.promises.writeFile(scriptPath, `\uFEFF${command}`, 'utf8');
   const executable = windowsPowerShellPath(options.environment);
-  const helperArguments = ['-NoProfile', '-NonInteractive', '-Sta', '-EncodedCommand', encoded];
+  const helperArguments = ['-NoProfile', '-NonInteractive', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', scriptPath];
   const bootstrap = [
     `$ErrorActionPreference='Stop'`,
     `Start-Process -FilePath ${powerShellQuote(executable)} -ArgumentList @(${helperArguments.map(powerShellQuote).join(',')}) -WindowStyle Hidden`
@@ -46,7 +48,7 @@ async function launchUpdateHelper(payload, options = {}) {
     if (spawnError) throw new Error(`업데이트 설치 도우미를 실행하지 못했습니다: ${spawnError.message}`);
     try {
       const log = await fileSystem.promises.readFile(logPath, 'utf8');
-      if (log.includes('helper ready')) return { pid: child.pid || 0, logPath, executable };
+      if (log.includes('helper ready')) return { pid: child.pid || 0, logPath, scriptPath, executable };
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
