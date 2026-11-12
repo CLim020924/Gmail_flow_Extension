@@ -229,3 +229,4 @@
 - 현재 PC는 1.15.36에 유지하고 1.15.37만 GitHub Release와 Cresero 고정 피드에 게시한다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.37-Windows.exe`, 크기 `111,030,789` bytes, SHA-256 `F9344ABD6325B927F90D3A8E34EBAEAC1FAC92CF0CF507C7AA693F458AA18248`, FileVersion 1.15.37, 서명 없음.
 - 사용자는 환경 설정에서 업데이트를 시작한 뒤 앱이 꺼져도 별도 `CMOE Workspace 업데이트` 창이 닫힐 때까지 앱이나 바탕화면 아이콘을 다시 누르지 않는다. 설치 완료 뒤 1.15.37이 자동으로 열리고 같은 업데이트가 재표시되지 않아야 통과다.
+- GitHub Release와 Cresero Worker `4392b35b-d1c2-461c-86c6-8c85f2c0dad6`에 배포했다. 공개 파일 크기·SHA-256·FileVersion 일치와 앱 코드의 1.15.36→1.15.37 발견을 확인했다.
