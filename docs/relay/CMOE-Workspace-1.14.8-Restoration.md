@@ -77,7 +77,7 @@
 ## 아직 검증하지 않은 항목
 
 - 실제 Google 계정의 Apps Script 시간 트리거 도달 발송은 계정 승인 후 별도 검증이 필요하다.
-- 외부 Windows PC에서 1.14.8 위에 1.15.0을 설치하는 대화형 업데이트는 아직 실행하지 않았다.
+- 외부 Windows PC에서 1.14.8 위에 1.15.1을 설치하는 대화형 업데이트는 아직 실행하지 않았다.
 - Windows 코드 서명 인증서가 없어 두 EXE는 `NotSigned`이다.
 - Cresero 운영 업데이트 피드와 다운로드 페이지 게시는 이번 요청 범위에서 수행하지 않았다.
 
@@ -99,10 +99,25 @@
 | 설치형 | `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.0-Windows.exe` | 111,025,537 bytes | `2887F5014867AA893F87E1D59075DC52363F3E646CFAE6110E0168082370A83C` | NotSigned |
 | 휴대형 | `workspace/desktop-dist/CMOE-Workspace-1.15.0-Windows.exe` | 92,633,314 bytes | `6CB6C1F950799730B98E79ECB6731FD1E333BB279E7B21078E03BA1E3C6E38B2` | NotSigned |
 
+## 1.15.1 업데이트·중복 처리 보강
+
+- 업데이트 피드 버전과 GitHub 릴리스 폴더·설치 파일명이 정확히 일치해야 다운로드한다.
+- 다운로드 중 취소할 수 있고, 취소·오류 시 `.partial` 파일을 제거한다.
+- 보조 프로세스가 시작 PID의 실행 경로를 정확히 확인한 뒤 종료를 기다린다.
+- 설치 직전 파일 크기와 SHA-256을 다시 검증하고, 설치 후 EXE `FileVersion`이 예정 버전과 일치할 때만 한 번 재실행한다.
+- 설치 관리자는 설치 경로에 속한 제거기만 실행하며, 등록 정보가 손상되면 임의의 명령을 실행하지 않는다.
+- 프로그램 바로가기는 같은 경로의 기존 파일을 교체하고 구 명칭 바로가기를 정리해 중복을 남기지 않는다.
+- Electron 단일 인스턴스 잠금과 두 번째 실행의 기존 창 복원·포커스 동작을 유지한다.
+
+| 종류 | 경로 | 크기 | SHA-256 | 서명 |
+|---|---|---:|---|---|
+| 설치형 | `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.1-Windows.exe` | 111,026,029 bytes | `F88786853B179EEEA01C3FFE39BD4A6D5276CC2C41BF54ED61D1592F32EDF4B0` | NotSigned |
+| 휴대형 | `workspace/desktop-dist/CMOE-Workspace-1.15.1-Windows.exe` | 92,636,346 bytes | `28B923D0480E323F08A6938BD2DC72D0055E3FDEB0C6A74EE968023DEFCCB986` | NotSigned |
+
 ## 다음 작업자 릴레이 목록
 
 1. 실제 Google 계정에서 Apps Script 웹 앱을 배포하고 Gmail 발신 계정 일치·예약 도달 발송·취소·상태 동기화를 확인한다.
-2. 분리된 Windows 테스트 PC/VM에 1.14.8을 먼저 설치하고 1.15.0 업데이트·제거·재시작·사용자 데이터 보존을 검증한다.
+2. 분리된 Windows 테스트 PC/VM에 1.14.8을 먼저 설치하고 1.15.1 업데이트·제거·재시작·사용자 데이터 보존을 검증한다.
 3. 코드 서명 인증서를 준비한 후 두 EXE에 서명하고 SmartScreen 표시를 외부 PC에서 확인한다.
-4. 사용자의 명시적 배포 요청 후에만 GitHub Release, Cresero 다운로드, `update.json`을 1.15.0 해시와 함께 게시한다.
+4. 사용자의 명시적 배포 요청 후에만 GitHub Release, Cresero 다운로드, `update.json`을 1.15.1 해시와 함께 게시한다.
 5. 게시 후 다운로드 본이 로컬 산출물과 크기·SHA-256이 일치하는지 재검증한다.

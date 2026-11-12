@@ -137,7 +137,7 @@
   let workflowEditorDraft = [];
   let workflowEditorTemplateDraft = null;
   let gmailFlowSummary = { connected: false, email: '', rosters: 0, templates: 0, structures: 0 };
-  let appUpdateState = { currentVersion: '', packaged: false, portable: false, checking: false, installing: false, checked: null, progress: null, error: '' };
+  let appUpdateState = { currentVersion: '', packaged: false, portable: false, checking: false, installing: false, canceling: false, checked: null, progress: null, error: '' };
   let guideSession = null;
   let guideStarting = false;
   let guideRefreshFrame = null;
@@ -6004,7 +6004,7 @@
 
   function renderAppUpdate() {
     const status = $('#appVersionStatus'); if (!status) return;
-    const install = $('#installAppUpdate'); const check = $('#checkAppUpdate'); const progress = $('#appUpdateProgress');
+    const install = $('#installAppUpdate'); const cancel = $('#cancelAppUpdate'); const check = $('#checkAppUpdate'); const progress = $('#appUpdateProgress');
     const available = Boolean(appUpdateState.checked?.available); const latest = appUpdateState.checked?.feed?.version || '';
     status.textContent = appUpdateState.error
       ? `현재 ${appUpdateState.currentVersion || '—'} · 확인 실패: ${appUpdateState.error}`
@@ -6014,6 +6014,8 @@
       : `현재 버전 ${appUpdateState.currentVersion || '확인 중'}`;
     check.disabled = appUpdateState.checking || appUpdateState.installing;
     install.hidden = !available; install.disabled = appUpdateState.installing;
+    cancel.hidden = !appUpdateState.installing || appUpdateState.portable;
+    cancel.disabled = Boolean(appUpdateState.canceling);
     install.textContent = appUpdateState.portable ? '새 휴대형 받기' : appUpdateState.installing ? '업데이트 준비 중…' : '다운로드 후 업데이트';
     progress.hidden = !appUpdateState.progress;
     if (appUpdateState.progress) progress.textContent = `다운로드 ${Math.round(appUpdateState.progress.percent || 0)}% · ${Math.round((appUpdateState.progress.received || 0) / 1024 / 1024)}MB / ${Math.round((appUpdateState.progress.total || 0) / 1024 / 1024)}MB`;
@@ -7595,7 +7597,16 @@
       if (!await showConfirm(`CMOE Workspace ${appUpdateState.checked?.feed?.version || ''}을 내려받아 검증한 뒤 업데이트할까요?\n작업 내용을 저장하고 앱을 종료한 다음 같은 위치에 설치하고 한 번만 다시 실행합니다.`, { title: '프로그램 업데이트', action: '업데이트' })) return;
       appUpdateState.installing = true; appUpdateState.error = ''; renderAppUpdate();
       try { await globalThis.workspaceDesktop.installUpdate(); }
-      catch (error) { appUpdateState.installing = false; appUpdateState.error = error.message; renderAppUpdate(); showToast(`업데이트를 시작하지 못했습니다: ${error.message}`, 'error'); }
+      catch (error) { appUpdateState.installing = false; appUpdateState.progress = null; appUpdateState.error = error.message; renderAppUpdate(); showToast(`업데이트를 시작하지 못했습니다: ${error.message}`, 'error'); }
+    });
+    $('#cancelAppUpdate').addEventListener('click', async () => {
+      if (!appUpdateState.installing || appUpdateState.canceling) return;
+      appUpdateState.canceling = true; renderAppUpdate();
+      try {
+        const result = await globalThis.workspaceDesktop.cancelUpdate();
+        if (result?.canceled) showToast('업데이트 다운로드 취소를 요청했습니다.', 'success');
+      } catch (error) { showToast(`다운로드를 취소하지 못했습니다: ${error.message}`, 'error'); }
+      finally { appUpdateState.canceling = false; renderAppUpdate(); }
     });
     $('#mailEditForm').addEventListener('submit', async (event) => {
       event.preventDefault();

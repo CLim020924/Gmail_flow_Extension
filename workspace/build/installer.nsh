@@ -7,6 +7,8 @@
 
 Var CmoeInstalledVersion
 Var CmoeUninstallCommand
+Var CmoeInstallLocation
+Var CmoeExpectedUninstaller
 Var CmoeVersionRelation
 Var CmoeMaintenanceTitle
 Var CmoeMaintenanceCopy
@@ -17,13 +19,22 @@ Var CmoeCloseButton
 !macro customInit
   StrCpy $CmoeInstalledVersion ""
   StrCpy $CmoeUninstallCommand ""
+  StrCpy $CmoeInstallLocation ""
+  StrCpy $CmoeExpectedUninstaller ""
   ReadRegStr $CmoeInstalledVersion HKCU "${UNINSTALL_REGISTRY_KEY}" "DisplayVersion"
   ReadRegStr $CmoeUninstallCommand HKCU "${UNINSTALL_REGISTRY_KEY}" "UninstallString"
+  ReadRegStr $CmoeInstallLocation HKCU "${UNINSTALL_REGISTRY_KEY}" "InstallLocation"
   ${If} $CmoeInstalledVersion == ""
     ReadRegStr $CmoeInstalledVersion HKLM "${UNINSTALL_REGISTRY_KEY}" "DisplayVersion"
     ReadRegStr $CmoeUninstallCommand HKLM "${UNINSTALL_REGISTRY_KEY}" "UninstallString"
+    ReadRegStr $CmoeInstallLocation HKLM "${UNINSTALL_REGISTRY_KEY}" "InstallLocation"
   ${EndIf}
   ${If} $CmoeInstalledVersion != ""
+    ${If} $CmoeInstallLocation != ""
+      StrCpy $CmoeExpectedUninstaller "$CmoeInstallLocation\Uninstall CMOE Workspace.exe"
+      IfFileExists "$CmoeExpectedUninstaller" +2 0
+      StrCpy $CmoeExpectedUninstaller ""
+    ${EndIf}
     ${VersionCompare} "$CmoeInstalledVersion" "${VERSION}" $CmoeVersionRelation
     ${If} ${Silent}
     ${AndIf} $CmoeVersionRelation != "2"
@@ -86,11 +97,11 @@ Function CmoeChooseUpdate
 FunctionEnd
 
 Function CmoeChooseRemove
-  ${If} $CmoeUninstallCommand == ""
-    MessageBox MB_OK|MB_ICONSTOP "제거 프로그램을 찾지 못했습니다. Windows 설정의 설치된 앱에서 CMOE Workspace를 제거해주세요."
+  ${If} $CmoeExpectedUninstaller == ""
+    MessageBox MB_OK|MB_ICONSTOP "이 설치에 속한 제거 프로그램을 확인하지 못했습니다. 임의의 경로를 실행하지 않습니다. Windows 설정의 설치된 앱에서 CMOE Workspace를 확인해주세요."
     Return
   ${EndIf}
-  ExecWait '$CmoeUninstallCommand'
+  ExecWait '"$CmoeExpectedUninstaller"'
   Quit
 FunctionEnd
 

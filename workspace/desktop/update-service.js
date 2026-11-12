@@ -34,7 +34,9 @@ function validateFeed(feed) {
   versionParts(feed.version);
   if (!Number.isSafeInteger(feed.bytes) || feed.bytes < 1 || feed.bytes > MAX_INSTALLER_BYTES) throw new Error('업데이트 파일 크기 정보가 올바르지 않습니다.');
   if (!/^[a-f0-9]{64}$/.test(String(feed.sha256 || ''))) throw new Error('업데이트 SHA-256 정보가 올바르지 않습니다.');
-  validateDownloadUrl(feed.url);
+  const downloadUrl = validateDownloadUrl(feed.url);
+  const expectedPath = `${RELEASE_PATH_PREFIX}${feed.version}/CMOE-Workspace-Setup-${feed.version}-Windows.exe`;
+  if (downloadUrl.pathname !== expectedPath) throw new Error('업데이트 버전과 공식 설치 파일 경로가 일치하지 않습니다.');
   return { schemaVersion: 1, product: PRODUCT, platform: PLATFORM, version: feed.version, bytes: feed.bytes, sha256: feed.sha256, url: feed.url, notes: Array.isArray(feed.notes) ? feed.notes.map(String).slice(0, 12) : [] };
 }
 
@@ -50,10 +52,14 @@ async function checkForUpdate(currentVersion, fetchImpl = globalThis.fetch) {
   return { currentVersion, available: compareVersions(feed.version, currentVersion) > 0, feed };
 }
 
-async function downloadInstaller(feedInput, destination, fetchImpl = globalThis.fetch, onProgress = () => {}) {
+async function downloadInstaller(feedInput, destination, fetchImpl = globalThis.fetch, onProgress = () => {}, options = {}) {
   const feed = validateFeed(feedInput); await fs.promises.mkdir(path.dirname(destination), { recursive: true });
   const partial = `${destination}.partial`; await fs.promises.rm(partial, { force: true });
   const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 10 * 60_000);
+  const externalSignal = options?.signal;
+  const abortFromCaller = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) abortFromCaller();
+  else externalSignal?.addEventListener?.('abort', abortFromCaller, { once: true });
   try {
     const response = await fetchImpl(feed.url, { redirect: 'follow', signal: controller.signal });
     if (!response.ok || !response.body) throw new Error(`업데이트 파일을 내려받지 못했습니다. (${response.status})`);
@@ -66,13 +72,21 @@ async function downloadInstaller(feedInput, destination, fetchImpl = globalThis.
     if (received !== feed.bytes || hash.digest('hex') !== feed.sha256) throw new Error('업데이트 파일 검증에 실패했습니다. 파일을 실행하지 않습니다.');
     await fs.promises.rm(destination, { force: true }); await fs.promises.rename(partial, destination);
     return destination;
-  } catch (error) { await fs.promises.rm(partial, { force: true }); throw error; }
-  finally { clearTimeout(timeout); }
+  } catch (error) {
+    await fs.promises.rm(partial, { force: true });
+    if (externalSignal?.aborted) throw new Error('업데이트 다운로드를 취소했습니다.');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener?.('abort', abortFromCaller);
+  }
 }
 
-function helperCommand({ installerPath, expectedSha256, appPath, pid }) {
+function helperCommand({ installerPath, expectedSha256, expectedBytes, expectedVersion, appPath, pid }) {
   const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
-  return `$ErrorActionPreference='Stop'; Wait-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; $installer=${quote(installerPath)}; if((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ${quote(expectedSha256)}){exit 31}; $process=Start-Process -FilePath $installer -ArgumentList '/S','--updated' -Wait -PassThru; if($process.ExitCode -ne 0){exit $process.ExitCode}; $app=${quote(appPath)}; if(Test-Path -LiteralPath $app){Start-Process -FilePath $app -ArgumentList '--updated'}`;
+  const numericPid = Number(pid);
+  const numericBytes = Number(expectedBytes);
+  return `$ErrorActionPreference='Stop'; $app=${quote(appPath)}; $target=Get-Process -Id ${numericPid} -ErrorAction Stop; if([IO.Path]::GetFullPath($target.Path) -ne [IO.Path]::GetFullPath($app)){exit 32}; Wait-Process -Id ${numericPid} -ErrorAction Stop; $installer=${quote(installerPath)}; if(!(Test-Path -LiteralPath $installer -PathType Leaf)){exit 30}; if((Get-Item -LiteralPath $installer).Length -ne ${numericBytes}){exit 33}; if((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ${quote(expectedSha256)}){exit 31}; $process=Start-Process -FilePath $installer -ArgumentList '/S','--updated' -Wait -PassThru; if($process.ExitCode -ne 0){exit $process.ExitCode}; if(!(Test-Path -LiteralPath $app -PathType Leaf)){exit 34}; $installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($app).FileVersion; if(!$installedVersion -or $installedVersion.Split('+')[0] -ne ${quote(expectedVersion)}){exit 35}; Start-Process -FilePath $app -ArgumentList '--updated'`;
 }
 
 module.exports = { PRODUCT, PLATFORM, FEED_URL, MAX_INSTALLER_BYTES, compareVersions, validateFeed, validateDownloadUrl, checkForUpdate, downloadInstaller, helperCommand };

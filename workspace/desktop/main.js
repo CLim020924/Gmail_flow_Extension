@@ -156,6 +156,7 @@ let driveSyncGuards;
 let driveWorkspaceClient;
 let lastUpdateCheck = null;
 let updateDownloadPromise = null;
+let updateDownloadAbortController = null;
 let pendingUpdateLaunch = null;
 const externalArtifactReservations = new Map();
 const externalReservationOwners = new Set();
@@ -1012,14 +1013,20 @@ function registerIpc() {
     const feed = lastUpdateCheck.feed;
     const updateRoot = path.join(app.getPath('temp'), 'cmoe-workspace-update', feed.version);
     const installerPath = path.join(updateRoot, path.basename(new URL(feed.url).pathname));
+    updateDownloadAbortController = new AbortController();
     updateDownloadPromise = UpdateService.downloadInstaller(feed, installerPath, globalThis.fetch, (progress) => {
       if (!event.sender.isDestroyed()) event.sender.send('workspace:update-progress', progress);
-    }).then((downloadedPath) => {
-      pendingUpdateLaunch = { installerPath: downloadedPath, expectedSha256: feed.sha256, appPath: process.execPath, pid: process.pid };
+    }, { signal: updateDownloadAbortController.signal }).then((downloadedPath) => {
+      pendingUpdateLaunch = { installerPath: downloadedPath, expectedSha256: feed.sha256, expectedBytes: feed.bytes, expectedVersion: feed.version, appPath: process.execPath, pid: process.pid };
       setTimeout(() => app.quit(), 300);
       return { ready: true, version: feed.version };
-    }).finally(() => { updateDownloadPromise = null; });
+    }).finally(() => { updateDownloadPromise = null; updateDownloadAbortController = null; });
     return updateDownloadPromise;
+  });
+  ipcMain.handle('workspace:update-cancel', () => {
+    if (!updateDownloadAbortController || !updateDownloadPromise) return { canceled: false };
+    updateDownloadAbortController.abort();
+    return { canceled: true };
   });
   ipcMain.handle('workspace:update-open-downloads', () => shell.openExternal('https://cresero.com/downloads/cmoe-workspace'));
   ipcMain.handle('workspace:external-reserve', (event, payload = {}) => {
@@ -1206,7 +1213,18 @@ function registerIpc() {
     if (isSmokeTest && options.smoke) paths.push(shortcutPathInside(app.getPath('temp'), shortcutLabel, '-smoke'));
     if (options.desktop) paths.push(shortcutPathInside(app.getPath('desktop'), shortcutLabel));
     if (options.startMenu) { const directory = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'CMOE Workspace'); await fs.promises.mkdir(directory, { recursive: true }); paths.push(shortcutPathInside(directory, shortcutLabel)); }
-    paths.forEach((shortcutPath) => { if (!shell.writeShortcutLink(shortcutPath, 'create', details)) throw new Error(`바로가기를 만들지 못했습니다: ${shortcutPath}`); });
+    const selectedDirectories = [...new Set(paths.map((shortcutPath) => path.dirname(shortcutPath)))];
+    const legacyLabels = (LEGACY_PROGRAM_LABELS[programId] || []).map(safeShortcutLabel);
+    for (const directory of selectedDirectories) {
+      for (const legacyLabel of legacyLabels) {
+        const legacyPath = shortcutPathInside(directory, legacyLabel, isSmokeTest && options.smoke ? '-smoke' : '');
+        try { await fs.promises.unlink(legacyPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
+    }
+    paths.forEach((shortcutPath) => {
+      const operation = fs.existsSync(shortcutPath) ? 'replace' : 'create';
+      if (!shell.writeShortcutLink(shortcutPath, operation, details)) throw new Error(`바로가기를 만들지 못했습니다: ${shortcutPath}`);
+    });
     return { ok: true, paths };
   });
   ipcMain.handle('program:remove-shortcuts', async (event, programId) => {

@@ -98,6 +98,7 @@ contextBridge.exposeInMainWorld('workspaceDesktop', {
   getUpdateStatus: () => ipcRenderer.invoke('workspace:update-status'),
   checkForUpdates: () => ipcRenderer.invoke('workspace:update-check'),
   installUpdate: () => ipcRenderer.invoke('workspace:update-install'),
+  cancelUpdate: () => ipcRenderer.invoke('workspace:update-cancel'),
   openUpdateDownloads: () => ipcRenderer.invoke('workspace:update-open-downloads'),
   onUpdateProgress: (callback) => {
     const listener = (_event, progress) => callback(progress);
