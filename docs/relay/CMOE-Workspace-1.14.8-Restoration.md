@@ -257,3 +257,4 @@
 - 사용자가 1.15.41에서 수정된 자동 업데이트를 직접 다시 확인할 수 있도록 기능·데이터 구조 변경 없는 1.15.42를 배포한다.
 - 현재 PC의 1.15.41은 유지한다. 1.15.42를 직접 설치하지 않고 앱 내부 업데이트로만 시험한다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.42-Windows.exe`, 크기 `111,031,146` bytes, SHA-256 `C04EF78BC62EABA520EF2D70E7253DB95B16C457D62F031E37420A1BD9D5782C`, FileVersion 1.15.42, 서명 없음.
+- GitHub Release와 Cresero Worker `0ff7e14d-56ed-4058-af81-ab74be36327e`에 배포했다. 실제 앱 코드가 설치된 1.15.41에 1.15.42를 제안하며, 현재 PC는 사용자 시험을 위해 1.15.41로 유지했다.
