@@ -808,6 +808,25 @@ function showWindow() {
   mainWindow.focus();
 }
 
+function workspacePersistentBackupEntries() {
+  const userDataPath = app.getPath('userData');
+  const entries = [
+    'workspace-data.json', 'workspace-data.json.bak', 'workspace-credentials.json', 'workspace-credentials.json.bak',
+    'extensions', 'document-tools/document-tools-data.json', 'document-tools/document-tools-data.json.bak',
+    'document-tools/templates', 'gmail-flow-desktop'
+  ].map((relativePath) => ({ source: path.join(userDataPath, ...relativePath.split('/')), relativePath: `workspace/${relativePath}` }));
+  entries.push({ source: path.join(app.getPath('appData'), 'gmail-flow-desktop'), relativePath: 'legacy-gmail-flow-desktop' });
+  return entries;
+}
+
+async function backupWorkspacePersistentData(version) {
+  return UpdateService.createUpdateDataBackup({
+    version,
+    backupRoot: path.join(app.getPath('appData'), 'CMOE Workspace Backups'),
+    entries: workspacePersistentBackupEntries()
+  });
+}
+
 function flushWorkspaceWindow(targetWindow, timeoutMs = 10_000) {
   if (!targetWindow || targetWindow.isDestroyed()) return Promise.resolve(normalizeCloseFlushResult(true));
   return new Promise((resolve, reject) => {
@@ -1740,6 +1759,10 @@ app.on('before-quit', (event) => {
       const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : windows.find((window) => !window.isDestroyed());
       await showRemoteSyncPendingWarning(parent, remoteWarnings).catch(console.error);
     }
+    if (pendingUpdateLaunch) {
+      const backup = await backupWorkspacePersistentData(pendingUpdateLaunch.expectedVersion);
+      pendingUpdateLaunch.backupPath = backup.snapshotPath;
+    }
     quitReady = true; isQuitting = true; app.quit();
   })().catch((error) => {
     quitFlushInProgress = false; isQuitting = false;
@@ -1760,6 +1783,13 @@ app.on('second-instance', (_event, argv) => {
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   const userDataPath = app.getPath('userData');
+  const versionMarkerPath = path.join(userDataPath, 'installed-version.json');
+  if (app.isPackaged && !isSmokeTest) {
+    let previousVersion = '';
+    try { previousVersion = String(JSON.parse(await fs.promises.readFile(versionMarkerPath, 'utf8'))?.version || ''); } catch (error) { if (error.code !== 'ENOENT') console.warn('이전 실행 버전 표시를 읽지 못했습니다.', error); }
+    const hasPersistentData = workspacePersistentBackupEntries().some((entry) => fs.existsSync(entry.source));
+    if (hasPersistentData && previousVersion !== app.getVersion()) await backupWorkspacePersistentData(app.getVersion());
+  }
   if (isSmokeTest) {
     for (const name of ['workspace-data.json', 'workspace-data.json.bak', 'workspace-credentials.json', 'workspace-credentials.json.bak']) {
       try { await fs.promises.unlink(path.join(userDataPath, name)); }
@@ -1848,6 +1878,7 @@ app.whenReady().then(async () => {
   const startupWorkspaceState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
   if (startupWorkspaceState.preferences.storageMode === 'drive') markMainDriveStateDirty(startupWorkspaceState);
   const initialProgram = requestedProgram();
+  if (app.isPackaged && !isSmokeTest) await fs.promises.writeFile(versionMarkerPath, `${JSON.stringify({ version: app.getVersion(), confirmedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
   if (initialProgram && !isSmokeTest) createProgramWindow(initialProgram, { projectId: requestedProjectId(), documentMode: requestedDocumentMode() }); else createWindow();
 
   if (isSmokeTest) {

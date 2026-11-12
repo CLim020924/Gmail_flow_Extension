@@ -70,14 +70,15 @@
 - [x] 설치 유지관리·앱 업데이트 이식
 - [x] 기능·DOM·IPC·패키징 리소스 전수 대조
 - [x] 개발 스모크·통합 테스트·패키징 검증
-- [x] 설치형·휴대형 결과와 SHA-256 기록
+- [x] 1.15.0·1.15.1 과거 설치형·휴대형 검증 기록
+- [x] 1.15.2부터 설치형 단일 배포로 전환
 - [x] Git 커밋 생성 (`c09f5b9`)
 - [x] 원격 브랜치 `origin/codex/restore-cmoe-workspace-1.14.8` 푸시
 
 ## 아직 검증하지 않은 항목
 
 - 실제 Google 계정의 Apps Script 시간 트리거 도달 발송은 계정 승인 후 별도 검증이 필요하다.
-- 외부 Windows PC에서 1.14.8 위에 1.15.1을 설치하는 대화형 업데이트는 아직 실행하지 않았다.
+- 외부 Windows PC에서 1.14.8 위에 1.15.2를 설치하는 대화형 업데이트와 백업 복원은 아직 실행하지 않았다.
 - Windows 코드 서명 인증서가 없어 두 EXE는 `NotSigned`이다.
 - Cresero 운영 업데이트 피드와 다운로드 페이지 게시는 이번 요청 범위에서 수행하지 않았다.
 
@@ -109,15 +110,25 @@
 - 프로그램 바로가기는 같은 경로의 기존 파일을 교체하고 구 명칭 바로가기를 정리해 중복을 남기지 않는다.
 - Electron 단일 인스턴스 잠금과 두 번째 실행의 기존 창 복원·포커스 동작을 유지한다.
 
+이 버전의 휴대형은 1.15.2 설치형 단일 배포 결정으로 배포 대상에서 제외했다.
+
+## 1.15.2 설치형 단일 배포·데이터 보존
+
+- `build:windows` 휴대형 스크립트와 `portable` 패키징 설정을 제거했다.
+- 빌드 사전검사가 NSIS 설치형 단일 타겟인지 검증한다.
+- 버전이 바뀌어 처음 실행할 때 저장 데이터를 읽거나 변환하기 전에 `%APPDATA%/CMOE Workspace Backups`에 별도 스냅샷을 만든다.
+- 자동 업데이트는 모든 작업·Gmail 큐·Drive 동기화를 비운 뒤 다시 백업하며, 백업이 실패하면 앱을 종료하거나 설치기를 실행하지 않는다.
+- 보존 대상은 Workspace 프로젝트·설정, Windows 보호 계정 자료, 사용자 확장, 문서 편집 자료·템플릿, Gmail Flow 명단·템플릿·예약 이력이다.
+- 향후 저장 스키마를 바꾸는 기능은 구 자료 마이그레이션·회귀 테스트·복구 경로 없이 배포하지 않는다.
+
 | 종류 | 경로 | 크기 | SHA-256 | 서명 |
 |---|---|---:|---|---|
-| 설치형 | `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.1-Windows.exe` | 111,026,029 bytes | `F88786853B179EEEA01C3FFE39BD4A6D5276CC2C41BF54ED61D1592F32EDF4B0` | NotSigned |
-| 휴대형 | `workspace/desktop-dist/CMOE-Workspace-1.15.1-Windows.exe` | 92,636,346 bytes | `28B923D0480E323F08A6938BD2DC72D0055E3FDEB0C6A74EE968023DEFCCB986` | NotSigned |
+| 설치형 | `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.2-Windows.exe` | 111,026,062 bytes | `2A6C4C5D5F28FCF1CD9A9B2CB8D8BCF2D2EEE897569A33ED2605CA1B05DF857B` | NotSigned |
 
 ## 다음 작업자 릴레이 목록
 
 1. 실제 Google 계정에서 Apps Script 웹 앱을 배포하고 Gmail 발신 계정 일치·예약 도달 발송·취소·상태 동기화를 확인한다.
-2. 분리된 Windows 테스트 PC/VM에 1.14.8을 먼저 설치하고 1.15.1 업데이트·제거·재시작·사용자 데이터 보존을 검증한다.
+2. 분리된 Windows 테스트 PC/VM에 1.14.8을 먼저 설치하고 1.15.2 업데이트·제거·재시작·사용자 데이터 보존·백업 복원을 검증한다.
 3. 코드 서명 인증서를 준비한 후 두 EXE에 서명하고 SmartScreen 표시를 외부 PC에서 확인한다.
-4. 사용자의 명시적 배포 요청 후에만 GitHub Release, Cresero 다운로드, `update.json`을 1.15.1 해시와 함께 게시한다.
+4. 사용자의 명시적 배포 요청 후에만 GitHub Release, Cresero 다운로드, `update.json`을 1.15.2 설치형 해시와 함께 게시한다.
 5. 게시 후 다운로드 본이 로컬 산출물과 크기·SHA-256이 일치하는지 재검증한다.

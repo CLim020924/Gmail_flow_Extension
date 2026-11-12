@@ -6016,7 +6016,7 @@
     install.hidden = !available; install.disabled = appUpdateState.installing;
     cancel.hidden = !appUpdateState.installing || appUpdateState.portable;
     cancel.disabled = Boolean(appUpdateState.canceling);
-    install.textContent = appUpdateState.portable ? '새 휴대형 받기' : appUpdateState.installing ? '업데이트 준비 중…' : '다운로드 후 업데이트';
+    install.textContent = appUpdateState.portable ? '설치형으로 전환' : appUpdateState.installing ? '업데이트 준비 중…' : '다운로드 후 업데이트';
     progress.hidden = !appUpdateState.progress;
     if (appUpdateState.progress) progress.textContent = `다운로드 ${Math.round(appUpdateState.progress.percent || 0)}% · ${Math.round((appUpdateState.progress.received || 0) / 1024 / 1024)}MB / ${Math.round((appUpdateState.progress.total || 0) / 1024 / 1024)}MB`;
   }
