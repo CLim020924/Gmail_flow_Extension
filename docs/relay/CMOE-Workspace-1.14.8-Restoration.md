@@ -237,3 +237,9 @@
 - 설치 helper를 `before-quit`의 마지막 순간에 직접 detached spawn하던 구조를 제거했다. 백업 직후 앱이 살아 있을 때 bootstrap PowerShell이 Windows `Start-Process`로 helper를 독립 실행하고, helper가 네이티브 창을 표시한 뒤 `helper ready`를 로그에 쓴 것을 확인해야만 앱을 종료한다.
 - 실제 Windows 시험에서 부모 Node 프로세스 종료 뒤에도 helper가 살아남아 앱 종료를 감지하고 다음 단계까지 기록했다. 전체 Node 시험과 11개 가이드·215단계 스모크도 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.38-Windows.exe`, 크기 `111,031,606` bytes, SHA-256 `F4CF7AB88D07944C0926EE4B56855EB25C465F10DE52244B5AF1549C02D94CEC`, FileVersion 1.15.38, 서명 없음.
+- 이 PC에 1.15.38을 `/S`로 설치해 exit 0과 핵심 사용자 데이터 지문 `5AE8B3C90DB7B8AF09EB42A705B21C62D75BCFA33D40E5AB18DD7E53B0258F0D` 전후 일치를 확인했다. 다음 1.15.39 무변경판으로 실제 앱 업데이트를 재검증한다.
+
+## 1.15.39 자동 업데이트 실제 검증판
+
+- 1.15.38의 helper 선기동과 Windows `Start-Process` 독립 실행을 실제 앱 내부 흐름으로 검증하는 무변경 후속판이다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.39-Windows.exe`, 크기 `111,031,475` bytes, SHA-256 `895D720F2DBE0A99B12E431BB26624DDFD668AB7C7822F75E5720D97F8DE8942`, FileVersion 1.15.39, 서명 없음.
