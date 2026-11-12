@@ -266,3 +266,9 @@
 - 중첩 EncodedCommand의 Windows 길이 제한을 피하기 위해 helper를 BOM 포함 임시 스크립트 파일로 만들고 짧은 bootstrap에서 실행한다.
 - 실제 helper 프로세스의 윈도우 핸들, `CMOE Workspace 업데이트` 제목, 화면 내 좌표, visible 상태와 `helper ready` 로그를 확인했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.43-Windows.exe`, 크기 `111,031,533` bytes, SHA-256 `574FC2F8EA18A0B9C3DA077A93A0DA534888CCF9B3EB436B325AF217CB9AA999`, FileVersion 1.15.43, 서명 없음.
+- 이 PC에 1.15.43을 기준 설치해 exit 0과 핵심 사용자 데이터 지문 `5AE8B3C90DB7B8AF09EB42A705B21C62D75BCFA33D40E5AB18DD7E53B0258F0D` 전후 일치를 확인했다. 다음 1.15.44 무변경판으로 진행 창을 사용자가 시험한다.
+
+## 1.15.44 보이는 진행 창 시험판
+
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.44-Windows.exe`, 크기 `111,031,645` bytes, SHA-256 `24645D6015511755741D34920A2F75E3DC85B98118A5AAA0E74CCCEA0BB45BC2`, FileVersion 1.15.44, 서명 없음.
+- 현재 PC는 1.15.43으로 유지하고 1.15.44를 앱 내부 업데이트로 시험한다.
