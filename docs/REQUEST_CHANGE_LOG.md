@@ -238,7 +238,7 @@
 - 안전 동작: 작업 저장이나 백업이 실패하면 설치 예약을 폐기하고 기존 앱과 자료를 유지한다. 진행창에는 강제 종료 금지, 자동 종료·설치·한 번 재실행 예정과 오류 후 재시도 안내를 표시한다.
 - 구현: `workspace/index.html`, `workspace/styles.css`, `workspace/app.js`, `workspace/desktop/main.js`, `workspace/desktop/update-service.js`, `workspace/tests/update-service.test.js`.
 - 검증: 다운로드 연결 전부터 단계 이벤트가 발생하고 검증 완료까지 이어지는 단위 시험, Workspace 전체 테스트·빌드 사전검사, 전역 진행창의 화면 내부 배치와 기존 11개 가이드·215단계 개발·패키지판 스모크가 통과했다. 이 PC의 1.15.29 설치본 위에 1.15.31 설치기를 실제 무인 실행해 종료 코드 0, FileVersion 1.15.31, 사용자 데이터 파일 24개의 전후 지문 일치를 확인했다.
-- 커밋: `진행 중`
+- 커밋: `cac821c`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
