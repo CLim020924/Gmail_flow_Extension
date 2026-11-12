@@ -307,6 +307,14 @@
 - 설치 파일: 111,031,475 bytes, SHA-256 `895D720F2DBE0A99B12E431BB26624DDFD668AB7C7822F75E5720D97F8DE8942`, FileVersion 1.15.39.
 - 상태: 진행 중
 
+### REQ-20261113-07 · 독립 PowerShell의 SHA-256 검사 호환
+
+- 실제 결과: helper 선기동·앱 종료 감지·실패 후 기존 앱 재실행은 모두 성공했지만, 독립 Windows PowerShell에서 `Get-FileHash` cmdlet이 자동 로드되지 않아 설치 직전에 중단됐다.
+- 수정: `Get-FileHash`를 제거하고 .NET `SHA256.Create()`와 `FileStream`으로 설치 파일 해시를 계산한다.
+- 검증: 합성 파일의 실제 해시가 일치한 뒤 로그가 `installer starting`까지 도달하는 Windows 독립 helper 시험을 통과했다. 1.15.40을 기준 설치하고 1.15.41로 실제 자동 업데이트를 최종 확인한다.
+- 1.15.41 설치 파일: 111,031,096 bytes, SHA-256 `F24DAB46FE4DBE915B1955B71D14B8E123F92E6174B6C526A5F748809C85CDFF`, FileVersion 1.15.41.
+- 상태: 진행 중
+
 ## 현재 미완료 또는 계속 개선할 항목
 
 - 임의 Excel 서식을 셀 병합·수식·인쇄 영역까지 보존하는 자유 출력 틀 편집기

@@ -243,3 +243,9 @@
 
 - 1.15.38의 helper 선기동과 Windows `Start-Process` 독립 실행을 실제 앱 내부 흐름으로 검증하는 무변경 후속판이다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.39-Windows.exe`, 크기 `111,031,475` bytes, SHA-256 `895D720F2DBE0A99B12E431BB26624DDFD668AB7C7822F75E5720D97F8DE8942`, FileVersion 1.15.39, 서명 없음.
+
+## 1.15.40/1.15.41 독립 helper 해시 검사 호환
+
+- 실제 1.15.38→1.15.39 시험에서 helper 준비·앱 종료 감지·실패 재실행은 정상 동작했다. 로그는 독립 Windows PowerShell이 `Get-FileHash`를 찾지 못해 설치 직전에 중단됐음을 증명했다.
+- 외부 cmdlet을 제거하고 .NET `SHA256.Create()`와 `FileStream`으로 해시를 계산한다. 합성 실행 파일에서 해시 검사를 통과하고 `installer starting`까지 도달하는 실제 helper 시험을 통과했다.
+- 이 PC에는 1.15.40을 기준 설치했다. 1.15.41 설치형은 크기 `111,031,096` bytes, SHA-256 `F24DAB46FE4DBE915B1955B71D14B8E123F92E6174B6C526A5F748809C85CDFF`, FileVersion 1.15.41이며 실제 앱 자동 업데이트 최종 검증용이다.
