@@ -12,6 +12,8 @@ const feed = {
 
 (async () => {
   assert.equal(updater.compareVersions('1.5.10', '1.5.4'), 1);
+  assert.equal(updater.compareVersions('1.15.29', '1.15.28'), 1);
+  assert.equal(updater.compareVersions('1.15.3', '1.15.28'), -1);
   assert.equal(updater.compareVersions('1.3.0', '1.3.0'), 0);
   assert.equal(updater.compareVersions('1.2.9', '1.3.0'), -1);
   assert.throws(() => updater.validateFeed({ ...feed, product: 'other' }), /다른 제품/);

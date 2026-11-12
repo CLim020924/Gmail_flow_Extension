@@ -74,11 +74,15 @@ Function CmoeMaintenancePageShow
     ${NSD_CreateButton} 68% 76u 31% 18u "닫기"
     Pop $CmoeCloseButton
   ${Else}
-    ${NSD_CreateLabel} 0 62u 100% 12u "동일 버전 재설치와 다운그레이드는 지원하지 않습니다."
+    ${If} $CmoeVersionRelation == "0"
+      ${NSD_CreateLabel} 0 62u 100% 24u "같은 버전이 이미 설치되어 있습니다. 제거하지 말고 닫기를 눌러 설치된 앱을 사용해주세요."
+    ${Else}
+      ${NSD_CreateLabel} 0 62u 100% 24u "현재 설치된 버전이 이 설치 파일보다 최신입니다. 제거하지 말고 닫기를 눌러주세요."
+    ${EndIf}
     Pop $2
-    ${NSD_CreateButton} 17% 82u 31% 18u "제거"
+    ${NSD_CreateButton} 17% 90u 31% 18u "제거"
     Pop $CmoeRemoveButton
-    ${NSD_CreateButton} 52% 82u 31% 18u "닫기"
+    ${NSD_CreateButton} 52% 90u 31% 18u "닫기"
     Pop $CmoeCloseButton
   ${EndIf}
   ${NSD_OnClick} $CmoeRemoveButton CmoeChooseRemove
