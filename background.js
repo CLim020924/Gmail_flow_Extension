@@ -14,6 +14,10 @@ const OAUTH_PLACEHOLDER = 'replace-with-google-oauth-client';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const CLOUD_SYNC_FILE = 'gmail-flow-sync-v1.json';
+const API_TIMEOUT_MS = 60 * 1000;
+const DRIVE_TIMEOUT_MS = 120 * 1000;
+const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+const MAX_ATTACHMENT_COUNT = 100;
 const MAIL_MUTATION_MESSAGES = new Set([
   'resume-after-auth',
   'enqueue-mail-batch',
@@ -38,6 +42,42 @@ const cancelRequestedBatches = new Set();
 const nowIso = () => new Date().toISOString();
 const isTerminal = (status) => ['completed', 'failed', 'canceled'].includes(status);
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+
+function networkTimeoutError(timeoutMs, cause) {
+  const error = new Error(`네트워크 응답이 ${Math.ceil(timeoutMs / 1000)}초 안에 오지 않았습니다. 연결을 확인한 뒤 다시 시도해주세요.`);
+  error.name = 'NetworkTimeoutError';
+  error.code = 'NETWORK_TIMEOUT';
+  error.timeoutMs = timeoutMs;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+async function fetchAndReadWithTimeout(input, init = {}, { timeoutMs = API_TIMEOUT_MS, read } = {}) {
+  const { signal: callerSignal, ...requestInit } = init || {};
+  const controller = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) onCallerAbort();
+  else callerSignal?.addEventListener?.('abort', onCallerAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(networkTimeoutError(timeoutMs));
+  }, timeoutMs);
+  try {
+    const response = await fetch(input, { ...requestInit, signal: controller.signal });
+    const body = typeof read === 'function' ? await read(response) : undefined;
+    return { response, body };
+  } catch (error) {
+    if (timedOut && !callerSignal?.aborted) {
+      if (error?.code === 'NETWORK_TIMEOUT') throw error;
+      throw networkTimeoutError(timeoutMs, error);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener?.('abort', onCallerAbort);
+  }
+}
 
 function mailQueueShutdownError() {
   const error = new Error('앱 종료 준비 중에는 메일 작업을 변경할 수 없습니다. 종료를 취소한 뒤 다시 시도해주세요.');
@@ -148,7 +188,7 @@ function getOAuthClientId() {
 function assertOAuthConfigured() {
   const clientId = getOAuthClientId();
   if (!clientId || clientId.includes(OAUTH_PLACEHOLDER)) {
-    const error = new Error('Google OAuth 클라이언트 ID가 설정되지 않았습니다.');
+    const error = new Error('이 설치본에서 Google 로그인을 준비할 수 없습니다. 최신 설치본을 다시 설치해주세요.');
     error.code = 'OAUTH_NOT_CONFIGURED';
     throw error;
   }
@@ -175,18 +215,20 @@ function accountMismatchError(expectedEmail, actualEmail) {
 }
 
 async function gmailFetchWithToken(token, path, options = {}) {
-  const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
+  const { response, body: text } = await fetchAndReadWithTimeout(`https://gmail.googleapis.com/gmail/v1/users/me${path}`, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       ...(options.headers || {})
     }
+  }, {
+    timeoutMs: API_TIMEOUT_MS,
+    read: (targetResponse) => targetResponse.text()
   });
   if (response.status === 401) {
     await chrome.identity.removeCachedAuthToken({ token });
   }
-  const text = await response.text();
   const data = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const error = new Error(data?.error?.message || `Gmail API 오류 (${response.status})`);
@@ -220,19 +262,23 @@ async function gmailFetch(path, options = {}) {
 }
 
 async function driveFetchDetailedWithToken(token, path, options = {}) {
-  const response = await fetch(`https://www.googleapis.com${path}`, {
+  const { response, body: data } = await fetchAndReadWithTimeout(`https://www.googleapis.com${path}`, {
     ...options,
     headers: { Authorization: `Bearer ${token}`, ...(options.headers || {}) }
+  }, {
+    timeoutMs: DRIVE_TIMEOUT_MS,
+    read: async (targetResponse) => {
+      const contentType = targetResponse.headers?.get?.('content-type') || '';
+      return contentType.includes('application/json') ? targetResponse.json() : targetResponse.text();
+    }
   });
   if (response.status === 401) {
     await chrome.identity.removeCachedAuthToken({ token });
   }
-  const contentType = response.headers?.get?.('content-type') || '';
-  const data = contentType.includes('application/json') ? await response.json() : await response.text();
   if (!response.ok) {
     const message = data?.error?.message || `Google Drive API 오류 (${response.status})`;
     const error = new Error(response.status === 403 && /accessNotConfigured|has not been used|disabled/i.test(JSON.stringify(data))
-      ? 'Google Cloud 프로젝트에서 Google Drive API를 활성화해야 합니다.'
+      ? '이 설치본에서 Google Drive 연결을 준비할 수 없습니다. 최신 설치본을 다시 설치해주세요.'
       : message);
     error.status = response.status;
     error.code = response.status === 401 || response.status === 403 && /insufficient/i.test(JSON.stringify(data))
@@ -427,6 +473,27 @@ function foldBase64(value) {
   return String(value || '').match(/.{1,76}/g)?.join('\r\n') || '';
 }
 
+function normalizeAttachments(input) {
+  const attachments = Array.isArray(input) ? input : [];
+  if (attachments.length > MAX_ATTACHMENT_COUNT) throw new Error('첨부파일은 한 번에 100개 이하만 추가할 수 있습니다.');
+  let totalBytes = 0;
+  return attachments.map((attachment) => {
+    const name = String(attachment?.name || '').trim();
+    if (!name || name.length > 255 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error('첨부파일 이름이 올바르지 않습니다.');
+    const data = String(attachment?.data || '');
+    if (data.length > Math.ceil(MAX_ATTACHMENT_BYTES * 4 / 3) + 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error('첨부파일 데이터가 올바르지 않거나 너무 큽니다.');
+    const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+    const decodedBytes = (data.length / 4) * 3 - padding;
+    const declaredBytes = Number(attachment?.size);
+    if (Number.isFinite(declaredBytes) && declaredBytes >= 0 && declaredBytes !== decodedBytes) throw new Error('첨부파일 크기 정보가 실제 데이터와 다릅니다. 파일을 다시 선택해주세요.');
+    totalBytes += decodedBytes;
+    if (totalBytes > MAX_ATTACHMENT_BYTES) throw new Error('첨부파일 전체 크기는 18MB 이하여야 합니다.');
+    const requestedType = String(attachment?.type || '').trim();
+    const type = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(requestedType) ? requestedType : 'application/octet-stream';
+    return { id: String(attachment?.id || ''), name, type, size: decodedBytes, data };
+  });
+}
+
 function createRawMessage(item, attachments = []) {
   const headers = [];
   if (item.email) headers.push(`To: ${safeHeader(item.email)}`);
@@ -517,7 +584,7 @@ async function updateDraftBatch(batchId, payload = {}) {
   const subjectTemplate = String(payload.subjectTemplate || '');
   const bodyTemplate = String(payload.bodyTemplate || '');
   const postscriptTemplate = String(payload.postscriptTemplate || '');
-  const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  const attachments = normalizeAttachments(payload.attachments);
   const oldAttachments = Array.isArray(batch.attachments) ? batch.attachments : [];
   const candidates = batch.items.filter((item) => item.draftId);
   if (!candidates.length) throw new Error('수정할 수 있는 Gmail 초안이 없습니다.');
@@ -850,6 +917,7 @@ async function resumeMailQueueAfterQuitCanceled() {
 }
 
 async function enqueueLocalBatch(payload) {
+  const attachments = normalizeAttachments(payload?.attachments);
   const batchId = await runMailBatchOperation(() => runAccountOperation(async () => {
     const account = await verifiedGmailContext(payload.senderEmail);
     const batches = await getBatches();
@@ -859,7 +927,7 @@ async function enqueueLocalBatch(payload) {
       name: String(payload.name || payload.label || payload.subject || payload.method || '메일 작업').trim(),
       method: payload.method,
       senderEmail: account.email,
-      attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+      attachments,
       subjectTemplate: String(payload.subjectTemplate ?? payload.subject ?? ''),
       bodyTemplate: String(payload.bodyTemplate ?? ''),
       postscriptTemplate: String(payload.postscriptTemplate ?? ''),
@@ -918,6 +986,7 @@ async function enqueueOnlineBatch(payload) {
   const config = await getOnlineSchedulerConfig();
   GmailFlowOnlineScheduler.validateConfig(config);
   if (!config.verifiedAt) throw new Error('설정에서 온라인 예약 발송 연결 테스트를 먼저 완료해주세요.');
+  const attachments = normalizeAttachments(payload?.attachments);
   const createdAt = nowIso();
   const jobId = crypto.randomUUID();
   const remoteBatch = await requestOnlineScheduler('enqueue', {
@@ -926,7 +995,7 @@ async function enqueueOnlineBatch(payload) {
       name: String(payload.name || payload.label || payload.subject || '예약 발송').trim(),
       senderEmail: account.email,
       scheduledAt: payload.scheduledAt,
-      attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+      attachments,
       items: payload.items
     }
   }, config);
@@ -938,7 +1007,7 @@ async function enqueueOnlineBatch(payload) {
     scheduledAt: payload.scheduledAt,
     createdAt,
     updatedAt: createdAt,
-    attachments: Array.isArray(payload.attachments) ? payload.attachments : [],
+    attachments,
     subjectTemplate: String(payload.subjectTemplate ?? payload.subject ?? ''),
     bodyTemplate: String(payload.bodyTemplate ?? ''),
     postscriptTemplate: String(payload.postscriptTemplate ?? '')
@@ -1037,7 +1106,7 @@ async function connectionStatus() {
       const profile = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
       rememberedEmail = profile?.email || '';
     } catch (_) {}
-    return { configured: true, connected: false, email: '', rememberedEmail, error: error.message };
+    return { configured: true, connected: false, email: '', rememberedEmail, error: error.message, errorCode: error.code || 'AUTH_REQUIRED' };
   }
 }
 
@@ -1051,7 +1120,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
     if (message.type === 'online-scheduler-config-save') return saveOnlineSchedulerConfig(message.config || {});
     if (message.type === 'online-scheduler-test') {
-      const config = message.config ? GmailFlowOnlineScheduler.normalizeConfig(message.config) : await getOnlineSchedulerConfig();
+      const config = message.config ? GmailFlowOnlineScheduler.normalizeConfig({ ...message.config, mode: 'online' }) : await getOnlineSchedulerConfig();
       GmailFlowOnlineScheduler.validateConfig(config);
       const health = await requestOnlineScheduler('health', {}, config);
       const account = await verifiedGmailContext();
@@ -1094,3 +1163,7 @@ async function restoreMailQueueSchedule() {
 
 chrome.runtime.onStartup.addListener(() => restoreMailQueueSchedule().catch(console.error));
 chrome.runtime.onInstalled.addListener(() => restoreMailQueueSchedule().catch(console.error));
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { fetchAndReadWithTimeout, networkTimeoutError, normalizeAttachments };
+}

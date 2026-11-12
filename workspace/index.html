@@ -3,16 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; base-uri 'none'; object-src 'none'">
   <title>CMOE Workspace</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="extensions/project-calendar/session-scheduler.css">
 </head>
 <body>
   <header id="standaloneBar" class="standalone-bar" hidden>
     <div class="standalone-identity"><strong id="standaloneTitle">CMOE 프로그램</strong><span id="standaloneConnectionStatus">현재 작업은 자동 저장됩니다.</span></div>
     <nav>
-      <details class="standalone-menu"><summary>작업 ▾</summary><div class="standalone-menu-panel"><label>저장된 작업<select id="quickTaskSelect" aria-label="저장된 작업"><option value="">현재 작업</option></select></label><label>프로젝트 자료<select id="standaloneProjectSelect" aria-label="프로젝트 자료"><option value="">프로젝트에서 자료 가져오기</option></select></label><button id="newQuickTask" type="button">새 작업 시작</button><button id="saveQuickTask" type="button">현재 작업 저장</button></div></details>
-      <details class="standalone-menu"><summary>관련 프로그램 ▾</summary><div class="standalone-menu-panel"><button type="button" data-quick-program="people">명단 준비</button><button type="button" data-quick-program="schedule">일정 편성</button><button type="button" data-quick-program="layout">일정표 저장</button><button type="button" data-quick-program="zoom">Zoom 회의</button><button type="button" data-quick-program="gmailFlow">메일 작성</button></div></details>
+      <details id="standaloneWorkMenu" class="standalone-menu"><summary>작업 ▾</summary><div class="standalone-menu-panel"><label>저장된 작업<select id="quickTaskSelect" aria-label="저장된 작업"><option value="">현재 작업</option></select></label><label>프로젝트 자료<select id="standaloneProjectSelect" aria-label="프로젝트 자료"><option value="">프로젝트에서 자료 가져오기</option></select></label><button id="newQuickTask" type="button">새 작업 시작</button><button id="saveQuickTask" type="button">현재 작업 저장</button></div></details>
+      <details class="standalone-menu"><summary>관련 프로그램 ▾</summary><div class="standalone-menu-panel"><button type="button" data-quick-program="people">명단</button><button type="button" data-quick-program="schedule">일정 편성</button><button type="button" data-quick-program="layout">일정표</button><button type="button" data-quick-program="zoom">Zoom</button><button type="button" data-quick-program="gmailFlow">메일</button><button type="button" data-quick-program="documentEditor">문서 편집</button></div></details>
       <button class="workspace-return" type="button" data-open-workspace>전체 Workspace</button>
     </nav>
   </header>
@@ -59,8 +60,26 @@
 
       <section id="page-dashboard" class="page active" data-page="dashboard">
         <section class="quick-launch-panel"><div class="section-heading"><div><span class="eyebrow">바로 시작</span><h2>원하는 작업만 바로 열기</h2><p>메일 발송이나 명단 정리처럼 한 기능만 쓸 때 선택하세요. 프로젝트를 만들 필요가 없습니다.</p></div><button class="text-button" type="button" data-nav-link="modules">추가 프로그램 관리</button></div><div id="homeQuickLaunch" class="quick-launch-grid"></div></section>
+        <section id="dashboardCalendarPanel" class="dashboard-calendar-panel" aria-label="전체 프로젝트 일정">
+          <div class="section-heading dashboard-calendar-heading">
+            <div><span class="eyebrow">전체 일정</span><h2>모든 프로젝트 캘린더</h2><p>프로젝트를 바꾸지 않아도 일정을 함께 보고, 일정을 누르면 해당 프로젝트로 바로 이동합니다.</p></div>
+            <div class="dashboard-calendar-controls">
+              <label class="dashboard-calendar-filter">프로젝트<select id="dashboardCalendarProjectFilter"><option value="">모든 진행 프로젝트</option></select></label>
+              <button id="dashboardCalendarPrevious" class="calendar-icon-button" type="button" aria-label="이전 달">‹</button>
+              <strong id="dashboardCalendarPeriod" aria-live="polite"></strong>
+              <button id="dashboardCalendarNext" class="calendar-icon-button" type="button" aria-label="다음 달">›</button>
+              <button id="dashboardCalendarToday" class="secondary-button compact" type="button">오늘</button>
+            </div>
+          </div>
+          <div id="dashboardCalendarLegend" class="dashboard-calendar-legend" aria-label="프로젝트 색상 안내"></div>
+          <div class="dashboard-calendar-surface">
+            <div class="dashboard-calendar-weekdays" aria-hidden="true"><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span><span>일</span></div>
+            <div id="dashboardCalendarGrid" class="dashboard-calendar-grid" role="grid" aria-label="전체 프로젝트 월간 일정" aria-colcount="7"></div>
+            <div id="dashboardCalendarEmpty" class="dashboard-calendar-empty" hidden><strong>표시할 일정이 없습니다.</strong><span>프로젝트 캘린더에서 일정을 추가하면 이곳에 함께 표시됩니다.</span></div>
+          </div>
+        </section>
         <div id="dashboardEmpty" class="empty-state">
-          <div class="empty-illustration" aria-hidden="true">＋</div>
+          <button class="empty-illustration" type="button" data-open-new-project aria-label="새 프로젝트 만들기">＋</button>
           <h1>어떤 작업을 시작하시겠어요?</h1>
           <p>명단부터 일정·Zoom·메일까지 이어서 작업하려면 프로젝트를 만드세요. 한 기능만 필요하면 위에서 바로 실행할 수 있습니다.</p>
           <button class="primary-button" type="button" data-open-new-project>전체 과정 시작하기</button>
@@ -76,7 +95,7 @@
             </div>
             <div class="heading-actions">
               <button id="editWorkflowButton" class="primary-button" type="button">업무 구성 편집</button>
-              <button id="duplicateProjectButton" class="secondary-button" type="button">복제</button>
+              <button id="duplicateProjectButton" class="secondary-button" type="button">구조 복제</button>
               <button id="archiveProjectButton" class="secondary-button danger-text" type="button">보관</button>
             </div>
           </div>
@@ -102,7 +121,7 @@
           <button class="primary-button" type="button" data-open-new-project>새 프로젝트 만들기</button>
         </div>
         <div class="toolbar-row">
-          <input id="projectSearch" type="search" placeholder="프로젝트 이름 또는 고객사 검색" aria-label="프로젝트 검색">
+          <input id="projectSearch" type="search" placeholder="프로젝트 이름 또는 분류·고객·과정 검색" aria-label="프로젝트 검색">
           <select id="projectStatusFilter" aria-label="프로젝트 상태 필터">
             <option value="open">진행 프로젝트</option>
             <option value="all">전체</option>
@@ -114,22 +133,22 @@
 
       <section id="page-people" class="page module-workbench" data-page="people">
         <div class="page-heading">
-          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">1단계 · 명단</span><h1>명단 준비</h1><p>공용 명단 관리 창과 현재 프로젝트의 Excel식 명단 표를 함께 사용할 수 있습니다.</p></div>
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">1단계 · 명단</span><h1>명단</h1><p>공용 명단 관리 창과 현재 프로젝트의 Excel식 명단 표를 함께 사용할 수 있습니다.</p></div>
         </div>
         <section class="workbench-panel"><div class="section-heading"><div><h2>현재 프로젝트 원본 명단</h2><p id="rosterManagerSummary">명단 정보를 확인하는 중입니다.</p></div><div class="button-row"><button id="openRosterManager" class="secondary-button" type="button">공용 명단 관리</button><button id="rosterStartTask" class="primary-button" type="button">이 명단으로 작업하기</button></div></div><div class="metric-list"><span><small>사람</small><strong id="rosterPeopleMetric">0</strong></span><span><small>열</small><strong id="rosterColumnMetric">0</strong></span><span><small>확인할 항목</small><strong id="rosterWarningMetric">0</strong></span></div><div id="rosterImportWarnings" class="warning-list" hidden></div><div id="rosterColumnSummary" class="tag-list"></div><p class="field-help">원본은 그대로 유지됩니다. 시험 단계·반·교육 과정별 인원은 아래에서 별도의 단계 명단으로 만드세요.</p></section>
         <section class="workbench-panel table-panel roster-inline-editor-panel">
-          <div class="section-heading"><div><h2>명단 표 직접 편집</h2><p id="rosterEditorGuide" class="roster-editor-guide">드래그로 범위 선택 · Ctrl+C/V · 제외 행 잠금</p><p id="rosterEditorAccessibilityHelp" class="visually-hidden">셀을 드래그하거나 Shift 키로 범위를 선택할 수 있습니다. 제외된 사람의 행은 읽기 전용이며 공용 명단 관리에서 다시 포함한 뒤 수정할 수 있습니다.</p></div><div class="sheet-actions"><span id="rosterSelectionStatus" class="sheet-selection-status" role="status" aria-live="polite">선택 없음</span></div></div>
+          <div class="section-heading"><div><h2>명단 표 직접 편집</h2><p id="rosterEditorGuide" class="roster-editor-guide">드래그로 범위 선택 · 우클릭 셀 작업 · Ctrl+C/V · 제외 행 잠금</p><p id="rosterEditorAccessibilityHelp" class="visually-hidden">셀을 드래그하거나 Shift 키로 범위를 선택할 수 있습니다. 셀에서 우클릭하거나 키보드의 메뉴 키를 누르면 셀 작업 메뉴가 열립니다. 제외된 사람의 행은 읽기 전용이며 공용 명단 관리에서 다시 포함한 뒤 수정할 수 있습니다.</p></div><div class="sheet-actions"><span id="rosterSelectionStatus" class="sheet-selection-status" role="status" aria-live="polite">선택 없음</span></div></div>
           <div class="roster-compact-toolbar">
             <strong>빠른 입력</strong>
             <button id="rosterUndo" class="icon-text-button" type="button" title="실행 취소 (Ctrl+Z)" disabled>↶ 실행 취소</button>
             <button id="rosterRedo" class="icon-text-button" type="button" title="다시 실행 (Ctrl+Y)" disabled>↷ 다시 실행</button>
             <details class="action-menu inline-action-menu"><summary class="secondary-button">셀 작업 ▾</summary><div class="action-menu-panel"><button id="rosterClearSelection" type="button">선택 셀 내용 지우기</button><button id="rosterFillDown" type="button">맨 위 값을 아래로 채우기</button><button id="rosterInsertRow" type="button">선택 위치에 행 삽입</button><button id="rosterDeleteRows" type="button">선택한 행 삭제</button><button id="rosterInsertColumn" type="button">선택 위치에 컬럼 삽입</button><button id="rosterDeleteColumns" type="button">선택한 컬럼 삭제</button></div></details>
-            <details class="action-menu inline-action-menu"><summary class="secondary-button">별도 붙여넣기 창 ▾</summary><div class="action-menu-panel wide"><textarea id="rosterPasteInput" rows="4" placeholder="셀에 직접 붙여넣기 어려울 때 여기에 붙여넣으세요."></textarea><button id="applyRosterPaste" type="button">명단으로 변환하기</button></div></details>
+            <details class="action-menu inline-action-menu"><summary class="secondary-button">별도 붙여넣기 창 ▾</summary><div class="action-menu-panel wide"><textarea id="rosterPasteInput" rows="4" aria-label="붙여넣을 명단 표" placeholder="셀에 직접 붙여넣기 어려울 때 여기에 붙여넣으세요."></textarea><button id="applyRosterPaste" type="button">명단으로 변환하기</button></div></details>
             <details class="action-menu inline-action-menu"><summary class="secondary-button">파일에서 가져오기 ▾</summary><div class="action-menu-panel"><button id="chooseExcelRoster" type="button">Excel 파일 가져오기</button><label class="menu-file-button">CSV·TSV 파일 가져오기<input id="rosterFileInput" type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"></label></div></details>
             <details class="action-menu inline-action-menu"><summary class="secondary-button">명단 저장·불러오기 ▾</summary><div class="action-menu-panel wide"><button id="saveRosterData" type="button">현재 프로젝트에 저장</button><label>저장한 명단<select id="sharedRosterSelect" aria-label="저장한 명단"><option value="">명단 선택</option></select></label><button id="loadSharedRoster" type="button">선택한 명단 불러오기</button><button id="saveSharedRoster" type="button">다른 작업에서도 쓸 명단으로 저장</button></div></details>
           </div>
           <div class="sheet-formula-bar"><span>fx</span><output id="rosterCellAddress">—</output><input id="rosterCellValue" type="text" aria-label="선택한 명단 셀 값" placeholder="셀을 선택하세요" disabled></div>
-          <div class="table-scroll spreadsheet-scroll"><table id="rosterEditorTable" class="data-table spreadsheet-table roster-editor-table" aria-describedby="rosterEditorGuide rosterEditorAccessibilityHelp rosterSelectionStatus"><thead></thead><tbody></tbody></table></div>
+          <div class="table-scroll spreadsheet-scroll"><table id="rosterEditorTable" class="data-table spreadsheet-table roster-editor-table" aria-label="현재 프로젝트 명단 편집 표" aria-describedby="rosterEditorGuide rosterEditorAccessibilityHelp rosterSelectionStatus"><thead></thead><tbody></tbody></table></div>
         </section>
         <section class="workbench-panel roster-view-panel"><div class="section-heading"><div><h2>단계·반별 명단</h2><p>원본을 기준으로 필기 응시자, 합격자, 실기 접수자, A반·B반처럼 필요한 명단을 추가합니다.</p></div><div class="button-row"><button id="createRosterView" class="secondary-button" type="button">원본에서 새 명단</button><button id="saveRosterViewAs" class="primary-button" type="button">현재 인원으로 새 명단</button><details class="action-menu inline-action-menu"><summary class="secondary-button">현재 명단 관리 ▾</summary><div class="action-menu-panel"><button id="renameRosterView" type="button">이름 변경</button><button id="deleteRosterView" class="danger-text" type="button">단계 명단 삭제</button></div></details></div></div><div class="roster-view-toolbar"><label>작업할 명단<select id="rosterViewSelect"><option value="">원본 명단</option></select></label><span id="rosterViewSummary"></span></div><div id="rosterViewPeople" class="roster-view-people"></div></section>
       </section>
@@ -145,17 +164,17 @@
           <button id="arrangementDelete" class="text-button danger-text" type="button">현재 작업 삭제</button>
         </div>
         <section class="workbench-panel table-panel">
-          <div class="section-heading"><div><h2>작업 결과표</h2><p>추천 결과는 초안입니다. 그룹명과 사람 배치를 셀에서 자유롭게 바꿀 수 있습니다.</p></div><span id="arrangementSelectionStatus" class="sheet-selection-status">선택 없음</span></div>
-          <div class="schedule-sheet-toolbar arrangement-sheet-toolbar" role="toolbar" aria-label="작업표 편집 도구"><button id="arrangementUndo" class="icon-text-button" type="button" title="실행 취소 (Ctrl+Z)" disabled>↶ 실행 취소</button><button id="arrangementRedo" class="icon-text-button" type="button" title="다시 실행 (Ctrl+Y)" disabled>↷ 다시 실행</button><details class="action-menu inline-action-menu"><summary class="secondary-button compact">셀 작업 ▾</summary><div class="action-menu-panel"><button id="arrangementClearSelection" type="button">선택 셀 내용 지우기</button><button id="arrangementFillDown" type="button">맨 위 값을 아래로 채우기</button><button id="arrangementInsertRow" type="button">선택 위치에 행 삽입</button><button id="arrangementDeleteRows" type="button">선택한 행 삭제</button><button id="arrangementInsertColumn" type="button">선택 위치에 컬럼 삽입</button><button id="arrangementDeleteColumns" type="button">선택한 컬럼 삭제</button></div></details><span>셀·행 번호·열 문자를 드래그해 범위를 선택할 수 있습니다.</span></div>
+          <div class="section-heading"><div><h2>작업 결과표</h2><p>추천 결과는 초안입니다. 그룹명과 사람 배치를 셀에서 자유롭게 바꿀 수 있습니다.</p></div><span id="arrangementSelectionStatus" class="sheet-selection-status" role="status" aria-live="polite">선택 없음</span></div>
+          <div class="schedule-sheet-toolbar arrangement-sheet-toolbar" role="toolbar" aria-label="작업표 편집 도구"><button id="arrangementUndo" class="icon-text-button" type="button" title="실행 취소 (Ctrl+Z)" disabled>↶ 실행 취소</button><button id="arrangementRedo" class="icon-text-button" type="button" title="다시 실행 (Ctrl+Y)" disabled>↷ 다시 실행</button><details class="action-menu inline-action-menu"><summary class="secondary-button compact">셀 작업 ▾</summary><div class="action-menu-panel"><button id="arrangementClearSelection" type="button">선택 셀 내용 지우기</button><button id="arrangementFillDown" type="button">맨 위 값을 아래로 채우기</button><button id="arrangementInsertRow" type="button">선택 위치에 행 삽입</button><button id="arrangementDeleteRows" type="button">선택한 행 삭제</button><button id="arrangementInsertColumn" type="button">선택 위치에 컬럼 삽입</button><button id="arrangementDeleteColumns" type="button">선택한 컬럼 삭제</button></div></details><span>셀·행 번호·열 문자를 드래그하거나 셀을 우클릭해 작업할 수 있습니다.</span></div>
           <div class="sheet-formula-bar"><span>fx</span><output id="arrangementCellAddress">—</output><input id="arrangementCellValue" type="text" aria-label="선택한 작업 셀 값" placeholder="셀을 선택하세요" disabled></div>
-          <div class="table-scroll spreadsheet-scroll"><table id="arrangementBoard" class="data-table spreadsheet-table arrangement-table"><thead></thead><tbody></tbody></table></div>
+          <div class="table-scroll spreadsheet-scroll"><table id="arrangementBoard" class="data-table spreadsheet-table arrangement-table" aria-label="명단 작업 결과 편집 표" aria-describedby="arrangementSelectionStatus"><thead></thead><tbody></tbody></table></div>
         </section>
       </section>
 
       <section id="page-schedule" class="page module-workbench" data-page="schedule">
         <div class="page-heading">
           <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">3단계 · 일정</span><h1>일정 편성</h1><p>역할별 인원과 사람별 가능 시간을 기준으로 배치하고, 결과를 직접 수정할 수 있습니다.</p></div>
-          <div class="heading-actions"><button id="generateScheduleButton" class="primary-button" type="button">조건에 맞춰 일정표 만들기</button><details class="action-menu"><summary class="secondary-button">관련 작업 ▾</summary><div class="action-menu-panel"><button type="button" data-related-program="people">명단 확인하기</button><button type="button" data-related-program="layout">일정표 저장·내보내기</button><button type="button" data-related-program="gmailFlow">안내 메일 준비하기</button><button id="saveScheduleVersion" type="button">현재 일정을 버전으로 저장</button></div></details></div>
+          <div class="heading-actions"><button type="button" class="secondary-button" data-related-program="projectCalendar">캘린더</button><button id="generateScheduleButton" class="primary-button" type="button">조건에 맞춰 일정표 만들기</button><details class="action-menu"><summary class="secondary-button">관련 작업 ▾</summary><div class="action-menu-panel"><button type="button" data-related-program="people">명단 확인</button><button type="button" data-related-program="layout">일정표</button><button type="button" data-related-program="gmailFlow">메일</button><button id="saveScheduleVersion" type="button">현재 일정을 버전으로 저장</button></div></details></div>
         </div>
 
         <details id="scheduleSetupDetails" class="schedule-setup-details" open>
@@ -167,11 +186,12 @@
             <div id="roleEditor" class="role-editor"></div>
           </section>
           <section class="workbench-panel">
-            <h2>2. 진행할 날짜와 시간</h2>
-            <p>한 줄에 하나씩 날짜·시작 시간·종료 시간·일정 이름을 입력하세요.</p>
-            <textarea id="slotBulkInput" rows="7" placeholder="2026-07-06 09:30-10:30 오전 1세션&#10;2026-07-06 10:30-11:30 오전 2세션"></textarea>
-            <div class="button-row"><button id="addSlotsButton" class="primary-button" type="button">입력한 시간대 추가</button><button id="clearSlotsButton" class="secondary-button danger-text" type="button">등록된 시간대 전체 삭제</button></div>
-            <div id="slotParseErrors" class="warning-list" hidden></div>
+            <div class="section-heading"><div><h2>2. 진행할 날짜와 시간</h2><p>달력과 시간 선택 버튼으로 한 일정씩 편하게 추가하세요.</p></div><button id="scheduleAddEventButton" class="primary-button" type="button">＋ 날짜·시간 선택</button></div>
+            <p class="field-help">하루 일정은 같은 날짜를, 여러 날 일정은 시작일과 종료일을 각각 선택합니다. 프로젝트 캘린더에서는 날짜를 마우스로 드래그할 수도 있습니다.</p>
+            <details class="schedule-bulk-details">
+              <summary>여러 일정을 텍스트로 한꺼번에 붙여넣기 <span>고급</span></summary>
+              <div class="schedule-bulk-body"><p>이미 날짜·시간 목록이 있을 때만 사용하세요. 한 줄에 일정 하나를 입력합니다.</p><textarea id="slotBulkInput" rows="6" aria-label="고급 방식으로 한 줄씩 추가할 일정" placeholder="2026-07-06 09:30-10:30 오전 1세션&#10;2026-07-06 10:30-11:30 오전 2세션"></textarea><div class="button-row"><button id="addSlotsButton" class="secondary-button" type="button">붙여넣은 일정 추가</button><button id="clearSlotsButton" class="secondary-button danger-text" type="button">등록된 일정 전체 삭제</button></div><div id="slotParseErrors" class="warning-list" hidden></div></div>
+            </details>
           </section>
         </div>
 
@@ -193,13 +213,13 @@
         </details>
 
         <section class="workbench-panel session-planner-panel">
-          <div class="section-heading"><div><h2>5. 고객 일정 재조정</h2><p>고객을 먼저 선택하면 현재 일정과 옮길 수 있는 일정을 한 화면에서 확인할 수 있습니다.</p></div><div class="button-row"><button id="sessionUndo" class="icon-text-button session-history-button" type="button" title="일정 변경 실행 취소" aria-label="일정 변경 실행 취소">↶</button><button id="sessionRedo" class="icon-text-button session-history-button" type="button" title="일정 변경 다시 실행" aria-label="일정 변경 다시 실행">↷</button><button id="sessionAddEmptyTime" class="secondary-button" type="button">빈 시간에 세션 추가</button><details class="action-menu inline-action-menu"><summary class="secondary-button">보기 설정 ▾</summary><div class="action-menu-panel session-filter-menu"><label>사용할 단계 명단<select id="sessionRosterView"><option value="">원본 명단</option></select></label><label>배정 역할<select id="sessionRoleSelect"></select></label><label>그룹·반<select id="sessionGroupFilter"><option value="">전체</option></select></label><label>날짜<select id="sessionDateFilter"><option value="">전체 날짜</option></select></label><button id="sessionShowAllDates" type="button">전체 날짜 보기</button></div></details></div></div>
-          <div class="session-board-toolbar"><label class="session-person-search">고객 찾기<input id="sessionPersonSearch" type="search" placeholder="이름·이메일·그룹 검색"></label><span id="sessionBoardStatus"></span></div>
+          <div class="section-heading"><div><h2>5. 사람 일정 재조정</h2><p>사람을 먼저 선택하면 현재 일정과 옮길 수 있는 일정을 한 화면에서 확인할 수 있습니다.</p></div><div class="button-row"><button id="sessionUndo" class="icon-text-button session-history-button" type="button" title="일정 변경 실행 취소" aria-label="일정 변경 실행 취소">↶</button><button id="sessionRedo" class="icon-text-button session-history-button" type="button" title="일정 변경 다시 실행" aria-label="일정 변경 다시 실행">↷</button><button id="sessionAddEmptyTime" class="secondary-button" type="button">빈 시간에 세션 추가</button><details class="action-menu inline-action-menu"><summary class="secondary-button">보기 설정 ▾</summary><div class="action-menu-panel session-filter-menu"><label>사용할 단계 명단<select id="sessionRosterView"><option value="">원본 명단</option></select></label><label>배정 역할<select id="sessionRoleSelect"></select></label><label>그룹·반<select id="sessionGroupFilter"><option value="">전체</option></select></label><label>날짜<select id="sessionDateFilter"><option value="">전체 날짜</option></select></label><button id="sessionShowAllDates" type="button">전체 날짜 보기</button></div></details></div></div>
+          <div class="session-board-toolbar"><label class="session-person-search">사람 찾기<input id="sessionPersonSearch" type="search" placeholder="이름·이메일·그룹 검색"></label><span id="sessionBoardStatus"></span></div>
           <section id="sessionChangePreview" class="session-change-preview" aria-live="polite" hidden>
             <div><span class="eyebrow">변경 미리보기</span><strong id="sessionChangeTitle"></strong><p id="sessionChangeSummary"></p><div id="sessionChangeWarnings" class="session-change-warnings"></div></div>
             <div class="button-row"><button id="sessionCancelChange" class="secondary-button" type="button">취소</button><button id="sessionApplyChange" class="primary-button" type="button">변경 적용</button></div>
           </section>
-          <div class="session-planner"><aside><h3>고객 선택</h3><p>고객을 선택한 뒤 현재 일정 또는 새 일정을 선택하세요.</p><section id="sessionSelectedPersonPanel" class="session-selected-person" hidden></section><div id="sessionPersonPool" class="session-person-pool"></div></aside><div><div id="sessionTargetLegend" class="session-target-legend" hidden><span class="current">현재 일정</span><span class="ready">이동 가능</span><span class="warning">확인 필요</span></div><div id="sessionCalendarBoard" class="session-calendar-board"></div></div></div>
+          <div class="session-planner"><aside><h3>사람 선택</h3><p>사람을 선택한 뒤 현재 일정 또는 새 일정을 선택하세요.</p><section id="sessionSelectedPersonPanel" class="session-selected-person" hidden></section><div id="sessionPersonPool" class="session-person-pool"></div></aside><div><div id="sessionTargetLegend" class="session-target-legend" hidden><span class="current">현재 일정</span><span class="ready">이동 가능</span><span class="warning">확인 필요</span></div><div id="sessionCalendarBoard" class="session-calendar-board"></div></div></div>
         </section>
 
         <section class="workbench-panel schedule-board-panel">
@@ -211,22 +231,69 @@
             <span class="toolbar-separator"></span>
             <button id="scheduleUndo" class="icon-text-button" type="button" title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button>
             <button id="scheduleRedo" class="icon-text-button" type="button" title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>
-            <span id="scheduleSelectionStatus" class="sheet-selection-status">선택 없음</span>
+            <span id="scheduleSelectionStatus" class="sheet-selection-status" role="status" aria-live="polite">선택 없음</span>
           </div>
           <div class="sheet-formula-bar"><span>fx</span><output id="scheduleCellAddress">—</output><input id="scheduleCellValue" type="text" aria-label="선택한 일정 셀 값" placeholder="셀을 선택하세요" disabled></div>
-          <div class="table-scroll spreadsheet-scroll schedule-spreadsheet-scroll"><table id="scheduleBoard" class="data-table spreadsheet-table schedule-table"><thead></thead><tbody></tbody></table></div>
-          <div class="sheet-tab-bar"><button class="sheet-tab active" type="button">일정 편성</button><span>Excel과 복사·붙여넣기 호환</span></div>
+          <div class="table-scroll spreadsheet-scroll schedule-spreadsheet-scroll"><table id="scheduleBoard" class="data-table spreadsheet-table schedule-table" aria-label="일정 편성 편집 표" aria-describedby="scheduleSelectionStatus scheduleConflicts"><thead></thead><tbody></tbody></table></div>
+          <div class="sheet-tab-bar"><button class="sheet-tab active" type="button">일정 편성</button><span>Excel 복사·붙여넣기 호환 · 셀 우클릭 지원</span></div>
+        </section>
+      </section>
+
+      <section id="page-projectCalendar" class="page module-workbench project-calendar-page" data-page="projectCalendar">
+        <div class="page-heading project-calendar-heading">
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">일정 운영</span><h1>캘린더</h1><p>전체 일정을 한눈에 보고, 진행 내용과 담당자를 확인하거나 갑작스러운 변경을 안전하게 조정합니다.</p></div>
+          <div id="calendarLegacyHeadingActions" class="heading-actions" hidden><button id="calendarShowSessions" class="secondary-button" type="button">← 전체 세션</button><button id="calendarUndo" class="icon-text-button" type="button" title="캘린더 변경 실행 취소" aria-label="캘린더 변경 실행 취소">↶</button><button id="calendarRedo" class="icon-text-button" type="button" title="캘린더 변경 다시 실행" aria-label="캘린더 변경 다시 실행">↷</button><button id="calendarAddEvent" class="primary-button" type="button">＋ 일정 추가</button><button class="secondary-button" type="button" data-related-program="schedule">일정 편성 열기</button></div>
+        </div>
+
+        <div id="sessionSchedulerMount" class="session-scheduler-mount" aria-live="polite"></div>
+
+        <section id="legacyCalendarWorkspace" class="calendar-workspace" aria-label="개별 일정 캘린더" hidden>
+          <header class="calendar-toolbar">
+            <div class="calendar-view-switch" role="group" aria-label="캘린더 보기">
+              <button id="calendarMonthView" class="active" type="button" aria-pressed="true">월</button>
+              <button id="calendarWeekView" type="button" aria-pressed="false">주</button>
+            </div>
+            <div class="calendar-navigation">
+              <button id="calendarPrevious" class="calendar-icon-button" type="button" aria-label="이전 기간">‹</button>
+              <h2 id="calendarPeriodLabel" aria-live="polite"></h2>
+              <button id="calendarNext" class="calendar-icon-button" type="button" aria-label="다음 기간">›</button>
+              <button id="calendarToday" class="secondary-button compact" type="button">오늘</button>
+            </div>
+            <details class="action-menu calendar-filter-menu"><summary class="secondary-button compact">보기 설정 ▾</summary><div class="action-menu-panel wide"><label>일정 찾기<input id="calendarSearch" type="search" placeholder="일정·사람·그룹 검색"></label><label>역할<select id="calendarRoleFilter"><option value="">모든 역할</option></select></label><label class="check-row"><input id="calendarHideCancelled" type="checkbox" checked> 취소된 일정 숨기기</label></div></details>
+          </header>
+          <div class="calendar-summary-row"><div id="calendarSummary" class="calendar-summary" role="status" aria-live="polite"></div><div class="calendar-drag-hint">빈 날짜를 클릭하거나 날짜 사이를 드래그해 일정 범위를 선택하세요.</div></div>
+
+          <div class="calendar-layout">
+            <div class="calendar-surface">
+              <div class="calendar-weekdays" aria-hidden="true"><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span><span>일</span></div>
+              <div id="projectCalendarGrid" class="project-calendar-grid" role="grid" aria-label="프로젝트 일정" aria-colcount="7"></div>
+              <div id="calendarEmpty" class="calendar-empty" hidden><strong>아직 등록된 일정이 없습니다.</strong><p>복잡한 설정 없이 첫 일정을 바로 추가하거나 일정 편성에서 여러 일정을 한 번에 준비할 수 있습니다.</p><div class="button-row"><button type="button" class="primary-button" data-calendar-empty-add>첫 일정 추가</button><button type="button" class="secondary-button" data-related-program="schedule">일정 편성에서 추가</button></div></div>
+              <div id="calendarFilterEmpty" class="calendar-empty calendar-filter-empty" hidden><strong>보기 조건에 맞는 일정이 없습니다.</strong><p>검색어와 역할 조건을 지우고 취소된 일정까지 모두 표시할 수 있습니다.</p><button id="calendarResetFilters" type="button" class="secondary-button">모든 일정 보기</button></div>
+            </div>
+
+            <aside id="calendarDetail" class="calendar-detail" aria-label="선택한 일정 상세" hidden>
+              <div class="calendar-detail-header"><div><div id="calendarDetailBadges" class="calendar-detail-badges"></div><h2 id="calendarDetailTitle"></h2><p id="calendarDetailTime"></p></div><button id="calendarDetailClose" class="dialog-close" type="button" aria-label="일정 상세 닫기">×</button></div>
+              <div id="calendarLockNotice" class="calendar-lock-notice" role="status" hidden></div>
+              <div class="calendar-detail-body">
+                <section class="calendar-detail-section"><div class="calendar-detail-section-heading"><h3>진행 내용</h3><button id="calendarAddActivity" class="text-button" type="button">＋ 항목 추가</button></div><div id="calendarAgenda" class="calendar-agenda"></div></section>
+                <section id="calendarCustomSection" class="calendar-detail-section" hidden><h3>상세 정보</h3><dl id="calendarCustomDetails" class="calendar-detail-list"></dl></section>
+                <section class="calendar-detail-section"><h3>연결된 회의</h3><div id="calendarConference" class="calendar-conference"></div></section>
+                <section class="calendar-detail-section"><h3>역할별 배치</h3><div id="calendarAssignments" class="calendar-assignment-groups"></div></section>
+              </div>
+              <footer class="calendar-detail-footer"><button id="calendarEditEvent" class="primary-button" type="button">날짜·시간 편집</button><button id="calendarAdjustEvent" class="secondary-button" type="button">인원 함께 조정</button><details class="action-menu"><summary class="secondary-button" aria-label="선택한 일정의 추가 작업">⋯</summary><div class="action-menu-panel"><button id="calendarDuplicateEvent" type="button">일정 복제</button><button id="calendarCancelEvent" class="danger-text" type="button">일정 취소</button></div></details></footer>
+            </aside>
+          </div>
         </section>
       </section>
 
       <section id="page-layout" class="page module-workbench" data-page="layout">
         <div class="page-heading">
-          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">4단계 · 일정표</span><h1>일정표 저장·내보내기</h1><p>편성된 일정을 보기 좋은 표로 확인하고 Excel 또는 CSV 파일로 저장합니다.</p></div>
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">4단계 · 일정표</span><h1>일정표</h1><p>편성된 일정을 보기 좋은 표로 확인하고 Excel 또는 CSV 파일로 저장합니다.</p></div>
         </div>
         <div class="settings-layout">
           <section class="workbench-panel">
             <h2>일정표 형태 선택</h2>
-            <label class="form-field">표 형태<select id="layoutType"><option value="list">전체 일정 목록</option><option value="calendarCoach">날짜별 일정표 · 진행 코치 포함</option><option value="calendarZoom">날짜별 일정표 · Zoom 링크 포함</option></select></label>
+            <label class="form-field">표 형태<select id="layoutType"><option value="list">전체 일정 목록</option><option value="calendarCoach">날짜별 일정표 · 역할별 배치</option><option value="calendarZoom">날짜별 일정표 · Zoom 링크 포함</option></select></label>
             <div class="button-row output-buttons"><button id="exportExcelButton" class="primary-button" type="button">Excel로 저장</button><button id="exportCsvButton" class="secondary-button" type="button">CSV로 저장</button></div>
             <p class="field-help">저장하기 전에 아래 미리보기에서 날짜·사람·역할이 올바른지 확인하세요.</p>
           </section>
@@ -238,33 +305,91 @@
         <section class="workbench-panel table-panel"><h2>저장될 내용 미리보기</h2><div class="table-scroll"><table id="outputPreviewTable" class="data-table"><thead></thead><tbody></tbody></table></div></section>
       </section>
 
-      <section id="page-forms" class="page module-workbench" data-page="forms">
+      <section id="page-forms" class="page module-workbench forms-page" data-page="forms">
         <div class="page-heading">
-          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">2단계 · 설문</span><h1>Google 설문 만들기</h1><p>참가자 정보를 받거나, 관리자가 제시한 시간 중 가능한 시간을 조사하는 Google 설문을 만듭니다.</p></div>
-          <button class="secondary-button" type="button" data-nav-link="connections">사용할 Google 계정 확인</button>
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">2단계 · 설문</span><h1>설문</h1><p>질문을 자유롭게 구성하고 확인한 뒤, 연결한 Google 계정에 실제 설문을 만듭니다.</p></div>
+          <div class="button-row"><button id="jumpToLinkedForms" class="secondary-button" type="button">기존 설문·응답 관리</button><button class="secondary-button" type="button" data-nav-link="connections">사용할 Google 계정 확인</button></div>
         </div>
-        <div class="settings-layout">
-          <section class="workbench-panel">
-            <h2>새 설문 만들기</h2>
-            <label class="form-field">받을 정보<select id="formDefinitionType"><option value="registration">이름·전화번호·이메일 받기</option><option value="availability">참여 가능한 시간 조사하기</option></select></label>
-            <div class="button-row"><button id="buildFormDefinition" class="secondary-button" type="button">설문 내용 미리 만들기</button><button id="createGoogleForm" class="primary-button" type="button">Google 설문 생성</button><details class="action-menu inline-action-menu"><summary class="secondary-button">고급 기능 ▾</summary><div class="action-menu-panel"><button id="downloadFormDefinition" type="button">개발용 설정 파일 저장</button></div></details></div>
-            <p class="field-help">먼저 설문 내용을 미리 확인한 뒤 Google 계정에 실제 설문을 생성하세요.</p>
-          </section>
-          <section class="workbench-panel">
-            <h2>이미 만든 Google 설문 사용</h2>
-            <label class="form-field">설문 편집 주소<input id="linkedFormId" type="text" placeholder="https://docs.google.com/forms/d/.../edit"></label>
-            <div class="button-row"><button id="saveLinkedForm" class="secondary-button" type="button">이 프로젝트에 설문 연결</button></div>
-            <label class="form-field">응답을 가져올 연결된 설문<select id="linkedFormSelect" aria-label="연결된 Google 설문"><option value="">연결된 설문 없음</option></select></label>
-            <div class="button-row"><button id="syncFormResponses" class="primary-button" type="button">선택한 설문의 최신 응답 가져오기</button><button id="removeLinkedForm" class="text-button danger-text" type="button">프로젝트에서 연결 해제</button></div>
-            <p id="linkedFormStatus" class="field-help">연결한 설문의 응답을 가져오면 명단이나 사람별 가능 시간에 반영됩니다.</p>
-          </section>
+        <div id="formsMergeStatus" class="notice info forms-merge-status" role="status" aria-live="assertive" hidden>다른 창의 최신 설문 변경사항을 안전하게 합치는 중입니다. 잠시만 기다려주세요.</div>
+        <section class="workbench-panel form-template-library" aria-labelledby="sharedFormTemplateTitle">
+          <div class="section-heading">
+            <div><span class="eyebrow">시작 양식 · 전역 보관함</span><h2 id="sharedFormTemplateTitle">빠르게 시작하고 어느 프로젝트에서나 재사용</h2><p>목적에 맞는 시작 양식을 고르거나, 현재 편집 내용을 저장해 새 프로젝트에서 다시 불러올 수 있습니다.</p></div>
+            <div class="button-row form-starter-actions"><button id="newBlankForm" class="secondary-button" type="button">자유 설문 시작</button><button id="newRegistrationForm" class="secondary-button" type="button">신청 명단 설문 시작</button><button id="newAvailabilityForm" class="secondary-button" type="button">가능 시간 설문 시작</button></div>
+          </div>
+          <p class="field-help form-starter-help">명단이나 가능 시간에 응답을 자동으로 이어 쓰려면 해당 시작 양식을 고르세요. 시작한 뒤에도 질문과 문구는 자유롭게 편집할 수 있습니다.</p>
+          <div class="form-template-controls">
+            <label class="form-field">저장된 전역 양식<select id="sharedFormTemplateSelect" aria-label="저장된 전역 설문 양식"><option value="">저장된 양식 없음</option></select></label>
+            <button id="loadSharedFormTemplate" class="secondary-button" type="button">불러오기</button>
+            <button id="saveSharedFormTemplate" class="secondary-button" type="button">현재 설문 저장</button>
+            <button id="deleteSharedFormTemplate" class="text-button danger-text" type="button">삭제</button>
+          </div>
+        </section>
+
+        <div class="form-builder-layout">
+          <div class="form-editor-column form-editor-shell">
+            <section class="form-editor-section-card form-title-card" aria-labelledby="formEditorTitle">
+              <div class="form-editor-card-heading"><div><span class="eyebrow">편집 중인 초안</span><h2 id="formEditorTitle">설문 제목과 기본 설정</h2></div><span id="formDraftBadge" class="form-draft-badge">아직 Google에 생성되지 않음</span></div>
+              <div class="form-project-draft-picker"><label class="form-field">이 프로젝트의 설문 초안<select id="projectFormDraftSelect" aria-label="현재 프로젝트 설문 초안"></select></label><button id="deleteProjectFormDraft" class="text-button danger-text" type="button">현재 초안 삭제</button></div>
+              <label class="form-field form-title-field">설문 제목<input id="formTitleInput" type="text" maxlength="200" placeholder="예: 2026 교육 참여 신청" autocomplete="off"></label>
+              <label class="form-field">설명<textarea id="formDescriptionInput" rows="3" maxlength="4000" placeholder="응답자에게 보여줄 안내를 입력하세요."></textarea></label>
+              <div class="form-editor-settings">
+                <label class="form-field">이메일 주소 수집<select id="formEmailCollection"><option value="DO_NOT_COLLECT">수집하지 않음</option><option value="VERIFIED">Google 로그인 이메일 확인</option><option value="RESPONDER_INPUT">응답자가 직접 입력</option></select></label>
+                <label class="check-row form-quiz-setting"><input id="formQuizMode" type="checkbox"> 퀴즈로 만들기</label>
+              </div>
+            </section>
+
+            <section class="form-editor-section-card form-question-editor" aria-labelledby="formQuestionsTitle">
+              <div class="form-editor-card-heading"><div><span class="eyebrow">질문 구성</span><h2 id="formQuestionsTitle">응답자가 볼 항목</h2><p>질문을 추가한 뒤 유형·선택지·필수 여부를 카드 안에서 바로 바꿀 수 있습니다.</p></div></div>
+              <div id="formQuestionList" class="form-question-list" aria-live="polite"></div>
+              <div class="form-add-toolbar form-editor-toolbar" role="toolbar" aria-label="설문 항목 추가">
+                <button id="addFormQuestion" type="button">＋ 질문</button>
+                <span class="form-add-toolbar-divider" aria-hidden="true"></span>
+                <button type="button" data-add-form-item="section">섹션</button>
+                <button type="button" data-add-form-item="textBlock">제목·설명</button>
+                <button type="button" data-add-form-item="image">이미지</button>
+                <button type="button" data-add-form-item="video">동영상</button>
+                <span class="form-add-toolbar-divider" aria-hidden="true"></span>
+                <button id="undoFormStructure" class="secondary-button" type="button" disabled>방금 변경 실행 취소</button>
+              </div>
+            </section>
+
+            <div class="form-editor-actions form-create-footer" aria-label="설문 확인과 생성">
+              <div class="form-editor-action-copy"><strong>편집 → 미리보기 → 실제 생성</strong><small><b>미리보기</b>는 저장하지 않고 화면만 확인합니다. <b>Google 설문 생성</b>을 눌러야 연결한 계정에 실제 설문이 만들어집니다.</small></div>
+              <div class="button-row"><button id="previewGoogleFormDraft" class="secondary-button" type="button">응답 화면 미리보기</button><button id="createGoogleForm" class="primary-button form-google-create-button" type="button">Google 설문 생성</button></div>
+              <p id="formEditorStatus" class="field-help" aria-live="polite">제목과 질문을 편집한 뒤 미리보기로 확인하세요.</p>
+            </div>
+          </div>
+
+          <aside class="form-side-column" aria-label="Google 설문 연결 도구">
+            <section class="workbench-panel form-google-advanced-card">
+              <span class="eyebrow">Google Forms</span>
+              <h2>Google Forms에서 고급 편집</h2>
+              <p>이 앱에서는 자주 쓰는 질문과 선택지를 빠르게 구성합니다. 파일 업로드, 답변 유효성 검사, 응답에 따른 섹션 이동처럼 Google Forms API가 지원하지 않는 고급 기능은 Google Forms에서 이어서 편집하세요.</p>
+              <button id="openGoogleFormsCreate" class="secondary-button" type="button">Google Forms 열기 ↗</button>
+            </section>
+
+            <section id="formLinkedTools" class="workbench-panel form-linked-card" aria-labelledby="linkedFormTitle" tabindex="-1">
+              <div class="form-linked-heading"><span class="eyebrow">기존 설문</span><h2 id="linkedFormTitle">만든 설문 불러오기</h2><p>Google Forms에서 직접 만든 설문도 편집 주소 하나로 이 프로젝트에 가져올 수 있습니다.</p></div>
+              <label class="form-field">Google 설문 편집 주소<input id="linkedFormId" type="text" placeholder="https://docs.google.com/forms/d/.../edit" autocomplete="off"></label>
+              <button id="importGoogleForm" class="secondary-button form-full-button" type="button">주소에서 설문 가져오기</button>
+              <label class="form-field">현재 프로젝트의 연결된 설문<select id="linkedFormSelect" aria-label="연결된 Google 설문"><option value="">연결된 설문 없음</option></select></label>
+              <div class="form-linked-actions"><button id="openLinkedForm" class="secondary-button" type="button">편집 화면 열기</button><button id="openLinkedFormResponse" class="secondary-button" type="button">응답 화면 열기</button><button id="copyLinkedForm" class="secondary-button" type="button">초안으로 복사</button><button id="copyLinkedFormResponse" class="secondary-button" type="button">응답 링크 복사</button><button id="syncFormResponses" class="primary-button" type="button">최신 응답 가져오기</button></div>
+              <div class="form-linked-actions form-linked-review-actions"><button id="confirmLinkedFormAccount" class="secondary-button" type="button" hidden>현재 계정으로 다시 연결</button><button id="removeLinkedForm" class="text-button danger-text" type="button">프로젝트 연결 해제</button></div>
+              <p id="formResponseStatus" class="field-help" aria-live="polite">설문을 선택하면 응답을 명단이나 사람별 가능 시간으로 이어서 사용할 수 있습니다.</p>
+              <div id="formResponseSummary" class="form-response-summary" aria-live="polite" hidden></div>
+            </section>
+          </aside>
         </div>
-        <section class="workbench-panel table-panel"><div class="section-heading"><div><h2>설문 내용 미리보기</h2><p>실제 Google 설문을 만들기 전에 질문과 선택지를 확인하세요.</p></div></div><div id="formDefinitionPreview" class="form-preview"></div></section>
+
+        <dialog id="formPreviewDialog" class="dialog wide-dialog form-preview-dialog" aria-labelledby="formPreviewDialogTitle">
+          <div class="dialog-header"><div><span class="eyebrow">화면 확인 전용</span><h2 id="formPreviewDialogTitle">응답자에게 보일 설문</h2><p class="dialog-subtitle">이 화면을 열어도 Google에 저장되거나 설문이 생성되지는 않습니다.</p></div><button id="closeFormPreview" class="dialog-close" type="button" data-close-dialog="formPreviewDialog" aria-label="설문 미리보기 닫기">×</button></div>
+          <div class="dialog-body form-preview-dialog-body"><div id="formDefinitionPreview" class="form-preview"></div></div>
+        </dialog>
       </section>
 
       <section id="page-zoom" class="page module-workbench" data-page="zoom">
         <div class="page-heading">
-          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">5단계 · Zoom</span><h1>Zoom 회의 만들기</h1><p>확정된 일정마다 Zoom 회의를 만들고 참가 링크를 해당 일정에 연결합니다.</p></div>
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">5단계 · Zoom</span><h1>Zoom</h1><p>확정된 일정마다 Zoom 회의를 만들고 참가 링크를 해당 일정에 연결합니다.</p></div>
           <button class="secondary-button" type="button" data-nav-link="connections">사용할 Zoom 계정 확인</button>
         </div>
         <div id="zoomReadiness" class="notice info"></div>
@@ -276,20 +401,20 @@
 
       <section id="page-gmailFlow" class="page module-workbench" data-page="gmailFlow">
         <div class="page-heading">
-          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">6단계 · 메일</span><h1>안내 메일 준비</h1><p>현재 프로젝트의 명단·일정·Zoom 링크를 받는 사람별 메일로 만들고 Gmail 임시보관함에 저장합니다.</p></div>
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 프로젝트 작업</button><span class="eyebrow">6단계 · 메일</span><h1>메일</h1><p>현재 프로젝트의 명단·일정·Zoom 링크를 받는 사람별 메일로 만들고 Gmail 임시보관함에 저장합니다.</p></div>
         </div>
         <div class="settings-layout">
           <section class="workbench-panel">
             <div class="applied-resource"><div><span class="resource-label">적용된 명단</span><strong id="mailRosterSummary">받는 사람 명단이 없습니다.</strong><div id="mailRosterPeople" class="resource-preview"></div></div><details class="action-menu"><summary class="secondary-button compact">받는 사람 불러오기 ▾</summary><div class="action-menu-panel wide"><button id="openMailRosterManager" type="button">명단 관리 창에서 가져오기</button><p class="field-help action-menu-help">아래 두 기능은 현재 프로젝트의 원본 명단 전체를 교체하며, 적용 전에 한 번 더 확인합니다.</p><label>저장한 명단<select id="gmailSharedRosterSelect" aria-label="메일용 저장 명단"><option value="">명단 선택</option></select></label><button id="loadGmailSharedRoster" type="button">선택한 명단으로 전체 교체</button><details class="nested-action"><summary>명단 직접 붙여넣기</summary><textarea id="gmailRosterPaste" rows="6" placeholder="Excel·한글 표 또는 이름/이메일/전화번호 데이터를 붙여넣으세요."></textarea><button id="applyGmailRosterPaste" type="button">붙여넣은 명단으로 전체 교체</button></details></div></details></div>
-            <div class="applied-resource account-resource"><button id="gmailFlowAccountButton" class="gmail-account-chip" type="button"><span id="gmailFlowAccountAvatar">G</span><span><strong id="gmailFlowAccountText">Workspace Gmail 계정 확인 중</strong><small id="gmailFlowAccountStatus">클릭하여 프로젝트 기본 계정 확인</small></span></button><div class="legacy-gmail-flow-resource"><button id="openOriginalGmailFlow" class="secondary-button" type="button">기존 Gmail Flow 열기</button><small id="legacyGmailFlowStatus">기존 Gmail Flow 계정은 별도로 관리됩니다.</small></div></div>
-            <label class="form-field">메일 제목<input id="mailSubjectTemplate" type="text"></label>
-            <label class="form-field">메일 본문</label>
+            <div class="applied-resource account-resource"><button id="gmailFlowAccountButton" class="gmail-account-chip" type="button"><span id="gmailFlowAccountAvatar">G</span><span><strong id="gmailFlowAccountText">Workspace Gmail 계정 확인 중</strong><small id="gmailFlowAccountStatus">클릭하여 Workspace 기본 계정 확인</small></span></button><div class="legacy-gmail-flow-resource"><button id="openOriginalGmailFlow" class="secondary-button" type="button">Gmail Flow 열기</button><small id="legacyGmailFlowStatus">Gmail Flow도 Workspace Gmail 계정을 함께 사용합니다.</small></div></div>
+            <label class="form-field">메일 제목<input id="mailSubjectTemplate" type="text" aria-autocomplete="list" aria-controls="templateVariableAutocomplete" aria-expanded="false"></label>
+            <label id="mailBodyEditorLabel" class="form-field">메일 본문</label>
             <div class="rich-toolbar" data-editor-toolbar="mailBodyEditor" role="toolbar" aria-label="메일 서식">
-              <button type="button" data-rich-command="bold"><strong>B</strong></button><button type="button" data-rich-command="italic"><em>I</em></button><button type="button" data-rich-command="underline"><u>U</u></button>
+              <button type="button" data-rich-command="bold" aria-label="굵게" aria-pressed="false"><strong aria-hidden="true">B</strong></button><button type="button" data-rich-command="italic" aria-label="기울임" aria-pressed="false"><em aria-hidden="true">I</em></button><button type="button" data-rich-command="underline" aria-label="밑줄" aria-pressed="false"><u aria-hidden="true">U</u></button>
               <button type="button" data-rich-command="insertUnorderedList">목록</button><button type="button" data-rich-command="removeFormat">서식 지우기</button>
               <label>글자색 <input type="color" value="#202124" data-rich-color="foreColor"></label><label>배경색 <input type="color" value="#fff2cc" data-rich-color="hiliteColor"></label>
             </div>
-            <div id="mailBodyEditor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="본문을 입력하거나 Excel 셀을 복사해 붙여넣으세요."></div>
+            <div id="mailBodyEditor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-labelledby="mailBodyEditorLabel" aria-autocomplete="list" aria-controls="templateVariableAutocomplete" aria-expanded="false" data-placeholder="본문을 입력하거나 Excel 셀을 복사해 붙여넣으세요."></div>
             <div id="templateVariableAutocomplete" class="variable-autocomplete" role="listbox" aria-label="사용 가능한 명단 변수" hidden></div>
             <textarea id="mailBodyTemplate" hidden></textarea>
             <p class="field-help">Excel 셀을 붙여넣으면 표, 셀 배경색, 글꼴, 테두리를 가능한 범위에서 유지합니다.</p>
@@ -300,6 +425,352 @@
           <section class="workbench-panel"><h2>발송 전 확인</h2><p id="mailReadinessText" class="readiness-text">명단과 메일 내용을 준비해주세요.</p><p id="mailPackageStatus" class="field-help"></p></section>
         </div>
         <section class="workbench-panel table-panel"><h2>받는 사람별 메일 확인</h2><div class="table-scroll"><table id="mailPreviewTable" class="data-table"><thead></thead><tbody></tbody></table></div></section>
+      </section>
+
+      <section id="page-documentEditor" class="page module-workbench document-tool-page" data-page="documentEditor">
+        <div class="page-heading">
+          <div><button class="back-link" type="button" data-nav-link="dashboard">← 홈</button><span class="eyebrow">독립 도구</span><h1>문서 편집</h1><p>변환·합치기·나누기·일괄 생성을 한곳에서 필요한 모드만 골라 사용합니다.</p></div>
+        </div>
+        <nav class="document-mode-picker" role="tablist" aria-label="문서 편집 모드">
+          <button id="documentConversionModeTab" type="button" role="tab" aria-controls="documentConversionPanel" aria-selected="true" tabindex="0" data-document-mode="pptxPdf"><span class="document-mode-icon" aria-hidden="true">↗</span><strong>변환</strong><small>문서 형식을 한 번에 변경</small></button>
+          <button id="documentMergeModeTab" type="button" role="tab" aria-controls="documentMergePanel" aria-selected="false" tabindex="-1" data-document-mode="pdfMerge"><span class="document-mode-icon" aria-hidden="true">＋</span><strong>합치기</strong><small>선택한 순서로 한 파일 생성</small></button>
+          <button id="documentSplitModeTab" type="button" role="tab" aria-controls="documentSplitPanel" aria-selected="false" tabindex="-1" data-document-mode="documentSplit"><span class="document-mode-icon" aria-hidden="true">÷</span><strong>나누기</strong><small>한 파일을 분량·그룹으로 분할</small></button>
+          <button id="excelDeduplicateModeTab" type="button" role="tab" aria-controls="excelDeduplicatePanel" aria-selected="false" tabindex="-1" data-document-mode="excelDeduplicate"><span class="document-mode-icon" aria-hidden="true">≠</span><strong>정리</strong><small>Excel 중복 행을 시트별 정리</small></button>
+          <button id="certificateMakerModeTab" type="button" role="tab" aria-controls="certificateMakerPanel" aria-selected="false" tabindex="-1" data-document-mode="certificateMaker"><span class="document-mode-icon" aria-hidden="true">표</span><strong>일괄 만들기</strong><small>표 데이터로 문서를 여러 개 생성</small></button>
+        </nav>
+
+        <div id="documentConversionPanel" role="tabpanel" aria-labelledby="documentConversionModeTab" data-document-mode-panel="pptxPdf">
+          <div class="document-mode-titlebar"><div><span class="eyebrow">현재 모드</span><h2>문서 변환</h2><p>무엇을 어떤 형식으로 바꿀지 먼저 정하면, 그에 맞는 파일만 골라 한 번에 변환합니다.</p></div><span id="pptxPdfEngineBadge" class="engine-badge checking">문서 환경 확인 중</span></div>
+          <section id="documentConversionRoutePicker" class="document-conversion-route-picker" aria-labelledby="documentConversionRouteTitle">
+            <div class="document-step-heading document-conversion-route-heading"><span>1</span><div><h2 id="documentConversionRouteTitle">변환 형식 선택</h2><p>원본을 직접 고르거나 자동 감지로 두고, 만들 결과 형식을 선택하세요.</p></div></div>
+            <div class="document-conversion-route-controls">
+              <label class="document-route-selector" for="documentConversionSource"><span>원본 형식</span><div class="document-route-select-control"><span id="documentConversionSourceIcon" class="document-format-mark document-format-mark-auto" data-document-format-icon="auto" aria-hidden="true">↕</span><select id="documentConversionSource" aria-describedby="documentConversionSourceHelp documentConversionSourceMismatch">
+                <option value="">자동 감지</option>
+                <optgroup label="PowerPoint">
+                  <option value="pptx">PPTX · PowerPoint 프레젠테이션</option>
+                  <option value="ppt">PPT · PowerPoint 97-2003</option>
+                  <option value="pptm">PPTM · 매크로 프레젠테이션</option>
+                  <option value="odp">ODP · OpenDocument 프레젠테이션</option>
+                </optgroup>
+                <optgroup label="Word 문서">
+                  <option value="docx">DOCX · Word 문서</option>
+                  <option value="doc">DOC · Word 97-2003 문서</option>
+                  <option value="docm">DOCM · Word 매크로 문서</option>
+                  <option value="odt">ODT · OpenDocument 텍스트</option>
+                  <option value="rtf">RTF · 서식 있는 텍스트</option>
+                </optgroup>
+                <optgroup label="한글 문서">
+                  <option value="hwp">HWP · 한글 문서</option>
+                  <option value="hwpx">HWPX · 한글 표준 문서</option>
+                </optgroup>
+                <optgroup label="Excel·한셀">
+                  <option value="xlsx">XLSX · Excel 통합 문서</option>
+                  <option value="xls">XLS · Excel 97-2003 통합 문서</option>
+                  <option value="xlsm">XLSM · Excel 매크로 통합 문서</option>
+                  <option value="xlsb">XLSB · Excel 바이너리 통합 문서</option>
+                  <option value="ods">ODS · OpenDocument 스프레드시트</option>
+                  <option value="csv">CSV · 표 데이터</option>
+                  <option value="cell">CELL · 한셀 문서</option>
+                  <option value="nxl">NXL · 넥셀 문서</option>
+                </optgroup>
+              </select></div><small id="documentConversionSourceHelp">자동 감지는 서로 다른 문서도 함께 고를 수 있습니다.</small></label>
+              <span class="document-route-arrow" aria-hidden="true">→</span>
+              <fieldset id="documentConversionTargetField" class="document-target-field document-route-target">
+                <legend><span><strong>결과 형식</strong><small>선택한 원본 모두에서 가능한 형식만 표시됩니다.</small></span></legend>
+                <div id="documentConversionTargets" class="document-target-options" role="radiogroup" aria-label="변환 결과 형식"></div>
+              </fieldset>
+            </div>
+            <div id="documentConversionSourceSummary" class="document-conversion-source-summary" role="status" aria-live="polite"><strong>자동 감지 → PDF</strong><span>파일을 고르면 실제로 감지한 원본 형식을 여기에 표시합니다.</span></div>
+            <div id="documentConversionSourceMismatch" class="notice warning document-conversion-source-mismatch" role="status" hidden></div>
+          </section>
+          <div id="pptxPdfEngineNotice" class="notice info" role="status"><strong>설치된 문서 프로그램과 글꼴을 자동으로 확인합니다.</strong> 파일 형식에 가장 알맞은 프로그램을 사용합니다.</div>
+          <section id="documentDependencyCard" class="document-dependency-card" aria-live="polite" hidden>
+            <div><strong id="documentDependencyTitle">변환에 필요한 구성을 준비할 수 있습니다.</strong><span id="documentDependencyDetail">공개 구성요소와 정확한 공개 글꼴은 앱이 직접 내려받아 확인한 뒤 준비합니다.</span><div id="documentDependencyItems" class="document-dependency-items" aria-label="변환에 필요한 글꼴과 프로그램"></div></div>
+            <button id="prepareDocumentDependencies" class="primary-button" type="button">필요한 구성 자동 준비</button>
+          </section>
+          <div class="document-tool-layout">
+            <section class="workbench-panel document-step-panel" aria-labelledby="pptxPdfFilesTitle">
+              <div class="document-step-heading"><span>2</span><div><h2 id="pptxPdfFilesTitle">변환할 파일 고르기</h2><p>PowerPoint·Word·한글·Excel·한셀 문서를 한 번에 최대 500개까지 선택할 수 있습니다.</p></div></div>
+              <button id="choosePptxFiles" class="file-pick-zone" type="button"><strong id="documentConversionChooseTitle">여러 문서 선택</strong><span id="documentConversionChooseHint">파일 형식은 자동으로 감지하며, 더 선택하면 기존 목록에 이어집니다.</span></button>
+              <div id="pptxPdfFileSummary" class="selection-summary">선택한 파일이 없습니다.</div>
+              <div id="pptxPdfFileList" class="document-file-list" aria-live="polite"><div class="list-empty">변환할 문서를 선택하세요.</div></div>
+            </section>
+            <section class="workbench-panel document-step-panel" aria-labelledby="pptxPdfOutputTitle">
+              <div class="document-step-heading"><span>3</span><div><h2 id="pptxPdfOutputTitle">저장 위치 정하기</h2><p>같은 이름이 있으면 자동으로 “(2)”를 붙이며 덮어쓰지 않습니다.</p></div></div>
+              <button id="choosePptxPdfOutput" class="secondary-button" type="button">결과 폴더 선택</button>
+              <div id="pptxPdfOutputSummary" class="output-location-card"><strong>저장 폴더를 선택해주세요.</strong><span>원본 문서는 그대로 보호합니다.</span></div>
+              <div class="document-run-card"><div><strong id="pptxPdfRunTitle">변환 준비</strong><span id="pptxPdfRunStatus">파일과 저장 폴더를 선택하면 시작할 수 있습니다.</span></div><div class="document-run-actions"><button id="runPptxPdf" class="primary-button" type="button" disabled>일괄 변환</button><button id="cancelPptxPdf" class="secondary-button document-cancel-button" type="button" aria-describedby="pptxPdfRunStatus" hidden>변환 중단</button></div></div>
+              <progress id="pptxPdfProgress" class="document-progress" max="1" value="0" hidden></progress>
+              <button id="openPptxPdfOutput" class="completion-folder-button" type="button" aria-describedby="pptxPdfRunStatus" hidden><span class="completion-folder-icon" aria-hidden="true"></span><span>완료 폴더 열기</span></button>
+            </section>
+          </div>
+        </div>
+
+        <section id="documentMergePanel" class="document-merge-workbench" role="tabpanel" aria-labelledby="documentMergeModeTab" data-document-mode-panel="documentMerge" hidden>
+          <div class="document-mode-titlebar"><div><span class="eyebrow">현재 모드</span><h2 id="documentMergeTitle">파일 합치기</h2><p id="documentMergeDescription">목록에 보이는 순서대로 하나의 파일을 만듭니다.</p></div><span id="documentMergeFormatBadge" class="engine-badge ready">원본 보호</span></div>
+          <div id="documentMergeModeSwitch" class="document-submode-switch" role="tablist" aria-label="합칠 파일 형식">
+            <button type="button" role="tab" aria-selected="true" tabindex="0" data-document-merge-mode="pdfMerge"><strong>PDF</strong><span>페이지를 그대로 연결</span></button>
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-document-merge-mode="pptxMerge"><strong>PowerPoint</strong><span>슬라이드를 그대로 연결</span></button>
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-document-merge-mode="wordMerge"><strong>Word</strong><span>문서를 순서대로 연결</span></button>
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-document-merge-mode="excelMerge"><strong>Excel</strong><span>파일별 시트를 순서대로</span></button>
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-document-merge-mode="documentPdfMerge"><strong>여러 문서</strong><span>형식이 달라도 PDF 하나로</span></button>
+          </div>
+          <section id="documentMergeDependencyCard" class="document-dependency-card" aria-live="polite" hidden>
+            <div><strong id="documentMergeDependencyTitle">문서를 합치는 데 필요한 구성을 준비할 수 있습니다.</strong><span id="documentMergeDependencyDetail">원본 형식과 정확한 글꼴을 확인한 뒤 필요한 구성만 준비합니다.</span></div>
+            <button id="prepareDocumentMergeDependencies" class="primary-button" type="button">필요한 구성 자동 준비</button>
+          </section>
+          <div class="document-merge-layout">
+            <section class="workbench-panel document-step-panel document-merge-source" aria-labelledby="documentMergeFilesTitle">
+              <div class="document-step-heading"><span>1</span><div><h2 id="documentMergeFilesTitle">합칠 파일과 순서</h2><p>파일을 고른 뒤 끌어 놓거나 화살표 버튼으로 순서를 정하세요.</p></div></div>
+              <button id="chooseDocumentMergeFiles" class="file-pick-zone" type="button"><strong id="documentMergeChooseLabel">여러 파일 선택</strong><span>추가로 선택한 파일은 현재 목록 뒤에 이어집니다.</span></button>
+              <div class="document-merge-list-toolbar"><span id="documentMergeFileSummary" class="selection-summary">선택한 파일이 없습니다.</span><div class="document-merge-list-actions"><button id="reverseDocumentMergeFiles" class="document-order-action" type="button" disabled><span class="document-order-reverse-icon" aria-hidden="true">⇅</span><span>순서 뒤집기</span></button><button id="clearDocumentMergeFiles" class="text-button" type="button" disabled>전체 삭제</button></div></div>
+              <ol id="documentMergeFileList" class="document-merge-file-list" aria-live="polite"><li class="list-empty">합칠 파일을 선택하세요.</li></ol>
+              <div id="documentMergeExcelOptions" class="document-merge-excel-options" hidden>
+                <label class="document-merge-option" for="documentMergeUseFileNameAsSheetName">
+                  <input id="documentMergeUseFileNameAsSheetName" type="checkbox" aria-describedby="documentMergeUseFileNameAsSheetNameHelp">
+                  <span><strong>단일 시트 파일은 파일명으로 표시</strong><small id="documentMergeUseFileNameAsSheetNameHelp">시트가 하나뿐인 파일은 확장자를 뺀 파일명을 결과 시트 이름으로 사용합니다. 여러 시트가 있는 파일은 기존 시트 이름을 유지합니다.</small></span>
+                </label>
+                <label class="document-merge-option" for="documentMergeAddCombinedSheet">
+                  <input id="documentMergeAddCombinedSheet" type="checkbox" aria-describedby="documentMergeAddCombinedSheetHelp">
+                  <span><strong>맨 앞에 전체 통합 시트 추가</strong><small id="documentMergeAddCombinedSheetHelp">원본 시트는 그대로 둡니다. 맨 처음 데이터가 있는 워크시트의 1행은 헤더로 한 번만 쓰고, 이후 워크시트는 1행을 빼고 이어 붙입니다. 헤더가 하나라도 다르면 파일을 만들기 전에 멈춥니다.</small></span>
+                </label>
+                <label id="documentMergeCombinedSheetNameField" class="form-field document-merge-combined-name" for="documentMergeCombinedSheetName" hidden>
+                  전체 통합 시트 이름
+                  <input id="documentMergeCombinedSheetName" type="text" maxlength="31" value="전체 통합" autocomplete="off" spellcheck="false" aria-describedby="documentMergeCombinedSheetNameHelp">
+                  <small id="documentMergeCombinedSheetNameHelp">결과 파일의 맨 앞에 만들어질 시트 이름입니다. 같은 이름이 있으면 자동으로 구분합니다.</small>
+                </label>
+              </div>
+            </section>
+
+            <aside class="workbench-panel document-step-panel document-merge-preview" aria-labelledby="documentMergePreviewTitle">
+              <div class="document-step-heading"><span>2</span><div><h2 id="documentMergePreviewTitle">합칠 순서 확인</h2><p>파일이 이어질 순서와 각 파일의 범위, 전체 분량을 확인하세요.</p></div></div>
+              <div id="documentMergePreview" class="document-merge-preview-sheet"><div class="document-merge-preview-empty"><strong>아직 확인할 파일이 없습니다.</strong><span>왼쪽에서 파일을 선택하면 합칠 순서가 표시됩니다.</span></div></div>
+              <div id="documentMergeTotals" class="document-merge-totals"><span><small>파일</small><strong>0</strong></span><span><small>전체 분량</small><strong>0</strong></span></div>
+            </aside>
+
+            <section class="workbench-panel document-step-panel document-merge-output" aria-labelledby="documentMergeOutputTitle">
+              <div class="document-step-heading"><span>3</span><div><h2 id="documentMergeOutputTitle">이름과 저장 위치</h2><p>확장자는 자동으로 붙고 같은 이름의 기존 파일은 덮어쓰지 않습니다.</p></div></div>
+              <label class="form-field">결과 파일 이름<div class="document-merge-name-field"><input id="documentMergeOutputName" type="text" maxlength="120" value="합친 문서" autocomplete="off" spellcheck="false"><span id="documentMergeOutputExtension">.pdf</span></div></label>
+              <button id="chooseDocumentMergeOutput" class="secondary-button" type="button">결과 폴더 선택</button>
+              <div id="documentMergeOutputSummary" class="output-location-card"><strong>저장 폴더를 선택해주세요.</strong><span>원본 파일은 변경하지 않습니다.</span></div>
+              <div class="document-run-card"><div><strong id="documentMergeRunTitle">합치기 준비</strong><span id="documentMergeRunStatus">파일과 저장 폴더를 준비해주세요.</span></div><div class="document-run-actions"><button id="runDocumentMerge" class="primary-button" type="button" disabled>하나로 합치기</button><button id="cancelDocumentMerge" class="secondary-button document-cancel-button" type="button" aria-describedby="documentMergeRunStatus" hidden>작업 중단</button></div></div>
+              <progress id="documentMergeProgress" class="document-progress" max="1" value="0" hidden></progress>
+              <div class="document-completion-actions">
+                <button id="previewDocumentMergeOutput" class="result-preview-button" type="button" aria-describedby="documentMergeRunStatus" hidden><span class="result-preview-icon" aria-hidden="true"></span><span>결과 미리보기</span></button>
+                <button id="openDocumentMergeOutput" class="completion-folder-button" type="button" aria-describedby="documentMergeRunStatus" hidden><span class="completion-folder-icon" aria-hidden="true"></span><span>완료 폴더 열기</span></button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="documentSplitPanel" class="document-split-workbench" role="tabpanel" aria-labelledby="documentSplitModeTab" data-document-mode-panel="documentSplit" hidden>
+          <div class="document-mode-titlebar"><div><span class="eyebrow">현재 모드</span><h2 id="documentSplitTitle">PDF 나누기</h2><p id="documentSplitDescription">한 파일을 일정한 분량 또는 직접 정한 그룹으로 나눕니다.</p></div><span id="documentSplitFormatBadge" class="engine-badge ready">별도 프로그램 필요 없음</span></div>
+          <div id="documentSplitModeSwitch" class="document-submode-switch document-split-kind-switch" role="tablist" aria-label="나눌 파일 형식">
+            <button type="button" role="tab" aria-selected="true" tabindex="0" data-document-split-kind="pdf"><strong>PDF</strong><span>페이지별 새 PDF 만들기</span></button>
+            <button type="button" role="tab" aria-selected="false" tabindex="-1" data-document-split-kind="pptx"><strong>PowerPoint</strong><span>슬라이드를 그대로 나누기</span></button>
+          </div>
+          <div id="documentSplitFidelityNotice" class="notice warning document-split-fidelity-notice" role="status" aria-live="polite" hidden>
+            <strong>PowerPoint 없이 내장 분할을 사용합니다.</strong>
+            <span>원본은 바뀌지 않지만 일부 글꼴·배치·애니메이션·미디어 동작은 달라질 수 있습니다. 완료 후 결과를 확인해주세요.</span>
+          </div>
+          <div class="document-split-layout">
+            <section class="workbench-panel document-step-panel document-split-source" aria-labelledby="documentSplitSourceTitle">
+              <div class="document-step-heading"><span>1</span><div><h2 id="documentSplitSourceTitle">나눌 파일 선택</h2><p>PDF 또는 PPTX 파일 하나를 고르면 전체 분량을 확인합니다.</p></div></div>
+              <button id="chooseDocumentSplitFile" class="file-pick-zone" type="button"><strong id="documentSplitChooseLabel">PDF 파일 선택</strong><span>원본 파일은 바꾸지 않고 새 파일만 만듭니다.</span></button>
+              <div id="documentSplitSourceSummary" class="output-location-card document-split-source-summary" role="status" aria-live="polite"><strong>나눌 파일을 선택해주세요.</strong><span>파일을 고르면 전체 쪽 수가 표시됩니다.</span></div>
+
+              <div class="document-step-heading document-split-rule-heading"><span>2</span><div><h2 id="documentSplitRuleTitle">나누는 방법</h2><p>같은 분량으로 순서대로 나누거나 페이지 그룹을 직접 정하세요.</p></div></div>
+              <fieldset id="documentSplitMethodField" class="document-split-method-field">
+                <legend>나누는 방법 선택</legend>
+                <div class="document-split-method-options">
+                  <label for="documentSplitMethodEqual"><input id="documentSplitMethodEqual" type="radio" name="documentSplitMethod" value="equal" checked><span><strong>같은 분량으로</strong><small>예: 2 입력 → 1–2, 3–4, 5–6</small></span></label>
+                  <label for="documentSplitMethodCustom"><input id="documentSplitMethodCustom" type="radio" name="documentSplitMethod" value="custom"><span><strong>페이지 그룹 직접 지정</strong><small>그룹마다 페이지와 파일 이름 입력</small></span></label>
+                </div>
+              </fieldset>
+              <div id="documentSplitEqualControls" class="document-split-equal-controls">
+                <label class="form-field" for="documentSplitEqualSize">파일 하나당 <span id="documentSplitEqualUnitLabel">쪽 수</span><input id="documentSplitEqualSize" type="number" min="1" step="1" value="2" inputmode="numeric" aria-describedby="documentSplitEqualHelp documentSplitValidationSummary"></label>
+                <p id="documentSplitEqualHelp" class="field-help">마지막 파일은 남은 분량만 포함합니다.</p>
+              </div>
+              <div id="documentSplitCustomControls" class="document-split-custom-controls" hidden>
+                <p class="field-help">쉼표와 범위를 함께 쓸 수 있습니다. 예: <strong>1, 3, 5-6</strong></p>
+                <div id="documentSplitGroups" class="document-split-groups"></div>
+                <button id="addDocumentSplitGroup" class="secondary-button document-split-add-group" type="button">＋ 그룹 추가</button>
+              </div>
+              <div id="documentSplitValidationSummary" class="notice info document-split-validation" role="status" aria-live="polite"><strong>파일을 선택하면 나눌 구성을 미리 보여드립니다.</strong></div>
+            </section>
+
+            <aside class="workbench-panel document-step-panel document-split-preview" aria-labelledby="documentSplitPreviewTitle">
+              <div class="document-step-heading"><span>3</span><div><h2 id="documentSplitPreviewTitle">나눌 결과 확인</h2><p>만들 파일 이름과 각 파일에 들어갈 페이지를 확인하세요.</p></div></div>
+              <div id="documentSplitPlanPreview" class="document-split-plan-preview"><div class="document-merge-preview-empty"><strong>아직 확인할 구성이 없습니다.</strong><span>왼쪽에서 파일과 나누는 방법을 정해주세요.</span></div></div>
+              <div id="documentSplitTotals" class="document-split-totals"><span><small>결과 파일</small><strong>0</strong></span><span><small>선택한 페이지</small><strong>0</strong></span><span><small>선택 안 함</small><strong>0</strong></span></div>
+            </aside>
+
+            <section class="workbench-panel document-step-panel document-split-output" aria-labelledby="documentSplitOutputTitle">
+              <div class="document-step-heading"><span>4</span><div><h2 id="documentSplitOutputTitle">저장하고 나누기</h2><p>같은 이름이 있으면 “(2)”를 붙여 기존 파일을 덮어쓰지 않습니다.</p></div></div>
+              <button id="chooseDocumentSplitOutput" class="secondary-button" type="button">결과 폴더 선택</button>
+              <div id="documentSplitOutputSummary" class="output-location-card"><strong>저장 폴더를 선택해주세요.</strong><span>나눈 파일을 모두 이 폴더에 저장합니다.</span></div>
+              <div class="document-run-card"><div><strong id="documentSplitRunTitle">나누기 준비</strong><span id="documentSplitRunStatus">파일, 나누는 방법, 저장 폴더를 준비해주세요.</span></div><div class="document-run-actions"><button id="runDocumentSplit" class="primary-button" type="button" disabled>파일 나누기</button><button id="cancelDocumentSplit" class="secondary-button document-cancel-button" type="button" aria-describedby="documentSplitRunStatus" hidden>작업 중단</button></div></div>
+              <progress id="documentSplitProgress" class="document-progress" max="1" value="0" hidden></progress>
+              <div id="documentSplitResults" class="document-split-results" aria-live="polite" hidden></div>
+              <button id="openDocumentSplitOutput" class="completion-folder-button" type="button" aria-describedby="documentSplitRunStatus" hidden><span class="completion-folder-icon" aria-hidden="true"></span><span>완료 폴더 열기</span></button>
+            </section>
+          </div>
+        </section>
+
+        <section id="excelDeduplicatePanel" class="excel-dedupe-workbench" role="tabpanel" aria-labelledby="excelDeduplicateModeTab" data-document-mode-panel="excelDeduplicate" hidden>
+          <div class="document-mode-titlebar"><div><span class="eyebrow">현재 모드</span><h2 id="excelCleanupTitle">Excel 중복 행 정리</h2><p id="excelCleanupDescription">선택한 기준 열이 같으면 대소문자와 공백 차이를 무시하고 한 행으로 통합합니다. 다른 열의 값은 합집합으로 보존하며 원본은 바꾸지 않습니다.</p></div><span class="engine-badge ready">합집합 정리</span></div>
+          <div class="excel-cleanup-task-switch" role="tablist" aria-label="Excel 정리 작업 선택">
+            <button type="button" role="tab" aria-selected="true" data-excel-cleanup-task="deduplicate"><strong>중복 제거</strong><small>한 파일 안에서 같은 행 정리</small></button>
+            <button type="button" role="tab" aria-selected="false" data-excel-cleanup-task="compare"><strong>명단 비교·분류</strong><small>두 파일을 연결해 그룹 시트 생성</small></button>
+          </div>
+          <div class="document-tool-layout excel-dedupe-layout" data-excel-cleanup-panel="deduplicate">
+            <section class="workbench-panel document-step-panel" aria-labelledby="excelDedupeSourceTitle">
+              <div class="document-step-heading"><span>1</span><div><h2 id="excelDedupeSourceTitle">Excel 파일 분석</h2><p>XLSX 하나를 선택하면 시트별 중복 행을 바로 계산합니다.</p></div></div>
+              <button id="chooseExcelDeduplicateFile" class="file-pick-zone" type="button"><strong>Excel 파일 선택</strong><span>.xlsx · 빈 행은 정리 대상에서 제외</span></button>
+              <div id="excelDeduplicateSourceSummary" class="output-location-card" role="status" aria-live="polite"><strong>정리할 파일을 선택해주세요.</strong><span>시트별 중복 개수를 분석해 보여드립니다.</span></div>
+              <div class="document-step-heading"><span>2</span><div><h2>비교 기준과 시트 선택</h2><p>행 전체를 비교하거나, A·C처럼 여러 기준 열의 조합을 시트별로 고를 수 있습니다.</p></div></div>
+              <fieldset id="excelDeduplicateCriteriaMode" class="excel-dedupe-criteria-mode">
+                <legend>중복 판단 기준</legend>
+                <label><input type="radio" name="excelDeduplicateCriteriaMode" value="all" checked><span><strong>행 전체가 같을 때</strong><small>기존 방식 · 모든 셀 내용과 수식을 비교</small></span></label>
+                <label><input type="radio" name="excelDeduplicateCriteriaMode" value="columns"><span><strong>선택한 모든 열의 값이 같을 때</strong><small>예: A+C를 골랐다면 A값과 C값이 모두 같은 행만 정리</small></span></label>
+              </fieldset>
+              <div id="excelDeduplicateCriteriaStatus" class="excel-dedupe-criteria-status" role="status" aria-live="polite">행 전체를 기준으로 분석했습니다.</div>
+              <div class="notice subtle excel-dedupe-merge-note"><strong>기준 열이 같으면 다른 열의 내용도 한 행으로 통합합니다.</strong><span>대소문자·띄어쓰기·보이지 않는 문자는 같은 값으로 봅니다. 서로 다른 값은 줄바꿈 합집합으로 모두 남기고, 열 위치가 달라도 같은 이메일·전화·회사명 같은 값은 한 번만 보존합니다.</span></div>
+              <section id="excelDedupeColumnPicker" class="excel-dedupe-column-picker" aria-labelledby="excelDedupeColumnPickerTitle" hidden>
+                <div class="excel-dedupe-column-picker-heading">
+                  <div><span class="eyebrow">필수 선택</span><h3 id="excelDedupeColumnPickerTitle">어느 열이 같을 때 중복으로 볼까요?</h3><p>이곳에서는 기준 열을 설정할 시트를 한 번에 하나씩 보여줍니다. 실제 정리 대상은 아래에서 여러 시트를 동시에 선택할 수 있습니다.</p></div>
+                  <label>기준 열 설정 중인 시트<select id="excelDedupeColumnSheetSelect" aria-label="기준 열을 설정 중인 시트"></select><small>이 목록은 설정 화면 전환용이며 작업 시트 선택이 아닙니다.</small></label>
+                </div>
+                <div class="excel-dedupe-column-picker-actions"><span id="excelDedupeColumnPickerStatus" role="status" aria-live="polite">열을 하나 이상 선택해주세요.</span><div><button id="applyExcelDedupeColumnsToAllSheets" type="button">같은 열을 모든 시트에 적용</button><button id="selectAllExcelDedupeColumns" type="button">전체 열</button><button id="clearExcelDedupeColumns" type="button">선택 해제</button></div></div>
+                <div id="excelDedupeColumnPickerList" class="excel-dedupe-column-picker-list" role="group" aria-label="중복 비교 기준 열"></div>
+              </section>
+              <div class="excel-dedupe-sheet-toolbar"><span>정리할 시트 · 여러 개 선택 가능</span><button id="selectAllExcelDuplicateSheets" class="secondary-button" type="button">중복 시트 전체 선택</button><button id="clearExcelDuplicateSheets" class="ghost-button" type="button">선택 해제</button></div>
+              <div id="excelDeduplicateSheetList" class="excel-dedupe-sheet-list"><div class="document-merge-preview-empty"><strong>분석 결과가 없습니다.</strong><span>먼저 Excel 파일을 선택해주세요.</span></div></div>
+              <div id="excelDeduplicateTotals" class="document-split-totals"><span><small>전체 시트</small><strong>0</strong></span><span><small>선택 시트</small><strong>0</strong></span><span><small>중복 후보 행</small><strong>0</strong></span></div>
+            </section>
+            <aside class="workbench-panel document-step-panel" aria-labelledby="excelDedupeOutputTitle">
+              <div class="document-step-heading"><span>3</span><div><h2 id="excelDedupeOutputTitle">새 파일로 저장</h2><p>원본은 유지하고, 처리 기록과 사용자 통합 전 원본 행을 보존한 새 XLSX를 만든 뒤 다시 검사합니다.</p></div></div>
+              <label class="form-field" for="excelDeduplicateOutputName">결과 파일 이름<input id="excelDeduplicateOutputName" type="text" value="중복 제거 결과" maxlength="120"><small>.xlsx는 자동으로 붙습니다.</small></label>
+              <button id="chooseExcelDeduplicateOutput" class="secondary-button" type="button">저장 폴더 선택</button>
+              <div id="excelDeduplicateOutputSummary" class="output-location-card" role="status" aria-live="polite"><strong>저장 폴더를 선택해주세요.</strong><span>원본 파일은 변경하지 않습니다.</span></div>
+              <div id="excelDeduplicateWarning" class="notice warning" hidden><strong>완료 파일 확인이 필요합니다.</strong><span></span></div>
+              <div class="document-run-card"><div><strong id="excelDeduplicateRunTitle">정리 준비</strong><span id="excelDeduplicateRunStatus">파일, 시트와 저장 폴더를 준비해주세요.</span></div><button id="runExcelDeduplicate" class="primary-button" type="button" disabled>선택 시트 정리</button></div>
+              <progress id="excelDeduplicateProgress" max="1" value="0" hidden></progress>
+              <div id="excelDeduplicateResult" class="document-split-results" aria-live="polite" hidden></div>
+              <div class="document-completion-actions"><button id="previewExcelDeduplicateOutput" class="secondary-button" type="button" hidden>결과 파일 열기</button><button id="openExcelDeduplicateOutput" class="primary-button completion-folder-button" type="button" hidden>완료 파일 폴더 열기</button></div>
+            </aside>
+          </div>
+          <div id="excelComparePanel" class="excel-compare-workbench" data-excel-cleanup-panel="compare" hidden>
+            <section class="workbench-panel document-step-panel excel-compare-source" data-excel-compare-source="a">
+              <div class="document-step-heading"><span>1A</span><div><h2>A 파일</h2><p>기준이 되는 첫 번째 명단을 선택합니다.</p></div></div>
+              <button id="chooseExcelCompareA" class="file-pick-zone" type="button"><strong>A 파일 선택</strong><span>.xlsx</span></button>
+              <div id="excelCompareASummary" class="output-location-card"><strong>파일을 선택해주세요.</strong><span>시트와 비교 열을 확인합니다.</span></div>
+              <label class="form-field">비교할 시트<select id="excelCompareASheet"></select></label>
+              <label class="form-field">열 이름이 있는 행<select id="excelCompareAHeader"></select><small>제목 행이 위에 있어도 실제 열 이름 행을 고를 수 있습니다.</small></label>
+              <label class="form-field">같은 사람을 찾을 열<select id="excelCompareAKey"></select></label>
+            </section>
+            <section class="workbench-panel document-step-panel excel-compare-source" data-excel-compare-source="b">
+              <div class="document-step-heading"><span>1B</span><div><h2>B 파일</h2><p>A 파일과 대조할 두 번째 명단을 선택합니다.</p></div></div>
+              <button id="chooseExcelCompareB" class="file-pick-zone" type="button"><strong>B 파일 선택</strong><span>.xlsx</span></button>
+              <div id="excelCompareBSummary" class="output-location-card"><strong>파일을 선택해주세요.</strong><span>시트와 비교 열을 확인합니다.</span></div>
+              <label class="form-field">비교할 시트<select id="excelCompareBSheet"></select></label>
+              <label class="form-field">열 이름이 있는 행<select id="excelCompareBHeader"></select><small>자동 감지가 다르면 올바른 행을 선택하세요.</small></label>
+              <label class="form-field">같은 사람을 찾을 열<select id="excelCompareBKey"></select></label>
+            </section>
+            <section class="workbench-panel document-step-panel excel-compare-rules">
+              <div class="document-step-heading"><span>2</span><div><h2>그룹 분류 규칙</h2><p>같은 사람으로 확인된 행만 위에서부터 첫 번째로 맞는 규칙의 시트에 넣습니다.</p></div></div>
+              <div class="notice info"><strong>예시</strong><span>비교값에 <code>.onsemi</code> 포함 → <code>온세미</code> 시트 · 또는 A/B 파일의 회사 열에 특정 회사명 포함</span></div>
+              <div id="excelCompareRuleList" class="excel-compare-rule-list"></div>
+              <button id="addExcelCompareRule" class="secondary-button" type="button">+ 분류 규칙 추가</button>
+              <div class="excel-compare-analysis-bar"><div><strong id="excelCompareAnalysisTitle">비교 준비</strong><span id="excelCompareAnalysisStatus">두 파일과 비교 열, 분류 규칙을 준비해주세요.</span></div><button id="analyzeExcelCompare" class="secondary-button" type="button" disabled>매칭 결과 확인</button></div>
+              <div id="excelCompareTotals" class="document-split-totals"><span><small>동일 인물</small><strong>0</strong></span><span><small>그룹 분류</small><strong>0</strong></span><span><small>기타</small><strong>0</strong></span><span><small>중복 확인</small><strong>0</strong></span></div>
+              <div id="excelCompareGroupPreview" class="excel-compare-group-preview" hidden></div>
+            </section>
+            <aside class="workbench-panel document-step-panel excel-compare-output">
+              <div class="document-step-heading"><span>3</span><div><h2>그룹별 시트로 저장</h2><p>그룹·기타·미매칭·중복 확인 시트를 하나의 새 XLSX로 만듭니다.</p></div></div>
+              <label class="form-field">결과 파일 이름<input id="excelCompareOutputName" type="text" value="Excel 비교 분류 결과" maxlength="120"><small>.xlsx는 자동으로 붙습니다.</small></label>
+              <button id="chooseExcelCompareOutput" class="secondary-button" type="button">저장 폴더 선택</button>
+              <div id="excelCompareOutputSummary" class="output-location-card"><strong>저장 폴더를 선택해주세요.</strong><span>두 원본 파일은 변경하지 않습니다.</span></div>
+              <div class="document-run-card"><div><strong id="excelCompareRunTitle">저장 준비</strong><span id="excelCompareRunStatus">먼저 매칭 결과를 확인해주세요.</span></div><button id="runExcelCompare" class="primary-button" type="button" disabled>그룹 시트 만들기</button></div>
+              <progress id="excelCompareProgress" max="2" value="0" hidden></progress>
+              <div id="excelCompareResult" class="document-split-results" hidden></div>
+              <div class="document-completion-actions"><button id="previewExcelCompareOutput" class="secondary-button" type="button" hidden>결과 파일 열기</button><button id="openExcelCompareOutput" class="primary-button completion-folder-button" type="button" hidden>완료 파일 폴더 열기</button></div>
+            </aside>
+          </div>
+        </section>
+
+        <div id="certificateMakerPanel" role="tabpanel" aria-labelledby="certificateMakerModeTab" data-document-mode-panel="certificateMaker" hidden>
+          <div class="document-mode-titlebar"><div><span class="eyebrow">현재 모드</span><h2>일괄 문서 만들기</h2><p>수료증·확인서·이름표처럼 같은 양식에서 일부 글자만 바뀌는 문서를 표의 각 행으로 만듭니다.</p></div><span id="certificateEngineBadge" class="engine-badge checking">미리보기 환경 확인 중</span></div>
+          <section id="certificateDependencyCard" class="document-dependency-card" aria-live="polite" hidden>
+            <div><strong id="certificateDependencyTitle">정확한 PDF를 위한 구성을 준비할 수 있습니다.</strong><span id="certificateDependencyDetail">원본 글꼴과 Microsoft PowerPoint를 확인한 뒤 필요한 항목만 준비합니다.</span><div id="certificateDependencyItems" class="document-dependency-items" aria-label="일괄 문서 만들기에 필요한 글꼴과 프로그램"></div></div>
+            <button id="prepareCertificateDependencies" class="primary-button" type="button">필요한 구성 자동 준비</button>
+          </section>
+          <div class="certificate-flow-strip" aria-label="문서 만들기 순서"><span class="active">1 양식 선택</span><span>2 바꿀 글자 선택</span><span>3 표 입력·미리보기</span><span>4 일괄 생성</span></div>
+
+        <section class="workbench-panel certificate-template-library" aria-labelledby="certificateTemplateTitle">
+          <div class="section-heading"><div><h2 id="certificateTemplateTitle">1. 사용할 PPTX 양식</h2><p>양식과 글자 선택 순서는 이 PC에 저장해 다음 세션에서도 다시 사용할 수 있습니다.</p></div><button id="chooseCertificateTemplate" class="primary-button" type="button">새 PPTX 양식 선택</button></div>
+          <div id="certificateProfileList" class="certificate-profile-list" aria-live="polite"><div class="list-empty">저장한 양식이 없습니다. PPTX 양식을 한 번 선택해보세요.</div></div>
+        </section>
+
+        <div id="certificateEditor" class="certificate-editor" hidden>
+          <section class="workbench-panel certificate-preview-panel" aria-labelledby="certificateBlockTitle">
+            <div class="section-heading"><div><h2 id="certificateBlockTitle">2. 바꿀 글자를 순서대로 클릭</h2><p>왼쪽에서 페이지를 고르고, 실제 슬라이드 위의 글자 영역을 누르세요. 그림·도형·배경은 원본 그대로 보호합니다.</p></div><label id="certificateSlideField" class="compact-field" hidden>페이지<select id="certificateSlideSelect"></select></label></div>
+            <div class="certificate-ppt-viewer">
+              <nav id="certificateSlideRail" class="certificate-slide-rail" aria-label="PowerPoint 페이지" hidden></nav>
+              <div class="certificate-slide-workspace">
+                <div class="certificate-slide-toolbar" aria-label="PowerPoint 페이지 이동">
+                  <div class="certificate-slide-navigation">
+                    <button id="previousCertificateSlide" class="icon-button" type="button" aria-label="이전 페이지">←</button>
+                    <strong id="certificateSlidePosition">1 / 1</strong>
+                    <button id="nextCertificateSlide" class="icon-button" type="button" aria-label="다음 페이지">→</button>
+                  </div>
+                  <button id="toggleCertificateHiddenBlocks" class="text-button" type="button" aria-pressed="false" hidden>가려진 글자 보기</button>
+                </div>
+                <div id="certificatePreviewViewport" class="certificate-preview-viewport" tabindex="0" aria-label="PowerPoint 슬라이드 미리보기. 좌우 방향키로 페이지를 이동할 수 있습니다.">
+                  <div id="certificatePreviewStage" class="certificate-preview-stage">
+                    <div id="certificatePreviewPlaceholder" class="preview-placeholder"><strong>양식을 불러오는 중입니다.</strong><span>잠시만 기다려주세요.</span></div>
+                    <img id="certificatePreviewImage" alt="선택한 PowerPoint 양식 미리보기" hidden>
+                    <div id="certificateBlockOverlay" class="certificate-block-overlay" aria-label="선택 가능한 텍스트 블록"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="certificateFontNotice" class="certificate-font-notice" hidden></div>
+            <div class="certificate-preview-toolbar"><span id="certificatePreviewMode">양식의 글자 상자를 선택하세요.</span><button id="showCertificateTemplatePreview" class="text-button" type="button" hidden>글자 선택 화면으로 돌아가기</button></div>
+          </section>
+
+          <section class="workbench-panel certificate-field-panel" aria-labelledby="certificateFieldTitle">
+            <div class="section-heading"><div><h2 id="certificateFieldTitle">선택한 항목</h2><p>필요한 글자만 고르고 열 이름을 알아보기 쉽게 바꾸세요.</p></div><button id="clearCertificateFields" class="text-button" type="button">선택 모두 지우기</button></div>
+            <div id="certificateFieldList" class="certificate-field-list"><div class="list-empty">미리보기에서 바꿀 글자를 클릭하세요.</div></div>
+            <div class="certificate-profile-actions"><button id="saveCertificateProfile" class="secondary-button" type="button" disabled>이 양식과 선택 순서 저장</button><span id="certificateTemplateStatus" class="field-help"></span></div>
+          </section>
+        </div>
+
+        <section id="certificateDataPanel" class="workbench-panel certificate-data-panel" aria-labelledby="certificateDataTitle" hidden>
+          <div class="section-heading"><div><h2 id="certificateDataTitle">3. 문서마다 바뀔 정보 입력</h2><p>Excel처럼 여러 셀을 붙여넣거나 드래그해 선택할 수 있습니다. 한 행이 문서 하나가 됩니다.</p></div><div class="heading-actions"><button id="importCertificateRoster" class="secondary-button" type="button">명단에서 가져오기</button><button id="importCertificateData" class="secondary-button" type="button">Excel·CSV 가져오기</button><button id="addCertificateRow" class="secondary-button" type="button">행 추가</button></div></div>
+          <div id="certificateRosterImportStatus" class="certificate-roster-import-status" role="status" hidden></div>
+          <div class="sheet-formula-bar certificate-formula-bar"><span id="certificateSelectionAddress" class="sheet-address">A2</span><label>선택 셀<input id="certificateCellValue" type="text" maxlength="4000" autocomplete="off"></label><button id="certificateUndo" class="icon-button" type="button" title="실행 취소" disabled>↶</button><button id="certificateRedo" class="icon-button" type="button" title="다시 실행" disabled>↷</button></div>
+          <div class="table-scroll certificate-table-scroll"><table id="certificateDataTable" class="data-table sheet-table certificate-data-table"><thead></thead><tbody></tbody></table></div>
+          <div class="certificate-data-footer"><span id="certificateRowSummary">0개 문서</span><div class="button-row"><button id="previousCertificateRow" class="secondary-button compact" type="button">← 이전 행</button><span id="certificatePreviewRowLabel">1행</span><button id="nextCertificateRow" class="secondary-button compact" type="button">다음 행 →</button><button id="previewCertificateRow" class="primary-button compact" type="button">현재 문서 결과 미리보기</button></div></div>
+        </section>
+
+          <section id="certificateOutputPanel" class="workbench-panel certificate-output-panel" aria-labelledby="certificateOutputTitle" hidden>
+          <div class="section-heading"><div><h2 id="certificateOutputTitle">4. 한 번에 만들기</h2><p>행별로 파일 하나씩 생성하며 같은 이름의 기존 파일은 건드리지 않습니다.</p></div></div>
+          <div class="certificate-output-controls">
+            <div class="certificate-filename-builder">
+              <div class="certificate-filename-heading"><label for="certificateFilenameTemplate">파일 이름 규칙</label><span>확장자는 자동으로 붙습니다.</span></div>
+              <input id="certificateFilenameTemplate" type="text" maxlength="160" value="{A}" autocomplete="off" spellcheck="false" aria-describedby="certificateFilenameHelp certificateFilenameFeedback">
+              <div id="certificateFilenameVariables" class="certificate-filename-variables" aria-label="파일 이름에 넣을 수 있는 열"></div>
+              <p id="certificateFilenameHelp" class="field-help">일반 글자는 그대로 두고 <code>{A}</code> 또는 <code>{이름}</code>을 넣으세요. 열 이름은 2단계 ‘선택한 항목’에서 직접 바꿀 수 있습니다.</p>
+              <div id="certificateFilenameFeedback" class="certificate-filename-feedback" role="status"><span>현재 행 예시</span><strong id="certificateFilenamePreview">파일 이름을 준비하는 중입니다.</strong></div>
+            </div>
+            <fieldset><legend>출력 형식</legend><label class="check-row"><input id="certificateOutputPdf" type="checkbox" checked> PDF</label><label class="check-row"><input id="certificateOutputPptx" type="checkbox"> 수정 가능한 PPTX도 함께</label></fieldset><div><button id="chooseCertificateOutput" class="secondary-button" type="button">결과 폴더 선택</button><div id="certificateOutputSummary" class="selection-summary">저장 폴더를 선택해주세요.</div></div><div class="document-run-actions certificate-run-actions"><button id="generateCertificates" class="primary-button" type="button" disabled>문서 일괄 생성</button><button id="cancelCertificates" class="secondary-button document-cancel-button" type="button" aria-describedby="certificateRunStatus" hidden>생성 중단</button></div>
+          </div>
+          <progress id="certificateProgress" class="document-progress" max="1" value="0" hidden></progress>
+          <div id="certificateRunStatus" class="document-run-status">양식·정보·저장 폴더가 준비되면 생성할 수 있습니다.</div>
+          <button id="openCertificateOutput" class="completion-folder-button" type="button" aria-describedby="certificateRunStatus" hidden><span class="completion-folder-icon" aria-hidden="true"></span><span>완료 폴더 열기</span></button>
+          </section>
+        </div>
       </section>
 
       <section id="page-declarative" class="page module-workbench" data-page="declarative">
@@ -320,11 +791,10 @@
 
       <section id="page-connections" class="page" data-page="connections">
         <div class="page-heading">
-          <div><span class="eyebrow">계정 연결</span><h1>사용할 계정 연결</h1><p>Google 설문·Drive·Gmail·Zoom에 사용할 계정을 용도별로 따로 등록합니다.</p></div>
-          <button id="addConnectionButton" class="primary-button" type="button">새 계정 연결</button>
+          <div><span class="eyebrow">계정 연결</span><h1>사용할 서비스를 연결하세요</h1><p>한 번 연결하면 모든 프로젝트에서 다시 로그인하지 않고 사용할 수 있습니다.</p></div>
         </div>
-        <div class="notice info"><strong>계정은 모든 프로젝트에서 함께 사용됩니다.</strong> 로그인 정보는 이 PC의 보안 저장소에만 보관되며, 프로젝트마다 기본 계정을 다르게 선택할 수 있습니다.</div>
-        <div id="connectionList" class="connection-list"></div>
+        <div class="notice info"><strong>원하는 카드를 누르면 해당 서비스의 공식 로그인 화면이 열립니다.</strong> 비밀번호는 CMOE에 입력하지 않으며, 로그인 권한은 이 PC의 보안 저장소에만 보관됩니다.</div>
+        <div id="connectionList" class="service-connection-grid" aria-live="polite"></div>
       </section>
 
       <section id="page-library" class="page" data-page="library">
@@ -342,7 +812,7 @@
           <button id="workflowTaskComplete" class="primary-button" type="button">완료로 표시</button>
         </div>
         <div class="task-workbench-grid">
-          <section class="workbench-panel"><h2>이 단계에서 할 일</h2><label class="form-field">업무 방법·확인 기준<textarea id="workflowTaskInstructions" rows="7" placeholder="예: 제출서류가 모두 있는지 확인하고 누락된 항목을 기록합니다."></textarea></label><div class="inline-form"><input id="workflowChecklistInput" type="text" maxlength="160" placeholder="체크 항목 추가"><button id="workflowChecklistAdd" class="secondary-button" type="button">추가</button></div><div id="workflowChecklist" class="workflow-checklist"></div></section>
+          <section class="workbench-panel"><h2>이 단계에서 할 일</h2><label class="form-field">업무 방법·확인 기준<textarea id="workflowTaskInstructions" rows="7" placeholder="예: 제출서류가 모두 있는지 확인하고 누락된 항목을 기록합니다."></textarea></label><div class="inline-form"><input id="workflowChecklistInput" type="text" maxlength="160" aria-label="추가할 체크 항목" placeholder="체크 항목 추가"><button id="workflowChecklistAdd" class="secondary-button" type="button">추가</button></div><div id="workflowChecklist" class="workflow-checklist"></div></section>
           <section class="workbench-panel"><h2>결과와 확인 내용</h2><label class="form-field">메모·AI 결과·사람의 최종 확인<textarea id="workflowTaskNotes" rows="10" placeholder="검토 결과와 최종 판단을 기록하세요."></textarea></label><label class="form-field">현재 상태<select id="workflowTaskStatus"><option value="notStarted">시작 전</option><option value="inProgress">진행 중</option><option value="needsReview">확인 필요</option><option value="complete">완료</option><option value="stale">다시 확인 필요</option></select></label><button id="saveWorkflowTask" class="primary-button" type="button">이 단계 저장</button></section>
         </div>
       </section>
@@ -366,7 +836,9 @@
             <p id="driveSyncStatus" class="field-help">Google Drive에 연결한 계정이 있어야 사용할 수 있습니다.</p>
           </section>
           <section class="settings-panel">
-            <h2>프로젝트 목록</h2>
+            <h2>표시 및 기본 시간대</h2>
+            <label class="form-field">Workspace 기본 시간대<input id="workspaceTimezone" list="workspaceTimezoneOptions" autocomplete="off" spellcheck="false" aria-describedby="workspaceTimezoneHelp"></label>
+            <p id="workspaceTimezoneHelp" class="field-help">새 프로젝트와 별도 시간대를 정하지 않은 프로젝트의 캘린더·Zoom 일정에 적용됩니다.</p>
             <label class="check-row"><input id="showArchivedSetting" type="checkbox"> 완료되어 보관한 프로젝트도 목록에 표시</label>
           </section>
           <section class="settings-panel">
@@ -376,17 +848,26 @@
             <p id="appUpdateProgress" class="field-help" hidden></p>
             <details><summary>업데이트 세부정보</summary><p class="field-help">Cresero의 고정 업데이트 정보에서 제품·Windows 64비트·숫자 버전·파일 크기·SHA-256과 공식 GitHub 릴리스 주소를 확인한 뒤 설치합니다. 사용자 프로젝트와 로그인 자료는 설치 파일과 분리하여 보존합니다.</p></details>
           </section>
+          <section class="settings-panel guide-settings-panel">
+            <div class="guide-settings-copy">
+              <span class="eyebrow">INTERACTIVE GUIDE</span>
+              <h2>사용 가이드</h2>
+              <p>실제 자료를 바꾸지 않는 연습 화면에서 명단 셀 드래그부터 일정 재조정, Zoom·Gmail 준비까지 직접 눌러보며 익힙니다.</p>
+              <div class="guide-safety-inline"><span aria-hidden="true">✓</span> 연습 내용은 저장되지 않음 <span aria-hidden="true">·</span> 언제든 Esc로 종료</div>
+            </div>
+            <button id="openGuideLibrary" class="primary-button guide-start-button" type="button">가이드 시작</button>
+          </section>
         </div>
       </section>
     </main>
   </div>
 
-  <dialog id="newProjectDialog" class="dialog">
+  <dialog id="newProjectDialog" class="dialog" aria-labelledby="newProjectDialogTitle">
     <form id="newProjectForm" method="dialog">
-      <div class="dialog-header"><div><span class="eyebrow">NEW PROJECT</span><h2>새 프로젝트</h2></div><button class="dialog-close" type="button" data-close-dialog="newProjectDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-header"><div><span class="eyebrow">NEW PROJECT</span><h2 id="newProjectDialogTitle">새 프로젝트</h2></div><button class="dialog-close" type="button" data-close-dialog="newProjectDialog" aria-label="닫기">×</button></div>
       <div class="dialog-body">
         <label class="form-field">프로젝트 이름 <span class="required">필수</span><input id="projectName" name="name" required maxlength="80" placeholder="예: K-water 트랙2"></label>
-        <label class="form-field">고객사·과정명<input id="projectClient" name="client" maxlength="80" placeholder="예: K-water 사내코치양성과정"></label>
+        <label class="form-field">분류·고객·과정명<input id="projectClient" name="client" maxlength="80" placeholder="예: 신규 고객 온보딩 · 2차 과정"></label>
         <div class="form-grid two">
           <label class="form-field">시작일<input id="projectStartDate" name="startDate" type="date"></label>
           <label class="form-field">종료일<input id="projectEndDate" name="endDate" type="date"></label>
@@ -394,15 +875,60 @@
         <input id="newProjectTemplateId" type="hidden" name="templateId" value="template-blank">
         <div class="form-field"><span>시작할 업무 템플릿</span><div id="newProjectTemplatePicker" class="template-picker"></div></div>
         <div id="newProjectStepPreview" class="template-step-preview"></div>
-        <p class="field-help">템플릿은 시작 구조일 뿐입니다. 프로젝트를 만든 뒤 단계 이름·순서·구성을 자유롭게 바꿀 수 있습니다.</p>
+        <details id="newProjectWorkflowDetails" class="new-project-workflow-details">
+          <summary>시작 단계 직접 조정 <span>선택</span></summary>
+          <p class="field-help">필요한 프로그램을 추가한 뒤 ↑↓로 실제 진행 순서에 놓으세요. 만든 뒤에도 언제든 바꿀 수 있습니다.</p>
+          <div id="newProjectWorkflowList" class="workflow-editor-list compact-workflow-editor"></div>
+          <div class="workflow-add-row"><label class="form-field">추가할 작업<select id="newProjectWorkflowStepType"></select></label><button id="addNewProjectWorkflowStep" class="secondary-button" type="button">단계 추가</button></div>
+        </details>
+        <p class="field-help">템플릿은 시작 구조일 뿐이며, 위의 ‘시작 단계 직접 조정’에서 방금 추가한 문서 프로그램도 넣을 수 있습니다.</p>
       </div>
       <div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="newProjectDialog">취소</button><button class="primary-button" type="submit">프로젝트 만들기</button></div>
     </form>
   </dialog>
 
-  <dialog id="workflowEditorDialog" class="dialog wide-dialog">
+  <dialog id="excelDedupeReviewDialog" class="dialog wide-dialog excel-dedupe-review-dialog" aria-labelledby="excelDedupeReviewTitle" aria-describedby="excelDedupeReviewDescription">
+    <div class="dialog-header"><div><span class="eyebrow">통합 결과 미리보기</span><h2 id="excelDedupeReviewTitle">같은 기준값의 행을 하나로 정리</h2><p id="excelDedupeReviewDescription" class="dialog-subtitle">원본 행과 자동 합집합 결과를 나란히 확인합니다. 비교 기준 열은 잠기며, 다른 값도 빠뜨리지 않고 한 행에 보존합니다.</p></div><button id="closeExcelDedupeReview" class="dialog-close" type="button" aria-label="닫기">×</button></div>
+    <div class="dialog-body excel-dedupe-review-body">
+      <div id="excelDedupeReviewTotals" class="document-split-totals"><span><small>중복 묶음</small><strong>0</strong></span><span><small>합칠 행</small><strong>0</strong></span><span><small>값 충돌</small><strong>0</strong></span><span><small>빈칸 보완</small><strong>0</strong></span></div>
+      <label class="document-merge-option excel-dedupe-fill-option"><input id="excelDedupeMergeMissing" type="checkbox" checked disabled><span><strong>빈칸 보완과 서로 다른 값 합집합</strong><small>같은 묶음의 값을 모두 보존합니다. 같은 값이 다른 열에 반복되면 한 번만 남깁니다.</small></span></label>
+      <div class="excel-dedupe-review-progress"><span><strong id="excelDedupeReviewProgressText">0 / 0</strong><small>확인 중인 묶음</small></span><progress id="excelDedupeReviewProgress" max="1" value="0"></progress></div>
+      <div class="excel-dedupe-review-layout">
+        <nav id="excelDedupeReviewGroupList" class="excel-dedupe-review-groups" aria-label="중복 묶음 목록"></nav>
+        <section class="excel-dedupe-review-detail" aria-live="polite">
+          <div id="excelDedupeReviewGroupHeading" class="excel-dedupe-review-heading"></div>
+          <div id="excelDedupeReviewTable" class="table-scroll excel-dedupe-review-table"></div>
+          <div id="excelDedupeConflictChoices" class="excel-dedupe-conflict-choices"></div>
+        </section>
+      </div>
+    </div>
+    <div class="dialog-footer"><span id="excelDedupeReviewFooterStatus" class="excel-dedupe-review-footer-status"></span><span class="dialog-footer-spacer"></span><button id="previousExcelDedupeReviewGroup" class="secondary-button" type="button">이전 묶음</button><button id="nextExcelDedupeReviewGroup" class="secondary-button" type="button">다음 묶음</button><button id="finishExcelDedupeReview" class="primary-button" type="button">미리보기 닫기</button></div>
+  </dialog>
+
+  <dialog id="certificateRosterDialog" class="dialog wide-dialog" aria-labelledby="certificateRosterDialogTitle">
+    <form method="dialog">
+      <div class="dialog-header"><div><span class="eyebrow">명단 가져오기</span><h2 id="certificateRosterDialogTitle">문서에 사용할 명단 선택</h2></div><button class="dialog-close" type="button" data-close-dialog="certificateRosterDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-body certificate-roster-dialog-body">
+        <section id="certificateRosterSourceStep" aria-labelledby="certificateRosterSourceTitle">
+          <div class="section-heading"><div><h3 id="certificateRosterSourceTitle">어느 명단을 가져올까요?</h3><p>프로젝트 명단과 Workspace에 따로 저장한 명단을 구분해서 보여드립니다. 원본 명단은 바뀌지 않습니다.</p></div></div>
+          <div id="certificateRosterSourceList" class="certificate-roster-source-list"><div class="list-empty">명단 목록을 불러오는 중입니다.</div></div>
+        </section>
+        <section id="certificateRosterMappingStep" aria-labelledby="certificateRosterMappingTitle" hidden>
+          <button id="backToCertificateRosterSources" class="text-button" type="button">← 다른 명단 선택</button>
+          <div id="certificateRosterSelectedSummary" class="certificate-roster-selected-summary"></div>
+          <div class="section-heading"><div><h3 id="certificateRosterMappingTitle">문서 항목과 명단 열 연결</h3><p>자동으로 맞춘 열을 확인하세요. 가져오지 않을 항목은 ‘빈칸으로 두기’를 선택하면 됩니다.</p></div></div>
+          <div id="certificateRosterMappingList" class="certificate-roster-mapping-list"></div>
+          <div id="certificateRosterPrivacyNote" class="notice subtle" hidden>선택한 개인정보 열은 생성되는 문서에 들어갑니다. 가져온 값은 현재 문서 표에만 복사되며 원본 명단과 자동 동기화되지 않습니다.</div>
+          <div><strong>처음 3명 미리보기</strong><div id="certificateRosterMappingPreview" class="table-scroll certificate-roster-preview"></div></div>
+        </section>
+      </div>
+      <div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="certificateRosterDialog">취소</button><span class="dialog-footer-spacer"></span><button id="applyCertificateRoster" class="primary-button" type="button" hidden>명단 가져오기</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="workflowEditorDialog" class="dialog wide-dialog" aria-labelledby="workflowEditorDialogTitle">
     <form id="workflowEditorForm" method="dialog">
-      <div class="dialog-header"><div><span class="eyebrow">업무 구성</span><h2>프로젝트 업무 단계 편집</h2></div><button class="dialog-close" type="button" data-close-dialog="workflowEditorDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-header"><div><span class="eyebrow">업무 구성</span><h2 id="workflowEditorDialogTitle">프로젝트 업무 단계 편집</h2></div><button class="dialog-close" type="button" data-close-dialog="workflowEditorDialog" aria-label="닫기">×</button></div>
       <div class="dialog-body">
         <p class="field-help">단계 이름과 설명을 바꾸고 순서를 조정하세요. 삭제해도 명단이나 이미 만든 결과 자료는 지워지지 않습니다.</p>
         <div class="workflow-template-apply"><label class="form-field">저장된 업무 템플릿 불러오기<select id="workflowTemplateApplySelect"></select></label><button id="applyWorkflowTemplate" class="secondary-button" type="button">구성 미리 적용</button></div>
@@ -414,8 +940,8 @@
     </form>
   </dialog>
 
-  <dialog id="rosterTaskChooserDialog" class="dialog wide-dialog">
-    <div class="dialog-header"><div><span class="eyebrow">명단으로 작업하기</span><h2>무엇을 만들까요?</h2></div><button class="dialog-close" type="button" data-close-dialog="rosterTaskChooserDialog" aria-label="닫기">×</button></div>
+  <dialog id="rosterTaskChooserDialog" class="dialog wide-dialog" aria-labelledby="rosterTaskChooserDialogTitle">
+    <div class="dialog-header"><div><span class="eyebrow">명단으로 작업하기</span><h2 id="rosterTaskChooserDialogTitle">무엇을 만들까요?</h2></div><button class="dialog-close" type="button" data-close-dialog="rosterTaskChooserDialog" aria-label="닫기">×</button></div>
     <div class="dialog-body"><section id="existingArrangementSection" class="existing-arrangement-section" hidden><h3>이어할 작업표</h3><div id="existingArrangementList" class="existing-arrangement-list"></div></section><div class="roster-task-grid">
       <button type="button" data-roster-task="grouping"><strong>그룹 나누기</strong><small>인원수와 기준을 정하거나 직접 배치</small></button>
       <button type="button" data-roster-task="matching"><strong>짝·1대1 연결</strong><small>2명씩 추천한 뒤 표에서 직접 수정</small></button>
@@ -428,7 +954,7 @@
     </div></div>
   </dialog>
 
-  <dialog id="arrangementSetupDialog" class="dialog">
+  <dialog id="arrangementSetupDialog" class="dialog" aria-labelledby="arrangementSetupTitle">
     <form id="arrangementSetupForm" method="dialog">
       <div class="dialog-header"><div><span class="eyebrow">새 명단 작업</span><h2 id="arrangementSetupTitle">그룹 나누기</h2></div><button class="dialog-close" type="button" data-close-dialog="arrangementSetupDialog" aria-label="닫기">×</button></div>
       <div class="dialog-body">
@@ -442,49 +968,37 @@
     </form>
   </dialog>
 
-  <dialog id="projectSettingsDialog" class="dialog wide-dialog">
+  <dialog id="projectSettingsDialog" class="dialog wide-dialog" aria-labelledby="projectSettingsDialogTitle">
     <form id="projectSettingsForm" method="dialog">
-      <div class="dialog-header"><div><span class="eyebrow">PROJECT SETTINGS</span><h2>프로젝트 설정</h2></div><button class="dialog-close" type="button" data-close-dialog="projectSettingsDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-header"><div><span class="eyebrow">PROJECT SETTINGS</span><h2 id="projectSettingsDialogTitle">프로젝트 설정</h2></div><button class="dialog-close" type="button" data-close-dialog="projectSettingsDialog" aria-label="닫기">×</button></div>
       <div class="dialog-body">
         <div class="form-grid two">
           <label class="form-field">프로젝트 이름<input id="settingsProjectName" required maxlength="80"></label>
-          <label class="form-field">고객사·과정명<input id="settingsProjectClient" maxlength="80"></label>
+          <label class="form-field">분류·고객·과정명<input id="settingsProjectClient" maxlength="80"></label>
           <label class="form-field">시작일<input id="settingsStartDate" type="date"></label>
           <label class="form-field">종료일<input id="settingsEndDate" type="date"></label>
         </div>
         <h3 class="settings-subtitle">기본 일정 규칙</h3>
         <div class="form-grid three">
           <label class="form-field">세션 시간(분)<input id="settingsDuration" type="number" min="5" max="1440" step="5"></label>
-          <label class="form-field">최소 참여자<input id="settingsParticipantMin" type="number" min="0" max="999"></label>
-          <label class="form-field">최대 참여자<input id="settingsParticipantMax" type="number" min="1" max="999"></label>
+          <label class="form-field"><span id="settingsParticipantMinLabel">기본 역할 · 일정별 최소</span><input id="settingsParticipantMin" type="number" min="0" max="999"></label>
+          <label class="form-field"><span id="settingsParticipantMaxLabel">기본 역할 · 일정별 최대</span><input id="settingsParticipantMax" type="number" min="1" max="999"></label>
         </div>
-        <label class="check-row"><input id="settingsCoachRequired" type="checkbox"> 기본적으로 진행 코치 역할을 필수로 사용</label>
+        <label class="form-field">이 프로젝트만 다른 시간대 사용<input id="settingsTimezoneOverride" list="workspaceTimezoneOptions" autocomplete="off" spellcheck="false" placeholder="비워두면 Workspace 기본 시간대" aria-describedby="settingsTimezoneHelp"></label>
+        <p id="settingsTimezoneHelp" class="field-help">Workspace 기본 시간대를 그대로 사용합니다.</p>
+        <label id="settingsCoachRequiredRow" class="check-row"><input id="settingsCoachRequired" type="checkbox"> <span id="settingsCoachRequiredLabel">진행 역할을 일정마다 필수로 사용</span></label>
+        <p id="settingsRoleHelp" class="field-help">역할 이름과 후보 명단은 일정 편성 화면에서 바꿀 수 있습니다.</p>
         <label class="check-row"><input id="settingsChangeApproval" type="checkbox"> Zoom 회의·Gmail 초안을 만들기 전에 최종 확인</label>
         <p class="field-help">끄면 각 만들기 버튼을 누르는 즉시 외부 계정에 반영합니다.</p>
-        <h3 class="settings-subtitle">프로젝트 기본 연결</h3>
+        <h3 class="settings-subtitle">이 프로젝트만 다른 계정 사용</h3>
+        <p class="field-help">평소에는 Workspace 기본 계정을 그대로 사용하세요. 이 프로젝트만 계정이 달라야 할 때 아래에서 예외를 선택합니다.</p>
         <div id="defaultConnectionSelectors" class="form-grid two"></div>
       </div>
       <div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="projectSettingsDialog">취소</button><button class="primary-button" type="submit">저장</button></div>
     </form>
   </dialog>
 
-  <dialog id="connectionDialog" class="dialog">
-    <form id="connectionForm" method="dialog">
-      <div class="dialog-header"><div><span class="eyebrow">계정 연결</span><h2>새 계정 연결</h2></div><button class="dialog-close" type="button" data-close-dialog="connectionDialog" aria-label="닫기">×</button></div>
-      <div class="dialog-body">
-        <label class="form-field">사용할 서비스<select id="connectionType"></select></label>
-        <label class="form-field">구분할 이름 <span class="required">필수</span><input id="connectionLabel" required maxlength="60" placeholder="예: 회사 Zoom 계정"></label>
-        <label class="form-field">계정 이메일 또는 아이디<input id="connectionAccount" maxlength="120" placeholder="예: zoom-admin@company.co.kr"></label>
-        <label class="form-field">OAuth Client ID <span class="required">필수</span><input id="connectionClientId" required autocomplete="off" placeholder="Google Cloud 또는 Zoom Marketplace Client ID"></label>
-        <label class="form-field">OAuth Client Secret <span class="required">필수</span><input id="connectionClientSecret" type="password" required autocomplete="new-password" placeholder="운영체제 암호화 저장소에 보관"></label>
-        <label id="connectionRedirectField" class="form-field" hidden>Zoom Redirect URL <span class="required">필수</span><input id="connectionRedirectUri" autocomplete="off" placeholder="http://127.0.0.1:53682/oauth/callback"></label>
-        <p class="field-help">비밀번호는 받지 않습니다. OAuth 앱의 Client ID와 Secret은 이 PC의 운영체제 암호화 저장소에만 보관합니다. Zoom은 Marketplace 앱에 등록한 localhost Redirect URL과 정확히 같아야 합니다.</p>
-      </div>
-      <div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="connectionDialog">취소</button><button class="primary-button" type="submit">계정 설정 저장</button></div>
-    </form>
-  </dialog>
-
-  <dialog id="confirmDialog" class="dialog confirm-dialog">
+  <dialog id="confirmDialog" class="dialog confirm-dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
     <form id="confirmForm" method="dialog">
       <div class="dialog-header"><h2 id="confirmTitle">확인</h2><button class="dialog-close" type="button" data-confirm-result="false" aria-label="닫기">×</button></div>
       <div class="dialog-body"><p id="confirmMessage"></p></div>
@@ -492,18 +1006,108 @@
     </form>
   </dialog>
 
-  <dialog id="mailEditDialog" class="dialog wide-dialog">
+  <dialog id="rosterImportPreviewDialog" class="dialog wide-dialog roster-import-preview-dialog" aria-labelledby="rosterImportPreviewTitle" aria-describedby="rosterImportPreviewDescription">
+    <div class="dialog-header">
+      <div><span class="eyebrow">명단 가져오기 미리보기</span><h2 id="rosterImportPreviewTitle">자동으로 나눈 결과를 확인하세요</h2><p id="rosterImportPreviewDescription" class="dialog-subtitle"></p></div>
+      <button class="dialog-close" type="button" data-roster-import-result="cancel" aria-label="명단 가져오기 미리보기 닫기">×</button>
+    </div>
+    <div class="dialog-body roster-import-preview-body">
+      <div id="rosterImportPreviewSummary" class="roster-import-preview-summary" role="status" aria-live="polite"></div>
+      <div id="rosterImportPreviewWarnings" class="notice warning" hidden><strong>자동 구분 결과 확인</strong><span></span></div>
+      <div class="table-scroll roster-import-preview-table-wrap"><table id="rosterImportPreviewTable" class="data-table roster-import-preview-table"><thead></thead><tbody></tbody></table></div>
+      <p id="rosterImportPreviewMore" class="field-help" hidden></p>
+    </div>
+    <div class="dialog-footer"><button class="secondary-button" type="button" data-roster-import-result="cancel">원문 다시 보기</button><span class="dialog-footer-spacer"></span><button class="primary-button" type="button" data-roster-import-result="apply">이대로 명단에 적용</button></div>
+  </dialog>
+
+  <dialog id="loginBrowserDialog" class="dialog login-browser-dialog" aria-labelledby="loginBrowserDialogTitle" aria-describedby="loginBrowserDialogDescription">
+    <div class="dialog-header">
+      <div><span class="eyebrow">계정 로그인</span><h2 id="loginBrowserDialogTitle">어디에서 로그인할까요?</h2></div>
+      <button class="dialog-close" type="button" data-login-browser-choice="" aria-label="브라우저 선택 닫기">×</button>
+    </div>
+    <div class="dialog-body">
+      <p id="loginBrowserDialogDescription" class="login-browser-description">사용하려는 계정이 있는 브라우저를 고르세요. 로그인 화면만 선택한 브라우저에서 열립니다.</p>
+      <p id="loginBrowserStatus" class="login-browser-status" role="status" aria-live="polite" hidden></p>
+      <div id="loginBrowserChoices" class="login-browser-choices"></div>
+    </div>
+    <div class="dialog-footer"><button id="loginBrowserBack" class="secondary-button" type="button" hidden>브라우저 다시 선택</button><button class="secondary-button" type="button" data-login-browser-choice="">취소</button></div>
+  </dialog>
+
+  <datalist id="workspaceTimezoneOptions">
+    <option value="Asia/Seoul"></option><option value="UTC"></option><option value="Asia/Tokyo"></option><option value="Asia/Singapore"></option>
+    <option value="Europe/London"></option><option value="America/New_York"></option><option value="America/Los_Angeles"></option><option value="Australia/Sydney"></option>
+  </datalist>
+
+  <dialog id="calendarEventDialog" class="dialog calendar-event-dialog" aria-labelledby="calendarEventDialogTitle" aria-describedby="calendarEventDialogDescription">
+    <form id="calendarEventForm">
+      <div class="dialog-header"><div><span id="calendarEventDialogEyebrow" class="eyebrow">새 일정</span><h2 id="calendarEventDialogTitle">날짜와 시간 선택</h2><p id="calendarEventDialogDescription" class="dialog-subtitle">달력에서 고른 범위를 확인하고 시간만 선택하세요.</p></div><button class="dialog-close" type="button" data-close-dialog="calendarEventDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-body calendar-event-body">
+        <label class="form-field calendar-event-title-field">일정 이름<input id="calendarEventTitle" maxlength="100" required placeholder="예: 레벨 2 교육, 고객 미팅"></label>
+        <div class="calendar-event-range-fields" aria-label="일정 시작과 종료">
+          <section class="calendar-event-boundary"><span class="calendar-event-boundary-label">시작</span><label class="form-field">날짜<input id="calendarEventStartDate" type="date" required></label><label class="form-field">시간<input id="calendarEventStartTime" type="time" step="300" required></label></section>
+          <span class="calendar-event-range-arrow" aria-hidden="true">→</span>
+          <section class="calendar-event-boundary"><span class="calendar-event-boundary-label">종료</span><label class="form-field">날짜<input id="calendarEventEndDate" type="date" required></label><label class="form-field">시간<input id="calendarEventEndTime" type="time" step="300" required></label></section>
+        </div>
+        <div class="calendar-time-presets" role="group" aria-label="빠른 시간 선택"><span>빠른 선택</span><button type="button" data-calendar-duration="60">1시간</button><button type="button" data-calendar-duration="120">2시간</button><button type="button" data-calendar-time-preset="workday">09시–18시</button><button type="button" data-calendar-time-preset="same-day">하루로 맞추기</button></div>
+        <div id="calendarEventRangeSummary" class="calendar-event-range-summary" role="status" aria-live="polite"></div>
+      </div>
+      <div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="calendarEventDialog">취소</button><button id="calendarEventSave" class="primary-button" type="submit">일정 추가</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="calendarAdjustmentDialog" class="dialog calendar-adjustment-dialog" aria-labelledby="calendarAdjustmentDialogTitle" aria-describedby="calendarAdjustmentSubtitle">
+    <form id="calendarAdjustmentForm">
+      <div class="dialog-header"><div><span class="eyebrow">변경 초안</span><h2 id="calendarAdjustmentDialogTitle">일정 조정</h2><p id="calendarAdjustmentSubtitle" class="dialog-subtitle"></p></div><button class="dialog-close" type="button" data-close-dialog="calendarAdjustmentDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-body calendar-adjustment-body">
+        <section class="calendar-adjustment-section">
+          <div class="calendar-adjustment-section-title"><span class="calendar-adjustment-step">1</span><div><h3>날짜와 시간</h3><p>시간만 옮겨도 진행 내용과 현재 배치는 함께 따라갑니다.</p></div></div>
+          <div class="form-grid four"><label class="form-field">시작 날짜<input id="calendarAdjustDate" type="date" required></label><label class="form-field">시작 시간<input id="calendarAdjustStart" type="time" required></label><label class="form-field">종료 날짜<input id="calendarAdjustEndDate" type="date" required></label><label class="form-field">종료 시간<input id="calendarAdjustEnd" type="time" required></label></div>
+        </section>
+        <section class="calendar-adjustment-section">
+          <div class="calendar-adjustment-section-title"><span class="calendar-adjustment-step">2</span><div><h3>함께 조정할 일정</h3><p>사람을 교환하거나 섞어 배치할 일정만 선택하세요. 필요하지 않으면 건너뛰어도 됩니다.</p></div></div>
+          <details id="calendarRelatedPicker" class="calendar-related-picker"><summary id="calendarRelatedSummary">다른 일정에서 선택</summary><div class="calendar-related-picker-body"><label class="calendar-related-search">일정 찾기<input id="calendarRelatedSearch" type="search" placeholder="일정명·날짜·사람 검색"></label><div id="calendarRelatedEvents" class="calendar-related-events"></div></div></details>
+        </section>
+        <section class="calendar-adjustment-section">
+          <div class="calendar-adjustment-section-title"><span class="calendar-adjustment-step">3</span><div><h3>사람과 역할 배치</h3><p>옮길 곳만 선택하면 이동·교환·혼합 재배치를 자동으로 판단합니다.</p></div></div>
+          <div id="calendarAdjustmentAssignments" class="calendar-adjustment-assignments"></div>
+          <details class="calendar-add-person"><summary>＋ 현재 배치에 없는 사람 추가</summary><div class="calendar-add-person-fields"><label class="form-field">사람<select id="calendarAdjustAddPerson"></select></label><label class="form-field">역할<select id="calendarAdjustAddRole"></select></label><label class="form-field">배치할 일정<select id="calendarAdjustAddTarget"></select></label><button id="calendarAdjustAddPersonButton" class="secondary-button" type="button">초안에 추가</button></div></details>
+        </section>
+        <section id="calendarAdjustmentPreview" class="calendar-adjustment-section calendar-adjustment-preview" aria-live="polite">
+          <div class="calendar-adjustment-section-title"><span class="calendar-adjustment-step">4</span><div><h3>변경 영향</h3><p>적용하기 전에 충돌과 다시 확인할 외부 항목을 보여드립니다.</p></div></div>
+          <div id="calendarAdjustmentImpact" class="calendar-impact-grid"></div>
+          <div id="calendarAdjustmentWarnings" class="warning-list" hidden></div>
+        </section>
+      </div>
+      <div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="calendarAdjustmentDialog">돌아가기</button><button id="calendarApplyAdjustment" class="primary-button" type="submit">변경 적용</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="calendarActivityDialog" class="dialog" aria-labelledby="calendarActivityDialogTitle">
+    <form id="calendarActivityForm">
+      <div class="dialog-header"><div><span class="eyebrow">일정 내부 진행</span><h2 id="calendarActivityDialogTitle">진행 항목 추가</h2></div><button class="dialog-close" type="button" data-close-dialog="calendarActivityDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-body">
+        <input id="calendarActivityId" type="hidden"><input id="calendarActivitySlotId" type="hidden">
+        <label class="form-field">진행할 내용<input id="calendarActivityTitle" maxlength="100" required placeholder="예: 오리엔테이션"></label>
+        <div class="form-grid four"><label class="form-field">시작 날짜<input id="calendarActivityStartDate" type="date" required></label><label class="form-field">시작 시간<input id="calendarActivityStart" type="time" required></label><label class="form-field">종료 날짜<input id="calendarActivityEndDate" type="date" required></label><label class="form-field">종료 시간<input id="calendarActivityEnd" type="time" required></label></div>
+        <label class="form-field">설명<textarea id="calendarActivityDescription" rows="3" placeholder="준비물이나 진행 메모를 입력할 수 있습니다."></textarea></label>
+        <fieldset class="calendar-activity-people"><legend>담당자</legend><p>현재 일정에 배치된 사람 중 실제로 이 항목을 진행할 사람을 선택하세요.</p><div id="calendarActivityPeople"></div></fieldset>
+      </div>
+      <div class="dialog-footer"><button id="calendarDeleteActivity" class="text-button danger-text" type="button" hidden>항목 삭제</button><span class="dialog-footer-spacer"></span><button class="secondary-button" type="button" data-close-dialog="calendarActivityDialog">취소</button><button class="primary-button" type="submit">저장</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="mailEditDialog" class="dialog wide-dialog" aria-labelledby="mailEditDialogTitle">
     <form id="mailEditForm" method="dialog">
-      <div class="dialog-header"><div><span class="eyebrow">받는 사람별 메일</span><h2>이 사람의 메일 수정</h2></div><button class="dialog-close" type="button" data-close-dialog="mailEditDialog" aria-label="닫기">×</button></div>
+      <div class="dialog-header"><div><span class="eyebrow">받는 사람별 메일</span><h2 id="mailEditDialogTitle">이 사람의 메일 수정</h2></div><button class="dialog-close" type="button" data-close-dialog="mailEditDialog" aria-label="닫기">×</button></div>
       <div class="dialog-body">
         <input id="mailEditPersonId" type="hidden">
-        <div class="form-grid two"><label class="form-field">받는 사람<input id="mailEditRecipient" readonly></label><label class="form-field">제목<input id="mailEditSubject" required></label></div>
+        <div class="form-grid two"><label class="form-field">받는 사람<input id="mailEditRecipient" readonly></label><label class="form-field">제목<input id="mailEditSubject" required aria-autocomplete="list" aria-controls="templateVariableAutocomplete" aria-expanded="false"></label></div>
         <div class="rich-toolbar" data-editor-toolbar="mailEditBody" role="toolbar" aria-label="개인 메일 서식">
-          <button type="button" data-rich-command="bold"><strong>B</strong></button><button type="button" data-rich-command="italic"><em>I</em></button><button type="button" data-rich-command="underline"><u>U</u></button>
+          <button type="button" data-rich-command="bold" aria-label="굵게" aria-pressed="false"><strong aria-hidden="true">B</strong></button><button type="button" data-rich-command="italic" aria-label="기울임" aria-pressed="false"><em aria-hidden="true">I</em></button><button type="button" data-rich-command="underline" aria-label="밑줄" aria-pressed="false"><u aria-hidden="true">U</u></button>
           <button type="button" data-rich-command="insertUnorderedList">목록</button><button type="button" data-rich-command="removeFormat">서식 지우기</button>
           <label>글자색 <input type="color" value="#202124" data-rich-color="foreColor"></label><label>배경색 <input type="color" value="#fff2cc" data-rich-color="hiliteColor"></label>
         </div>
-        <div id="mailEditBody" class="rich-editor tall" contenteditable="true" role="textbox" aria-multiline="true"></div>
+        <div id="mailEditBody" class="rich-editor tall" contenteditable="true" role="textbox" aria-multiline="true" aria-label="개인 메일 본문" aria-autocomplete="list" aria-controls="templateVariableAutocomplete" aria-expanded="false"></div>
         <div class="template-variable-panel compact-variable-panel"><div class="template-variable-heading"><strong>받는 사람마다 바뀌는 항목</strong><small>클릭하면 이 사람의 메일에 삽입됩니다.</small></div><div id="mailEditVariablePalette" class="template-variable-palette"></div><div id="mailEditTokenStatus" class="template-token-status"></div></div>
         <p id="mailEditStatus" class="field-help"></p>
       </div>
@@ -511,7 +1115,7 @@
     </form>
   </dialog>
 
-  <dialog id="nameInputDialog" class="dialog confirm-dialog">
+  <dialog id="nameInputDialog" class="dialog confirm-dialog" aria-labelledby="nameInputTitle">
     <form id="nameInputForm" method="dialog">
       <div class="dialog-header"><h2 id="nameInputTitle">이름 입력</h2><button class="dialog-close" type="button" data-name-result="cancel" aria-label="닫기">×</button></div>
       <div class="dialog-body"><label class="form-field">이름<input id="nameInputValue" required maxlength="80"></label></div>
@@ -519,21 +1123,78 @@
     </form>
   </dialog>
 
-  <dialog id="shortcutDialog" class="dialog confirm-dialog">
-    <form id="shortcutForm" method="dialog"><div class="dialog-header"><h2>프로그램 바로가기</h2><button class="dialog-close" type="button" data-close-dialog="shortcutDialog">×</button></div><div class="dialog-body"><input id="shortcutProgramId" type="hidden"><label class="check-row"><input id="shortcutDesktop" type="checkbox" checked> 바탕화면에 만들기</label><label class="check-row"><input id="shortcutStartMenu" type="checkbox" checked> 시작 메뉴에 만들기</label></div><div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="shortcutDialog">취소</button><button class="primary-button" type="submit">바로가기 만들기</button></div></form>
+  <dialog id="shortcutDialog" class="dialog confirm-dialog" aria-labelledby="shortcutDialogTitle">
+    <form id="shortcutForm" method="dialog"><div class="dialog-header"><h2 id="shortcutDialogTitle">프로그램 바로가기</h2><button class="dialog-close" type="button" data-close-dialog="shortcutDialog" aria-label="닫기">×</button></div><div class="dialog-body"><input id="shortcutProgramId" type="hidden"><label class="check-row"><input id="shortcutDesktop" type="checkbox" checked> 바탕화면에 만들기</label><label class="check-row"><input id="shortcutStartMenu" type="checkbox" checked> 시작 메뉴에 만들기</label></div><div class="dialog-footer"><button class="secondary-button" type="button" data-close-dialog="shortcutDialog">취소</button><button class="primary-button" type="submit">바로가기 만들기</button></div></form>
   </dialog>
 
-  <dialog id="sheetChoiceDialog" class="dialog confirm-dialog">
+  <dialog id="sheetChoiceDialog" class="dialog confirm-dialog" aria-labelledby="sheetChoiceDialogTitle">
     <form id="sheetChoiceForm" method="dialog">
-      <div class="dialog-header"><h2>가져올 Excel 시트 선택</h2><button class="dialog-close" type="button" data-sheet-choice="cancel" aria-label="닫기">×</button></div>
+      <div class="dialog-header"><h2 id="sheetChoiceDialogTitle">가져올 Excel 시트 선택</h2><button class="dialog-close" type="button" data-sheet-choice="cancel" aria-label="닫기">×</button></div>
       <div class="dialog-body"><label class="form-field">시트<select id="sheetChoiceSelect"></select></label><label class="form-field">가져오기 방식<select id="sheetImportMode"><option value="replace">현재 일정표 교체</option><option value="append">현재 일정표 아래에 추가</option></select></label><p class="field-help">첫 행의 날짜·시작·종료·세션명·역할 이름·상태를 자동으로 맞춥니다.</p></div>
       <div class="dialog-footer"><button class="secondary-button" type="button" data-sheet-choice="cancel">취소</button><button class="primary-button" type="submit">가져오기</button></div>
     </form>
   </dialog>
 
+  <dialog id="guideLibraryDialog" class="dialog wide-dialog guide-library-dialog" aria-labelledby="guideLibraryTitle">
+    <div class="dialog-header">
+      <div><span class="eyebrow">사용 가이드</span><h2 id="guideLibraryTitle">무엇을 체험할까요?</h2><p class="dialog-subtitle">복잡한 설정 없이 선택하는 즉시 연습용 프로젝트에서 시작합니다.</p></div>
+      <button class="dialog-close" type="button" data-close-dialog="guideLibraryDialog" aria-label="가이드 선택 닫기">×</button>
+    </div>
+    <div class="dialog-body guide-library-body">
+      <div class="guide-safety-note"><span class="guide-safety-icon" aria-hidden="true">✓</span><div><strong>실제 프로젝트와 외부 서비스는 바뀌지 않습니다.</strong><p>가이드 안의 입력·일정 변경은 종료하면 사라집니다. Google·Zoom·Gmail·Drive·파일 저장은 안전한 모의 결과로만 체험합니다.</p></div><kbd>Esc</kbd></div>
+      <section aria-labelledby="guideFeaturedTitle"><h3 id="guideFeaturedTitle" class="guide-section-title">전체 과정</h3><div id="guideFeaturedCatalog" class="guide-featured-catalog"></div></section>
+      <section aria-labelledby="guideProgramTitle"><h3 id="guideProgramTitle" class="guide-section-title">프로그램별 가이드</h3><div id="guideProgramCatalog" class="guide-card-grid"></div></section>
+      <details class="guide-management-group">
+        <summary><span><strong>Workspace 관리 가이드</strong><small>프로젝트 구성, 계정, 저장 자료와 환경 설정</small></span><span aria-hidden="true">＋</span></summary>
+        <div id="guideManagementCatalog" class="guide-card-grid"></div>
+      </details>
+    </div>
+  </dialog>
+
+  <div id="sheetContextMenu" class="sheet-context-menu" role="menu" aria-label="셀 작업 메뉴" hidden></div>
+  <div id="certificateContextMenu" class="sheet-context-menu" role="menu" aria-label="문서 데이터 셀 작업 메뉴" hidden>
+    <button type="button" role="menuitem" data-certificate-context="insert-above">위에 행 추가</button>
+    <button type="button" role="menuitem" data-certificate-context="insert-below">아래에 행 추가</button>
+    <button type="button" role="menuitem" data-certificate-context="clear">선택한 셀 지우기</button>
+    <button type="button" role="menuitem" data-certificate-context="fill-down">맨 위 값으로 아래 채우기</button>
+    <button type="button" role="menuitem" class="danger-text" data-certificate-context="delete-row">선택한 행 삭제</button>
+  </div>
+
+  <div id="guideLayer" class="guide-layer" popover="manual" aria-hidden="true" inert>
+    <div id="guideBlockTop" class="guide-blocker" data-guide-blocker aria-hidden="true"></div>
+    <div id="guideBlockRight" class="guide-blocker" data-guide-blocker aria-hidden="true"></div>
+    <div id="guideBlockBottom" class="guide-blocker" data-guide-blocker aria-hidden="true"></div>
+    <div id="guideBlockLeft" class="guide-blocker" data-guide-blocker aria-hidden="true"></div>
+    <div id="guideSpotlight" class="guide-spotlight" aria-hidden="true"></div>
+    <aside id="guideCoach" class="guide-coach" role="dialog" aria-modal="false" aria-labelledby="guideStepTitle" aria-describedby="guideStepDescription">
+      <div class="guide-coach-topline"><span class="guide-practice-badge"><span aria-hidden="true">●</span> 연습 모드</span><span id="guideStepCount" class="guide-step-count"></span></div>
+      <div class="guide-progress" aria-hidden="true"><span id="guideProgressBar"></span></div>
+      <h2 id="guideStepTitle"></h2>
+      <p id="guideStepDescription"></p>
+      <p id="guideInteractionHint" class="guide-interaction-hint"></p>
+      <div id="guideTargetMissing" class="guide-target-missing" hidden><strong>이 항목을 아직 찾지 못했습니다.</strong><span>화면이 준비될 때까지 다시 찾거나 이 단계만 건너뛸 수 있습니다.</span></div>
+      <div class="guide-coach-footer">
+        <button id="guideExit" class="text-button" type="button">가이드 종료</button>
+        <span class="guide-coach-spacer"></span>
+        <button id="guidePrevious" class="secondary-button" type="button">이전</button>
+        <button id="guideRetry" class="secondary-button" type="button" hidden>다시 찾기</button>
+        <button id="guideNext" class="primary-button" type="button">다음</button>
+      </div>
+      <small id="guideKeyboardHint" class="guide-escape-hint"><kbd>F6</kbd> 안내 카드로 이동 <span aria-hidden="true">·</span> <kbd>Esc</kbd> 언제든 실제 자료로 돌아가기</small>
+    </aside>
+    <div id="guideLiveRegion" class="visually-hidden" role="status" aria-live="polite"></div>
+  </div>
+
   <script src="extension-core.js"></script>
   <script src="workspace-core.js"></script>
   <script src="operations-core.js"></script>
+  <script src="external-progress.js"></script>
+  <script src="extensions/project-calendar/calendar-core.js"></script>
+  <script src="extensions/project-calendar/session-scheduler-core.js"></script>
+  <script src="extensions/project-calendar/session-scheduler-ui.js"></script>
+  <script src="guide-core.js"></script>
+  <script src="certificate-roster-core.js"></script>
+  <script src="document-tools-ui.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

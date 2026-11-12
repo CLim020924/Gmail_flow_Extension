@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const ExtensionCore = require('../extension-core');
+const MAX_MANIFEST_BYTES = 512 * 1024;
 
 class ExtensionManager {
   constructor({ bundledPath, userPath }) {
@@ -10,7 +11,11 @@ class ExtensionManager {
   }
 
   readManifest(filePath, bundled) {
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) throw new Error('확장 manifest 파일을 찾을 수 없습니다.');
+    if (stats.size > MAX_MANIFEST_BYTES) throw new Error('확장 manifest는 512KB 이하만 사용할 수 있습니다.');
     const source = fs.readFileSync(filePath);
+    if (source.length > MAX_MANIFEST_BYTES) throw new Error('확장 manifest는 512KB 이하만 사용할 수 있습니다.');
     const manifest = ExtensionCore.normalizeManifest({ ...JSON.parse(source.toString('utf8')), bundled });
     return { ...manifest, source: bundled ? 'bundled' : 'local', integrity: `sha256-${crypto.createHash('sha256').update(source).digest('base64')}` };
   }
@@ -35,7 +40,11 @@ class ExtensionManager {
   }
 
   async install(sourcePath) {
+    const stats = await fs.promises.stat(sourcePath);
+    if (!stats.isFile()) throw new Error('확장 manifest 파일을 찾을 수 없습니다.');
+    if (stats.size > MAX_MANIFEST_BYTES) throw new Error('확장 manifest는 512KB 이하만 설치할 수 있습니다.');
     const source = await fs.promises.readFile(sourcePath);
+    if (source.length > MAX_MANIFEST_BYTES) throw new Error('확장 manifest는 512KB 이하만 설치할 수 있습니다.');
     const parsed = JSON.parse(source.toString('utf8'));
     if (parsed.code || parsed.scripts || parsed.main || parsed.renderer) throw new Error('현재 안전 모드에서는 실행 코드가 포함된 외부 확장을 설치할 수 없습니다.');
     const manifest = ExtensionCore.normalizeManifest({ ...parsed, bundled: false });

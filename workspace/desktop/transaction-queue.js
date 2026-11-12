@@ -32,6 +32,11 @@ function createKeyedOperationCoordinator({ staleMessage = '계정 연결 상태�
   const runKeyed = createKeyedTransactionQueue();
   const generations = new Map();
   const generation = (key) => Number(generations.get(String(key || '')) || 0);
+  const staleError = () => {
+    const error = new Error(staleMessage);
+    error.code = 'CONNECTION_STATE_CHANGED';
+    return error;
+  };
   const advance = (key) => {
     const normalizedKey = String(key || '');
     const next = generation(normalizedKey) + 1;
@@ -39,22 +44,26 @@ function createKeyedOperationCoordinator({ staleMessage = '계정 연결 상태�
     return next;
   };
   return {
+    invalidate(key) {
+      return advance(key);
+    },
     run(key, operation) {
       const requestedGeneration = generation(key);
       return runKeyed(key, () => {
-        if (generation(key) !== requestedGeneration) {
-          const error = new Error(staleMessage);
-          error.code = 'CONNECTION_STATE_CHANGED';
-          throw error;
-        }
+        if (generation(key) !== requestedGeneration) throw staleError();
         return operation();
       });
     },
     transition(key, operation) {
-      advance(key);
+      const requestedGeneration = advance(key);
       return runKeyed(key, async () => {
+        if (generation(key) !== requestedGeneration) throw staleError();
         try { return await operation(); }
-        finally { advance(key); }
+        finally {
+          // A newer transition or an explicit deletion already owns the next
+          // generation. Do not advance over it and make that queued work stale.
+          if (generation(key) === requestedGeneration) advance(key);
+        }
       });
     }
   };

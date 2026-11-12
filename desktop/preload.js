@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('gmailFlowDesktop', {
   clearAuthTokens: () => ipcRenderer.invoke('identity:clear-auth-tokens'),
   removeCachedAuthToken: () => ipcRenderer.invoke('identity:remove-cached-token'),
   getProfileUserInfo: () => ipcRenderer.invoke('identity:get-profile'),
+  listLoginBrowsers: () => ipcRenderer.invoke('connection:login-browsers'),
+  listLoginBrowserProfiles: (browserId) => ipcRenderer.invoke('connection:login-browser-profiles', browserId),
   openWindow: () => ipcRenderer.invoke('window:show'),
   openWorkspace: () => ipcRenderer.invoke('workspace:open-main'),
   listSharedRosters: (projectId) => ipcRenderer.invoke('workspace:roster:sources', projectId),
@@ -25,5 +27,10 @@ contextBridge.exposeInMainWorld('gmailFlowDesktop', {
     const wrapped = (_event, changes) => listener(changes);
     ipcRenderer.on('storage:changed', wrapped);
     return () => ipcRenderer.removeListener('storage:changed', wrapped);
+  },
+  onWorkspaceAccountChanged: (listener) => {
+    const wrapped = (_event, payload) => listener(payload || {});
+    ipcRenderer.on('workspace:account-changed', wrapped);
+    return () => ipcRenderer.removeListener('workspace:account-changed', wrapped);
   }
 });

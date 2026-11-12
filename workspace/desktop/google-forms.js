@@ -31,4 +31,23 @@ async function fetchAllFormResponses(requestPage, formId, { pageSize = 500, maxP
   throw new Error(`Google Forms 응답이 ${safeMaxPages}페이지를 초과해 동기화를 중단했습니다.`);
 }
 
-module.exports = { fetchAllFormResponses };
+function assertGoogleFormStableDuringResponseFetch(formBefore, formAfter) {
+  const beforeFormId = String(formBefore?.formId || '').trim();
+  const afterFormId = String(formAfter?.formId || '').trim();
+  const beforeRevisionId = String(formBefore?.revisionId || '').trim();
+  const afterRevisionId = String(formAfter?.revisionId || '').trim();
+  const revisionUnavailable = !beforeRevisionId || !afterRevisionId;
+  if (revisionUnavailable
+    || (beforeFormId && afterFormId && beforeFormId !== afterFormId)
+    || beforeRevisionId !== afterRevisionId) {
+    const error = new Error(revisionUnavailable
+      ? 'Google 설문의 변경 기준을 확인할 수 없어 응답 동기화를 중단했습니다. 잠시 뒤 다시 시도해주세요.'
+      : 'Google 설문이 응답을 가져오는 동안 변경되어 동기화를 중단했습니다. 최신 설문을 확인한 뒤 다시 시도해주세요.');
+    error.code = revisionUnavailable ? 'GOOGLE_FORM_REVISION_UNAVAILABLE' : 'GOOGLE_FORM_CHANGED_DURING_RESPONSE_FETCH';
+    error.details = { beforeFormId, afterFormId, beforeRevisionId, afterRevisionId };
+    throw error;
+  }
+  return formAfter;
+}
+
+module.exports = { assertGoogleFormStableDuringResponseFetch, fetchAllFormResponses };

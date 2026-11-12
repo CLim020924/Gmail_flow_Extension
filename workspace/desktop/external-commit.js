@@ -19,6 +19,7 @@ function activeReservationMatches(reservations, token, ownerId, projectId, kind,
     if (reservation?.token !== token) continue;
     if (!key.startsWith(prefix)
       || reservation?.ownerId !== ownerId
+      || reservation?.owner?.isDestroyed?.() === true
       || Number(reservation?.expiresAt || 0) <= now) return false;
     activeKeys.push(key.slice(prefix.length));
   }
@@ -40,7 +41,12 @@ function validateExternalCommit(currentState, guard = {}, reservations = new Map
       return { ok: false, reason: '외부 작업 중 연결된 계정이 다른 창에서 변경되었습니다.' };
     }
   }
-  const actualFingerprint = OperationsCore.externalOperationFingerprint(project, kind, currentState.connections || []);
+  const effectiveDefaultConnectionIds = {
+    forms: WorkspaceCore.resolveDefaultConnectionId(currentState, project, 'forms'),
+    gmail: WorkspaceCore.resolveDefaultConnectionId(currentState, project, 'gmail'),
+    zoom: WorkspaceCore.resolveDefaultConnectionId(currentState, project, 'zoom')
+  };
+  const actualFingerprint = OperationsCore.externalOperationFingerprint(project, kind, currentState.connections || [], effectiveDefaultConnectionIds);
   if (actualFingerprint !== String(guard.expectedFingerprint || '')) {
     return { ok: false, reason: '외부 작업 중 프로젝트의 관련 내용이 다른 창에서 변경되었습니다.' };
   }
@@ -62,7 +68,7 @@ function mergeSelectedWorkspaceState(currentState, incomingState, mergeHints = {
   const baseRevision = Number(incomingState?._baseRevision ?? currentRevision);
   const merged = baseRevision !== currentRevision;
   let state = merged ? mergeWorkspaceState(current, incomingState, mergeHints.baseState || null) : incomingState;
-  if (merged && Array.isArray(mergeHints.scheduleProjects)) state = overlayScheduleProjects(state, incomingState, mergeHints.scheduleProjects, current);
+  if (merged && Array.isArray(mergeHints.scheduleProjects)) state = overlayScheduleProjects(state, incomingState, mergeHints.scheduleProjects, current, mergeHints.baseState || null);
   return { state, merged, currentRevision };
 }
 

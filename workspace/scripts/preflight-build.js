@@ -29,14 +29,34 @@ try {
   assert.equal(packageJson.build?.beforeBuild, 'scripts/electron-builder-hooks.js', 'electron-builder must use the self-contained runtime hook.');
   assert.equal(typeof require(path.join(workspaceRoot, packageJson.build.beforeBuild)).beforeBuild, 'function', 'electron-builder beforeBuild hook is invalid.');
   assert.ok((packageJson.build?.files || []).includes('desktop/**/*'), 'electron-builder must package all desktop runtime modules.');
-  ['desktop/drive-sync-guard.js', 'desktop/external-commit.js', 'desktop/transaction-queue.js', 'desktop/update-service.js', 'build/installer.nsh'].forEach((relativePath) => {
+  [
+    'certificate-roster-core.js',
+    'document-tools-ui.js',
+    'external-progress.js',
+    'guide-core.js',
+    'desktop/document-tools.js',
+    'desktop/google-forms.js',
+    'desktop/google-oauth-release-config.js',
+    'desktop/login-browser.js',
+    'desktop/drive-sync-guard.js',
+    'desktop/external-commit.js',
+    'desktop/transaction-queue.js',
+    'desktop/update-service.js',
+    'extensions/document-editor/manifest.json',
+    'extensions/project-calendar/manifest.json',
+    'build/installer.nsh'
+  ].forEach((relativePath) => {
     assert.equal(fs.existsSync(path.join(workspaceRoot, relativePath)), true, `Critical desktop runtime is missing: ${relativePath}`);
   });
   const vendorResource = resources.find((entry) => entry?.from === 'vendor/node_modules' && entry?.to === 'vendor/node_modules');
   assert.ok(vendorResource, 'electron-builder extraResources must copy vendor/node_modules.');
+  ['office-tools', 'browser-tools'].forEach((resourceName) => {
+    assert.ok(resources.some((entry) => entry?.from === resourceName && entry?.to === resourceName), `electron-builder must package ${resourceName}.`);
+  });
 
   const gmailFlowResource = resources.find((entry) => entry?.to === 'gmail-flow');
   assert.ok(gmailFlowResource, 'Gmail Flow runtime resources are missing from electron-builder configuration.');
+  assert.ok((gmailFlowResource.filter || []).includes('online-scheduler-client.js'), 'The online scheduler client must be bundled with Gmail Flow.');
   assert.equal(
     (gmailFlowResource.filter || []).includes('desktop/oauth-credentials.local.js'),
     false,
@@ -46,6 +66,11 @@ try {
   assert.equal(packageJson.build?.productName, 'CMOE Workspace', 'CMOE Workspace product name changed unexpectedly.');
   assert.equal(packageJson.build?.nsis?.include, 'build/installer.nsh', 'Installer maintenance UI must be included.');
   assert.equal(packageJson.build?.nsis?.deleteAppDataOnUninstall, false, 'Uninstall must preserve user data.');
+
+  const generatedGoogleConfigPath = path.join(workspaceRoot, 'desktop', 'google-oauth-client.generated.json');
+  const { readGeneratedReleaseCredentials } = require(path.join(workspaceRoot, 'desktop', 'google-oauth-release-config.js'));
+  const googleCredentials = readGeneratedReleaseCredentials(generatedGoogleConfigPath);
+  assert.ok(googleCredentials?.clientId && googleCredentials?.clientSecret, 'The local generated Google OAuth release configuration is missing or invalid.');
 
   console.log(`CMOE Workspace ${packageJson.version} build preflight passed (ExcelJS ${installedExcelJs.version}).`);
 } catch (error) {

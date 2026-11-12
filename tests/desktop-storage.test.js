@@ -21,7 +21,7 @@ const { JsonStorage } = require('../desktop/storage');
     fs.writeFileSync = originalWriteFileSync;
   }
   const reloaded = new JsonStorage(filePath);
-  assert.deepEqual(await reloaded.get({ first: false, second: false }), { first: true, second: true }, 'a transient write failure must not permanently poison later desktop storage writes');
+  assert.deepEqual(await reloaded.get({ first: false, second: false }), { first: false, second: true }, 'a failed write must not leak into later commits or permanently poison desktop storage');
   fs.rmSync(directory, { recursive: true, force: true });
   console.log('desktop storage tests passed');
 })().catch((error) => { console.error(error); process.exit(1); });

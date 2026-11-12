@@ -57,9 +57,9 @@ async function run() {
   const coachOutput = path.join(os.tmpdir(), `cmoe-workspace-coach-sheet-${process.pid}.xlsx`);
   await exportProjectWorkbook(coachOutput, calendarProject);
   const coachSheet = await readFirstWorksheet(coachOutput);
-  assert.equal(coachSheet.sheetName, '날짜별 일정 · 코치');
+  assert.equal(coachSheet.sheetName, '날짜별 일정 · 역할');
   assert.equal(coachSheet.matrix[0].includes('진행 코치'), true);
-  assert.equal(coachSheet.matrix[1][4], '김코치');
+  assert.equal(coachSheet.matrix[1][5], '김코치');
   calendarProject.data.layout.type = 'calendarZoom';
   const zoomOutput = path.join(os.tmpdir(), `cmoe-workspace-zoom-sheet-${process.pid}.xlsx`);
   await exportProjectWorkbook(zoomOutput, calendarProject);

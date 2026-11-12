@@ -5,6 +5,7 @@ dist/
 desktop-dist/
 node_modules/
 desktop/oauth-credentials.local.js
+workspace/desktop/google-oauth-client.generated.json
 outputs/
 workspace/desktop-dist/
 workspace/node_modules/

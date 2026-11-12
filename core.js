@@ -9,7 +9,7 @@
     const columnIds = Array.isArray(columns)
       ? new Set(columns.map((column) => cleanText(column?.id)).filter(Boolean))
       : null;
-    return (rows || []).filter((row) => Object.entries(row || {})
+    return (rows || []).filter((row) => row?.__workspaceActive !== false && Object.entries(row || {})
       .some(([key, value]) => !key.startsWith('__') && (!columnIds || columnIds.has(key)) && cleanText(value)));
   };
 

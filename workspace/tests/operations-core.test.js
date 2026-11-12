@@ -278,8 +278,8 @@ const zoomOutput = Ops.scheduleOutputTable(outputProject, 'calendarZoom');
 assert.deepEqual(listOutput.headers, ['날짜', '시작', '종료', '세션명', '역할', '이름', '상태', 'Zoom 링크']);
 assert.equal(listOutput.rows[0][7], 'https://zoom.example/j/output', 'the full list keeps the existing Zoom link column');
 assert.equal(coachOutput.headers.includes('진행 코치'), true);
-assert.equal(coachOutput.rows[0][4], '김코치');
-assert.equal(coachOutput.rows[0][5], people[0].name);
+assert.equal(coachOutput.rows[0][4], people[0].name);
+assert.equal(coachOutput.rows[0][5], '김코치');
 assert.equal(zoomOutput.headers.includes('Zoom 참가 링크'), true);
 assert.equal(zoomOutput.rows[0][5], 'https://zoom.example/j/output');
 assert.notEqual(Ops.scheduleToCsv(outputProject, 'calendarCoach'), Ops.scheduleToCsv(outputProject, 'calendarZoom'));
@@ -352,10 +352,10 @@ assert.notEqual(Ops.externalOperationFingerprint(formsProject, 'googleForm', for
 const registrationProject = { data: { columns: [], people: [], availability: {}, slots: [] } };
 const registrationPayload = {
   form: { items: [
-    { title: '성함', questionItem: { question: { questionId: 'registration-name' } } },
-    { title: '휴대폰 번호', questionItem: { question: { questionId: 'registration-phone' } } },
-    { title: '이메일 주소', questionItem: { question: { questionId: 'registration-email' } } },
-    { title: '소속·분류', questionItem: { question: { questionId: 'registration-group' } } }
+    { title: '성함', questionItem: { question: { questionId: 'registration-name', required: true, textQuestion: {} } } },
+    { title: '휴대폰 번호', questionItem: { question: { questionId: 'registration-phone', textQuestion: {} } } },
+    { title: '이메일 주소', questionItem: { question: { questionId: 'registration-email', textQuestion: {} } } },
+    { title: '소속·분류', questionItem: { question: { questionId: 'registration-group', textQuestion: {} } } }
   ] },
   responses: [
     { responseId: 'registration-1', answers: {
@@ -377,8 +377,11 @@ assert.equal(registrationProject.data.people.length, 1, 'duplicate registrations
 assert.equal(registrationProject.data.people[0].phone, '010-2222-2222', 'later duplicate registration data updates the same roster row');
 
 const availabilityForm = { items: [
-  { title: '참여자 고유번호', questionItem: { question: { questionId: 'availability-person' } } },
-  { title: '참여 가능한 시간', questionItem: { question: { questionId: 'availability-slots' } } }
+  { title: '참여자 고유번호', questionItem: { question: { questionId: 'availability-person', textQuestion: {} } } },
+  { title: '참여 가능한 시간', questionItem: { question: { questionId: 'availability-slots', required: true, choiceQuestion: { type: 'CHECKBOX', options: [
+    { value: '[slot-old] 2026-08-01 09:00-10:00 · 이전 시간' },
+    { value: '[slot-latest] 2026-08-01 10:00-11:00 · 최신 시간' }
+  ] } } } }
 ] };
 const availabilityResponse = (responseId, submittedAt, slotId) => ({
   responseId,
@@ -390,16 +393,24 @@ const availabilityResponse = (responseId, submittedAt, slotId) => ({
 });
 const availabilityProject = () => ({ data: {
   columns: [], people: [{ id: 'availability-person-1', name: '반복 응답자', email: '', values: {} }],
-  slots: [{ id: 'slot-old' }, { id: 'slot-latest' }], availability: {}
+  slots: [
+    { id: 'slot-old', date: '2026-08-01', startTime: '09:00', endTime: '10:00', label: '이전 시간' },
+    { id: 'slot-latest', date: '2026-08-01', startTime: '10:00', endTime: '11:00', label: '최신 시간' }
+  ], availability: {}
 } });
 const olderAvailability = availabilityResponse('response-old', '2026-08-01T01:00:00.000Z', 'slot-old');
 const latestAvailability = availabilityResponse('response-latest', '2026-08-01T02:00:00.000Z', 'slot-latest');
 const reverseOrderedAvailabilityProject = availabilityProject();
-const availabilityResult = Ops.applyGoogleFormResponses(reverseOrderedAvailabilityProject, { type: 'availability' }, { form: availabilityForm, responses: [latestAvailability, olderAvailability] });
+const availabilityLink = (project) => ({
+  type: 'availability',
+  availabilitySlotFingerprint: Ops.projectAvailabilitySlotFingerprint(project),
+  questionIds: { participantId: 'availability-person', slots: 'availability-slots' }
+});
+const availabilityResult = Ops.applyGoogleFormResponses(reverseOrderedAvailabilityProject, availabilityLink(reverseOrderedAvailabilityProject), { form: availabilityForm, responses: [latestAvailability, olderAvailability] });
 assert.equal(availabilityResult.changed, 1, 'repeat availability submissions count one changed person');
 assert.deepEqual(reverseOrderedAvailabilityProject.data.availability['availability-person-1'], ['slot-latest'], 'the latest submission wins even when API response order is reversed');
 const forwardOrderedAvailabilityProject = availabilityProject();
-Ops.applyGoogleFormResponses(forwardOrderedAvailabilityProject, { type: 'availability' }, { form: availabilityForm, responses: [olderAvailability, latestAvailability] });
+Ops.applyGoogleFormResponses(forwardOrderedAvailabilityProject, availabilityLink(forwardOrderedAvailabilityProject), { form: availabilityForm, responses: [olderAvailability, latestAvailability] });
 assert.deepEqual(forwardOrderedAvailabilityProject.data.availability['availability-person-1'], ['slot-latest'], 'latest-submission selection is deterministic across page/order changes');
 
 console.log('operations-core tests passed');

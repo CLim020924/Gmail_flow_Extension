@@ -20,7 +20,7 @@ function run() {
   let result = Core.createProject(state, { id: 'project-a', name: '프로젝트 A', preset: 'schedule' });
   state = result.state;
   assert.equal(state.activeProjectId, 'project-a');
-  assert.deepEqual(result.project.installedModules.sort(), ['layout', 'people', 'schedule']);
+  assert.deepEqual(result.project.installedModules.sort(), ['layout', 'people', 'projectCalendar', 'schedule']);
 
   result = Core.createProject(state, { id: 'project-b', name: '프로젝트 B', preset: 'full' });
   state = result.state;

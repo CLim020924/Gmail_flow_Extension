@@ -11,8 +11,8 @@ const { ExtensionManager } = require('../desktop/extension-manager');
   const sourcePath = fs.mkdtempSync(path.join(os.tmpdir(), 'cmoe-extension-source-'));
   const manager = new ExtensionManager({ bundledPath, userPath });
   const bundled = manager.list();
-  assert.equal(bundled.length, 6);
-  assert.deepEqual(bundled.map((item) => item.id), ['people', 'forms', 'schedule', 'layout', 'zoom', 'gmailFlow']);
+  assert.equal(bundled.length, 8);
+  assert.deepEqual(bundled.map((item) => item.id), ['people', 'forms', 'schedule', 'projectCalendar', 'layout', 'zoom', 'gmailFlow', 'documentEditor']);
   assert.ok(bundled.every((item) => item.integrity.startsWith('sha256-')));
 
   const packagePath = path.join(sourcePath, 'sample-source.cmoe-extension');

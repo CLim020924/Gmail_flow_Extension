@@ -110,6 +110,7 @@ const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const launchParams = new URLSearchParams(globalThis.location?.search || '');
 const isWindowMode = launchParams.get('mode') === 'window';
+const accessibilitySmoke = launchParams.get('a11ySmoke') === '1';
 const workspaceRosterManagerMode = launchParams.get('rosterManager') === '1';
 const rosterManagerMode = workspaceRosterManagerMode;
 const workspaceProjectId = launchParams.get('projectId') || '';
@@ -130,6 +131,8 @@ let variableAutocompleteState = null;
 let cloudSyncApplying = false;
 let cloudSyncContextRevision = 0;
 let connectionStatusRequestRevision = 0;
+let loginBrowserResolver = null;
+let loginBrowserView = null;
 const localAccountEpochIds = new Set();
 const localCloudApplyIds = new Set();
 let externalCloudApply = null;
@@ -140,6 +143,22 @@ if (rosterManagerMode) document.body.classList.add('roster-manager-mode');
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+function configureSheetSelector(node, label) {
+  node.tabIndex = 0;
+  node.setAttribute('role', 'button');
+  node.setAttribute('aria-label', label);
+  node.setAttribute('aria-pressed', 'false');
+  return node;
+}
+
+function gmailFlowAccessibilityIssues() {
+  const issues = [];
+  $$('dialog').forEach((dialog) => { const labelId = dialog.getAttribute('aria-labelledby'); if (!labelId || !document.getElementById(labelId)) issues.push(`${dialog.id}: aria-labelledby`); });
+  ['subject', 'body', 'postscript'].forEach((id) => { const control = document.getElementById(id); if (control?.getAttribute('aria-autocomplete') !== 'list' || control.getAttribute('aria-controls') !== 'variableAutocomplete' || !control.hasAttribute('aria-expanded')) issues.push(`${id}: autocomplete ARIA`); });
+  $$('#rosterTable .sheet-selector').forEach((selector) => { if (selector.tabIndex !== 0 || selector.getAttribute('role') !== 'button' || !selector.getAttribute('aria-label') || !selector.hasAttribute('aria-pressed')) issues.push('roster selector: keyboard semantics'); });
+  return issues;
+}
+globalThis.__gmailFlowAccessibilityDiagnostics = gmailFlowAccessibilityIssues;
 if (rosterManagerMode) {
   document.title = 'CMOE · 명단 준비';
   $('.header h1').textContent = '명단 준비';
@@ -369,7 +388,13 @@ function renderAttachments() {
 }
 
 async function addAttachments(files) {
-  const additions = await readAttachmentFiles(files);
+  const candidateFiles = [...files];
+  const declaredTotal = [...state.attachments, ...candidateFiles].reduce((sum, file) => sum + Number(file.size || 0), 0);
+  if (declaredTotal > 18 * 1024 * 1024) {
+    await showAlert('첨부파일 전체 크기는 18MB 이하여야 합니다.', '첨부파일 용량 초과');
+    return;
+  }
+  const additions = await readAttachmentFiles(candidateFiles);
   const total = [...state.attachments, ...additions].reduce((sum, file) => sum + file.size, 0);
   if (total > 18 * 1024 * 1024) {
     await showAlert('첨부파일 전체 크기는 18MB 이하여야 합니다.', '첨부파일 용량 초과');
@@ -382,6 +407,7 @@ async function addAttachments(files) {
 async function readAttachmentFiles(files) {
   const additions = [];
   for (const file of files) {
+    if (Number(file.size || 0) > 18 * 1024 * 1024) throw new Error('첨부파일 1개의 크기는 18MB 이하여야 합니다.');
     const data = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
     additions.push({ id: makeId(), name: file.name, type: file.type || 'application/octet-stream', size: file.size, data });
   }
@@ -402,7 +428,13 @@ function renderDraftEditAttachments() {
 }
 
 async function addDraftEditAttachments(files) {
-  const additions = await readAttachmentFiles(files);
+  const candidateFiles = [...files];
+  const declaredTotal = [...state.draftEditAttachments, ...candidateFiles].reduce((sum, file) => sum + Number(file.size || 0), 0);
+  if (declaredTotal > 18 * 1024 * 1024) {
+    await showAlert('첨부파일 전체 크기는 18MB 이하여야 합니다.', '첨부파일 용량 초과');
+    return;
+  }
+  const additions = await readAttachmentFiles(candidateFiles);
   const total = [...state.draftEditAttachments, ...additions].reduce((sum, file) => sum + Number(file.size || 0), 0);
   if (total > 18 * 1024 * 1024) {
     await showAlert('첨부파일 전체 크기는 18MB 이하여야 합니다.', '첨부파일 용량 초과');
@@ -416,7 +448,7 @@ function showPage(page) {
   closeMenus();
   state.page = page;
   $$('.page').forEach((panel) => panel.classList.toggle('active', panel.dataset.pagePanel === page));
-  $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.page === page));
+  $$('.nav-item').forEach((item) => { const active = item.dataset.page === page; item.classList.toggle('active', active); if (active) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
   state.backStack = [];
   $('#backButton').hidden = true;
   resetSubViews();
@@ -561,6 +593,7 @@ async function restoreWorkspace() {
   $('#emptyDraftCount').value = saved.compose.emptyDraftCount || '1';
   $('#emptyDraftToggle').textContent = state.emptyDraftEnabled ? '－' : '＋';
   $('#emptyDraftToggle').setAttribute('aria-expanded', String(state.emptyDraftEnabled));
+  $('#emptyDraftToggle').setAttribute('aria-label', state.emptyDraftEnabled ? '빈 초안 생성 설정 접기' : '빈 초안 생성 설정 펼치기');
   restoringWorkspace = false;
 }
 
@@ -604,7 +637,7 @@ async function saveOnlineSchedulerSettings({ test = false } = {}) {
     secret: $('#onlineSchedulerSecret').value.trim()
   };
   const saved = await sendRuntimeMessage({ type: 'online-scheduler-config-save', config });
-  state.onlineSchedulerConfig = { mode: saved.mode, url: saved.url, secret: saved.secret, verifiedAt: saved.verifiedAt || '' };
+  state.onlineSchedulerConfig = { mode: 'online', url: saved.url, secret: saved.secret, verifiedAt: saved.verifiedAt || '' };
   renderOnlineSchedulerStatus(test ? '설정을 저장했습니다. 연결을 확인하고 있습니다…' : '온라인 예약 발송 연결 정보를 저장했습니다.');
   updateComposeState();
   return state.onlineSchedulerConfig;
@@ -1199,8 +1232,10 @@ function insertComposeVariable(name) {
 }
 
 function hideVariableAutocomplete() {
+  const previousTarget = variableAutocompleteState?.target;
   variableAutocompleteState = null;
   const menu = $('#variableAutocomplete');
+  if (previousTarget) { previousTarget.setAttribute('aria-expanded', 'false'); previousTarget.removeAttribute('aria-activedescendant'); }
   menu.hidden = true;
   menu.replaceChildren();
 }
@@ -1241,13 +1276,15 @@ function renderVariableAutocomplete(target) {
   const starts = available.filter((name) => name.toLocaleLowerCase('ko-KR').startsWith(query));
   const contains = available.filter((name) => !starts.includes(name) && name.toLocaleLowerCase('ko-KR').includes(query));
   const items = [...starts, ...contains];
+  if (variableAutocompleteState?.target && variableAutocompleteState.target !== target) { variableAutocompleteState.target.setAttribute('aria-expanded', 'false'); variableAutocompleteState.target.removeAttribute('aria-activedescendant'); }
   variableAutocompleteState = { target, start: caret - match[0].length, caret, items, index: 0 };
   if (items.length) {
     menu.replaceChildren(...items.map((name, index) => {
-      const button = document.createElement('button'); button.type = 'button'; button.role = 'option'; button.dataset.variableAutocomplete = name; button.classList.toggle('active', index === 0); button.setAttribute('aria-selected', String(index === 0));
+      const button = document.createElement('button'); button.type = 'button'; button.id = `${target.id}-variable-option-${index}`; button.role = 'option'; button.dataset.variableAutocomplete = name; button.classList.toggle('active', index === 0); button.setAttribute('aria-selected', String(index === 0));
       const token = document.createElement('span'); token.textContent = `{${name}}`; const hint = document.createElement('small'); hint.textContent = index === 0 ? 'Enter' : '선택'; button.append(token, hint); return button;
     }));
   } else menu.innerHTML = '<div class="variable-autocomplete-empty">일치하는 명단 컬럼이 없습니다.</div>';
+  target.setAttribute('aria-expanded', 'true'); if (items.length) target.setAttribute('aria-activedescendant', `${target.id}-variable-option-0`); else target.removeAttribute('aria-activedescendant');
   const point = variableCaretPosition(target, caret); menu.hidden = false;
   const width = Math.min(360, Math.max(190, menu.offsetWidth));
   menu.style.left = `${Math.max(8, Math.min(point.left, innerWidth - width - 8))}px`;
@@ -1257,7 +1294,7 @@ function renderVariableAutocomplete(target) {
 function moveVariableAutocomplete(step) {
   const current = variableAutocompleteState; if (!current?.items.length) return;
   current.index = (current.index + step + current.items.length) % current.items.length;
-  $$('#variableAutocomplete [data-variable-autocomplete]').forEach((button, index) => { button.classList.toggle('active', index === current.index); button.setAttribute('aria-selected', String(index === current.index)); if (index === current.index) button.scrollIntoView({ block: 'nearest' }); });
+  $$('#variableAutocomplete [data-variable-autocomplete]').forEach((button, index) => { button.classList.toggle('active', index === current.index); button.setAttribute('aria-selected', String(index === current.index)); if (index === current.index) { current.target.setAttribute('aria-activedescendant', button.id); button.scrollIntoView({ block: 'nearest' }); } });
 }
 
 function renderPreviewItem(index) {
@@ -1302,10 +1339,9 @@ function renderRoster() {
   stateLetter.className = 'row-state-heading';
   stateLetter.title = '행 임시 제외 상태';
   letterRow.append(stateLetter);
-  const selectAllCorner = document.createElement('th');
+  const selectAllCorner = configureSheetSelector(document.createElement('th'), '명단 표 전체 선택');
   selectAllCorner.className = 'row-number sheet-selector';
   selectAllCorner.dataset.selectAll = 'true';
-  selectAllCorner.tabIndex = 0;
   selectAllCorner.title = '전체 표 선택';
   letterRow.append(selectAllCorner);
   const stateHeader = document.createElement('th');
@@ -1317,11 +1353,10 @@ function renderRoster() {
   headerRow.append(headerCorner);
 
   state.columns.forEach((column, index) => {
-    const letter = document.createElement('th');
+    const letter = configureSheetSelector(document.createElement('th'), `${columnLetter(index)}열 전체 선택`);
     letter.textContent = columnLetter(index);
     letter.className = 'sheet-selector column-letter';
     letter.dataset.selectColumn = String(index);
-    letter.tabIndex = 0;
     letter.title = `${columnLetter(index)}열 전체 선택`;
     letterRow.append(letter);
 
@@ -1368,11 +1403,10 @@ function renderRoster() {
       rowState.append(toggle);
     }
     tr.append(rowState);
-    const rowNumber = document.createElement('td');
+    const rowNumber = configureSheetSelector(document.createElement('td'), `${rowIndex + 1}행 전체 선택`);
     rowNumber.className = 'row-number sheet-selector';
     rowNumber.textContent = String(rowIndex + 1);
     rowNumber.dataset.selectRow = String(rowIndex);
-    rowNumber.tabIndex = 0;
     rowNumber.title = `${rowIndex + 1}행 전체 선택`;
     tr.append(rowNumber);
     state.columns.forEach((column, columnIndex) => {
@@ -1439,6 +1473,7 @@ function renderRoster() {
 
 function updateCellSelection() {
   $$('#rosterTable .selected-cell, #rosterTable .selection-anchor, #rosterTable .selected-selector').forEach((cell) => cell.classList.remove('selected-cell', 'selection-anchor', 'selected-selector'));
+  $$('#rosterTable .sheet-selector').forEach((cell) => cell.setAttribute('aria-pressed', 'false'));
   if (!cellSelection) return;
   const minRow = Math.min(cellSelection.startRow, cellSelection.endRow);
   const maxRow = Math.max(cellSelection.startRow, cellSelection.endRow);
@@ -1453,13 +1488,13 @@ function updateCellSelection() {
   });
   $$('#rosterHead [data-select-column]').forEach((cell) => {
     const column = Number(cell.dataset.selectColumn);
-    if (cellSelection.mode === 'column' && column >= minColumn && column <= maxColumn) cell.classList.add('selected-selector');
+    if (cellSelection.mode === 'column' && column >= minColumn && column <= maxColumn) { cell.classList.add('selected-selector'); cell.setAttribute('aria-pressed', 'true'); }
   });
   $$('#rosterBody [data-select-row]').forEach((cell) => {
     const row = Number(cell.dataset.selectRow);
-    if (cellSelection.mode === 'row' && row >= minRow && row <= maxRow) cell.classList.add('selected-selector');
+    if (cellSelection.mode === 'row' && row >= minRow && row <= maxRow) { cell.classList.add('selected-selector'); cell.setAttribute('aria-pressed', 'true'); }
   });
-  if (cellSelection.mode === 'all') $('#rosterHead [data-select-all]')?.classList.add('selected-selector');
+  if (cellSelection.mode === 'all') { const all = $('#rosterHead [data-select-all]'); all?.classList.add('selected-selector'); all?.setAttribute('aria-pressed', 'true'); }
 }
 
 function rosterPointerTarget(event) {
@@ -1676,6 +1711,7 @@ function parseDelimited(text) {
 }
 
 async function readDelimitedFile(file) {
+  if (Number(file?.size || 0) > 20 * 1024 * 1024) throw new Error('CSV·TSV 파일은 20MB 이하만 가져올 수 있습니다. 필요한 행만 새 파일로 저장한 뒤 다시 시도해주세요.');
   const bytes = new Uint8Array(await file.arrayBuffer());
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -2183,12 +2219,17 @@ function batchProgress(batch) {
   return batch.items.filter((item) => ['completed', 'failed', 'canceled', 'scheduled'].includes(item.status)).length;
 }
 
+function batchTotal(batch) {
+  const declared = Number(batch?.total);
+  return Number.isSafeInteger(declared) && declared >= 0 ? declared : (Array.isArray(batch?.items) ? batch.items.length : 0);
+}
+
 function renderOperationStatus() {
   const panel = $('#operationStatus');
   const batch = state.mailBatches.find((item) => !['completed', 'failed', 'canceled'].includes(item.status));
   if (!batch) { panel.hidden = true; return; }
   const processed = batchProgress(batch);
-  const total = batch.total || batch.items.length || 1;
+  const total = batchTotal(batch) || 1;
   const current = batch.items.find((item) => item.id === batch.currentItemId);
   const recipient = current ? (current.variables?.이름 || current.email || '받는 사람 없음') : '';
   $('#operationStatusTitle').textContent = `${batch.method} · ${statusText(batch.status)}`;
@@ -2210,7 +2251,7 @@ function renderHistory() {
     button.className = 'list-row';
     button.dataset.historyBatchId = batch.id;
     button.title = '클릭하여 대상별 기록 보기';
-    button.innerHTML = `<span>${escapeHtml(batch.name)}<br><small class="muted">${escapeHtml(formatDateTime(batch.createdAt))} · ${escapeHtml(batch.method)}${batch.schedulerMode === 'online' ? ' · 온라인' : ''}</small></span><span class="badge">${escapeHtml(statusText(batch.status))} ${batch.completed || 0}/${batch.total || batch.items.length}</span>`;
+    button.innerHTML = `<span>${escapeHtml(batch.name)}<br><small class="muted">${escapeHtml(formatDateTime(batch.createdAt))} · ${escapeHtml(batch.method)}${batch.schedulerMode === 'online' ? ' · 온라인' : ''}</small></span><span class="badge">${escapeHtml(statusText(batch.status))} ${escapeHtml(Number(batch.completed) || 0)}/${escapeHtml(batchTotal(batch))}</span>`;
     return button;
   }));
 }
@@ -2226,7 +2267,7 @@ function renderQueue() {
     const row = document.createElement('div');
     row.className = 'list-row queue-entry';
     const processed = batchProgress(batch);
-    const total = batch.total || batch.items.length;
+    const total = batchTotal(batch);
     const current = batch.items.find((item) => item.id === batch.currentItemId);
     const currentText = current ? ` · ${current.variables?.이름 || current.email || '대상'} 처리 중` : '';
     row.innerHTML = `<span class="queue-summary"><strong>${escapeHtml(batch.name)}</strong><small class="muted">${escapeHtml(statusText(batch.status))} · ${batch.schedulerMode === 'online' ? '온라인' : '이 PC'} · ${processed}/${total}${escapeHtml(currentText)}${batch.scheduledAt ? ` · ${escapeHtml(formatDateTime(batch.scheduledAt))}` : ''}</small><progress max="${total || 1}" value="${processed}"></progress></span><button class="button danger compact-action" type="button" data-cancel-batch-id="${escapeHtml(batch.id)}">취소</button>`;
@@ -2447,6 +2488,171 @@ function accountInitial(email) {
   return email ? email.trim().charAt(0).toUpperCase() : 'G';
 }
 
+function desktopLoginBrowserPickerAvailable() {
+  return typeof globalThis.gmailFlowDesktop?.listLoginBrowsers === 'function';
+}
+
+function setLoginBrowserStatus(message = '', tone = '') {
+  const status = $('#loginBrowserStatus');
+  status.textContent = message;
+  status.hidden = !message;
+  status.className = `login-browser-status${tone ? ` ${tone}` : ''}`;
+}
+
+function createLoginBrowserChoice({ id, label, description, icon, profileBrowserId = '' }) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `login-browser-choice${profileBrowserId ? ' login-browser-profile-choice' : ''}`;
+  if (profileBrowserId) {
+    button.dataset.loginBrowserProfile = id;
+    button.dataset.loginBrowserProfileBrowser = profileBrowserId;
+  } else {
+    button.dataset.loginBrowserChoice = id;
+  }
+  const iconNode = document.createElement('span');
+  iconNode.className = 'login-browser-choice-icon';
+  iconNode.setAttribute('aria-hidden', 'true');
+  iconNode.textContent = icon;
+  const copy = document.createElement('span');
+  copy.className = 'login-browser-choice-copy';
+  const title = document.createElement('strong');
+  title.textContent = label;
+  const detail = document.createElement('small');
+  detail.textContent = description;
+  copy.append(title, detail);
+  button.append(iconNode, copy);
+  return button;
+}
+
+function renderLoginBrowserChoices() {
+  if (!loginBrowserView) return;
+  loginBrowserView.stage = 'browsers';
+  loginBrowserView.browserId = '';
+  $('#loginBrowserDialogTitle').textContent = 'Google 로그인을 어디에서 열까요?';
+  $('#loginBrowserDialogDescription').textContent = '사용하려는 계정이 있는 브라우저를 고르세요. Chrome이나 Edge는 다음 화면에서 사용자를 선택할 수 있습니다.';
+  $('#loginBrowserBack').hidden = true;
+  setLoginBrowserStatus();
+  const descriptions = {
+    system: 'Windows에서 기본으로 정한 브라우저로 바로 엽니다.',
+    'windows-picker': 'Windows 앱 선택 화면에서 사용할 브라우저를 직접 고릅니다.',
+    chrome: '업무용·개인용 Chrome 사용자를 고른 뒤 로그인합니다.',
+    edge: '업무용·개인용 Edge 사용자를 고른 뒤 로그인합니다.'
+  };
+  const icons = { system: '기본', 'windows-picker': '···', chrome: 'C', edge: 'E' };
+  const container = $('#loginBrowserChoices');
+  container.removeAttribute('aria-busy');
+  container.replaceChildren();
+  loginBrowserView.choices.forEach((choice) => {
+    const button = createLoginBrowserChoice({
+      id: choice.id,
+      label: String(choice.label || choice.id),
+      description: descriptions[choice.id] || '선택한 브라우저에서 로그인합니다.',
+      icon: icons[choice.id] || '↗'
+    });
+    if (choice.id === 'windows-picker' || (loginBrowserView.choices.length % 2 === 1 && choice === loginBrowserView.choices.at(-1))) {
+      button.classList.add('login-browser-choice-wide');
+    }
+    container.append(button);
+  });
+}
+
+async function renderLoginBrowserProfiles(browserId) {
+  if (!loginBrowserView || !['chrome', 'edge'].includes(browserId)) return;
+  const activeView = loginBrowserView;
+  activeView.stage = 'profiles';
+  activeView.browserId = browserId;
+  const browserLabel = browserId === 'chrome' ? 'Chrome' : 'Edge';
+  const container = $('#loginBrowserChoices');
+  $('#loginBrowserDialogTitle').textContent = `${browserLabel} 사용자를 선택하세요`;
+  $('#loginBrowserDialogDescription').textContent = `${browserLabel}에 저장된 사용자 중 Google 로그인에 사용할 사용자를 고르세요.`;
+  $('#loginBrowserBack').hidden = false;
+  container.replaceChildren();
+  container.setAttribute('aria-busy', 'true');
+  setLoginBrowserStatus('브라우저 사용자를 확인하고 있습니다.');
+  let profiles;
+  try {
+    profiles = await globalThis.gmailFlowDesktop.listLoginBrowserProfiles(browserId);
+  } catch (error) {
+    profiles = [];
+    setLoginBrowserStatus(`${browserLabel} 사용자를 확인하지 못했습니다: ${error.message}`, 'error');
+  }
+  if (loginBrowserView !== activeView || activeView.stage !== 'profiles' || activeView.browserId !== browserId || !$('#loginBrowserDialog').open) return;
+  profiles = (Array.isArray(profiles) ? profiles : [])
+    .filter((profile) => /^[A-Za-z0-9_-]{43}$/.test(String(profile?.id || '')))
+    .slice(0, 100);
+  container.removeAttribute('aria-busy');
+  container.replaceChildren();
+  if (!profiles.length) {
+    if ($('#loginBrowserStatus').hidden) {
+      setLoginBrowserStatus(`${browserLabel} 사용자를 찾지 못했습니다. 브라우저를 한 번 실행한 뒤 다시 시도하거나 다른 브라우저를 선택하세요.`, 'error');
+    }
+    $('#loginBrowserBack').focus();
+    return;
+  }
+  setLoginBrowserStatus();
+  profiles.forEach((profile) => {
+    const label = String(profile.label || `${browserLabel} 사용자`).trim().slice(0, 80) || `${browserLabel} 사용자`;
+    const account = String(profile.account || '').trim().slice(0, 320);
+    const button = createLoginBrowserChoice({
+      id: profile.id,
+      label,
+      description: `${account || '이 브라우저 사용자'}${profile.isLastUsed ? ' · 최근 사용' : ''}`,
+      icon: Array.from(label)[0]?.toUpperCase() || '●',
+      profileBrowserId: browserId
+    });
+    container.append(button);
+  });
+  setTimeout(() => container.querySelector('button')?.focus());
+}
+
+function resolveLoginBrowser(value) {
+  const dialog = $('#loginBrowserDialog');
+  if (dialog.open) dialog.close();
+  const resolver = loginBrowserResolver;
+  loginBrowserResolver = null;
+  loginBrowserView = null;
+  resolver?.(value || null);
+}
+
+async function chooseLoginBrowser() {
+  if (!desktopLoginBrowserPickerAvailable()) return { browserId: 'system' };
+  let choices;
+  try {
+    choices = await globalThis.gmailFlowDesktop.listLoginBrowsers();
+  } catch (error) {
+    // The legacy standalone Gmail Flow executable has no browser-picker IPC.
+    // Keep its existing default-browser login instead of blocking connection.
+    if (/no handler (?:registered|found).*connection:login-browsers|connection:login-browsers.*no handler/i.test(String(error?.message || error))) {
+      return { browserId: 'system' };
+    }
+    throw error;
+  }
+  const allowed = new Set(['system', 'windows-picker', 'chrome', 'edge']);
+  choices = (Array.isArray(choices) ? choices : [])
+    .filter((choice) => allowed.has(choice?.id))
+    .filter((choice, index, list) => list.findIndex((item) => item.id === choice.id) === index);
+  if (!choices.length) choices = [{ id: 'system', label: '기본 브라우저' }];
+  if (loginBrowserResolver) resolveLoginBrowser(null);
+  loginBrowserView = { stage: 'browsers', browserId: '', choices };
+  renderLoginBrowserChoices();
+  const result = new Promise((resolve) => { loginBrowserResolver = resolve; });
+  $('#loginBrowserDialog').showModal();
+  setTimeout(() => $('#loginBrowserChoices button')?.focus());
+  return result;
+}
+
+function publicGoogleLoginError(error) {
+  const message = String(error?.message || error || '').trim();
+  if (error?.code === 'GOOGLE_OAUTH_CONFIG_REQUIRED'
+    || /client[_ ]secret|client id|OAuth (?:JSON|관리자 설정)|데스크톱 OAuth|Google Cloud|manifest\.json/i.test(message)) {
+    return '이 설치본에서 Google 로그인을 준비할 수 없습니다. 최신 설치본을 다시 설치해주세요.';
+  }
+  if (['LOGIN_BROWSER_UNAVAILABLE', 'LOGIN_BROWSER_LAUNCH_FAILED'].includes(error?.code)) return '선택한 브라우저를 실행할 수 없습니다. 다른 브라우저를 선택해주세요.';
+  if (['LOGIN_BROWSER_PROFILE_NOT_ALLOWED', 'LOGIN_BROWSER_PROFILE_UNAVAILABLE'].includes(error?.code)) return '선택한 브라우저 사용자를 찾을 수 없습니다. 사용자를 다시 선택해주세요.';
+  if (error?.code === 'LOGIN_BROWSER_PICKER_UNAVAILABLE') return 'Windows 브라우저 선택 화면을 열 수 없습니다. Chrome이나 Edge를 직접 선택해주세요.';
+  return message || 'Google 로그인 중 문제가 발생했습니다. 다시 시도해주세요.';
+}
+
 async function updateConnectionStatus() {
   const requestRevision = ++connectionStatusRequestRevision;
   const status = await withCloudNetworkLock(() => sendRuntimeMessage({ type: 'connection-status' }));
@@ -2455,19 +2661,21 @@ async function updateConnectionStatus() {
   state.connectedEmail = status.connected ? status.email || '' : '';
   if (previousEmail !== String(state.connectedEmail || '').trim().toLowerCase()) cloudSyncContextRevision += 1;
   state.rememberedEmail = status.rememberedEmail || status.email || state.rememberedEmail || '';
-  $('#oauthSetupHelp').hidden = status.configured;
+  const permissionNeeded = status.errorCode === 'AUTH_SCOPE_REQUIRED' && Boolean(state.rememberedEmail);
+  const displayEmail = status.connected ? status.email || '' : permissionNeeded ? state.rememberedEmail : '';
   $('#connectGmail').hidden = status.connected || !status.configured;
+  $('#connectGmail').textContent = permissionNeeded ? 'Gmail Flow 권한 확인' : 'Google 계정 연결';
   $('#switchGmail').hidden = !status.connected;
   $('#disconnectGmail').hidden = !status.connected;
-  $('#accountAvatar').textContent = accountInitial(state.connectedEmail);
-  $('#accountSummaryAvatar').textContent = accountInitial(state.connectedEmail);
+  $('#accountAvatar').textContent = accountInitial(displayEmail);
+  $('#accountSummaryAvatar').textContent = accountInitial(displayEmail);
   $('#accountAvatar').classList.toggle('disconnected', !status.connected);
   $('#accountSummaryAvatar').classList.toggle('disconnected', !status.connected);
-  $('#accountButtonText').textContent = status.connected ? (status.email || '연결됨') : 'Google 계정';
-  $('#accountSummaryEmail').textContent = status.connected ? (status.email || 'Google 계정') : '연결된 계정 없음';
+  $('#accountButtonText').textContent = displayEmail || 'Google 계정';
+  $('#accountSummaryEmail').textContent = displayEmail || '연결된 계정 없음';
   $('#gmailConnectionStatus').textContent = !status.configured
-    ? 'OAuth 클라이언트 ID 설정이 필요합니다.'
-    : (status.connected ? 'Gmail 발송 권한이 연결되어 있습니다.' : 'Google 계정을 연결해 주세요.');
+    ? '이 설치본에서 Google 로그인을 준비할 수 없습니다. 최신 설치본을 다시 설치해주세요.'
+    : (status.connected ? 'Gmail 발송 권한이 연결되어 있습니다.' : permissionNeeded ? 'Workspace Gmail 계정이 반영되었습니다. Gmail Flow 사용 권한을 한 번 확인해주세요.' : 'Google 계정을 연결해 주세요.');
   if (state.dataStorageMode === 'drive' && !status.connected) renderCloudSyncStatus('Google Drive 동기화를 계속하려면 Google 계정을 연결해주세요.');
   return status;
 }
@@ -2477,35 +2685,41 @@ async function requestGmailConnection({ switchAccount = false } = {}) {
   let connected = false;
   buttons.forEach((button) => { button.disabled = true; });
   try {
+    const browserSelection = await chooseLoginBrowser();
+    if (!browserSelection?.browserId) return false;
+    if (switchAccount) await waitForCloudSyncIdle();
+    const result = await withCloudNetworkLock(async () => {
+      if (switchAccount && !desktopLoginBrowserPickerAvailable()) {
+        await chrome.identity.clearAllCachedAuthTokens();
+      }
+      const scopes = state.dataStorageMode === 'drive' ? [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE] : [GMAIL_SCOPE];
+      const authOptions = {
+        interactive: true,
+        scopes,
+        loginHint: '',
+        selectAccount: true
+      };
+      if (desktopLoginBrowserPickerAvailable()) {
+        authOptions.browserId = browserSelection.browserId;
+        authOptions.browserProfileId = browserSelection.browserProfileId || '';
+      }
+      return chrome.identity.getAuthToken(authOptions);
+    });
+    const token = typeof result === 'string' ? result : result?.token;
+    if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
     if (switchAccount || (state.dataStorageMode === 'drive' && !state.connectedEmail)) {
       cloudSyncContextRevision += 1;
       connectionStatusRequestRevision += 1;
       clearTimeout(cloudSyncTimer);
       cloudSyncTimer = null;
-      state.connectedEmail = '';
       await announceCloudAccountTransition();
     }
-    const result = await withCloudNetworkLock(async () => {
-      if (switchAccount) {
-        await waitForCloudSyncIdle();
-        await chrome.identity.clearAllCachedAuthTokens();
-      }
-      const scopes = state.dataStorageMode === 'drive' ? [GMAIL_SCOPE, DRIVE_APPDATA_SCOPE] : [GMAIL_SCOPE];
-      return chrome.identity.getAuthToken({
-        interactive: true,
-        scopes,
-        loginHint: switchAccount ? '' : state.rememberedEmail,
-        selectAccount: switchAccount
-      });
-    });
-    const token = typeof result === 'string' ? result : result?.token;
-    if (!token) throw new Error('Gmail 인증 토큰을 받지 못했습니다.');
     await sendRuntimeMessage({ type: 'resume-after-auth' });
     await updateConnectionStatus();
     await refreshMailActivity();
     connected = true;
   } catch (error) {
-    await showAlert(error.message);
+    await showAlert(publicGoogleLoginError(error));
     if (switchAccount) { try { await updateConnectionStatus(); } catch (_) {} }
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
@@ -2522,6 +2736,47 @@ function closeMenus() {
 }
 
 function bindEvents() {
+  if (typeof globalThis.gmailFlowDesktop?.onWorkspaceAccountChanged === 'function') {
+    globalThis.gmailFlowDesktop.onWorkspaceAccountChanged(() => {
+      connectionStatusRequestRevision += 1;
+      clearTimeout(cloudSyncTimer);
+      cloudSyncTimer = null;
+      void updateConnectionStatus().then(async (status) => {
+        await refreshMailActivity();
+        if (state.dataStorageMode === 'drive') {
+          renderCloudSyncStatus(status.connected
+            ? 'Workspace 계정 변경을 반영했습니다. Drive 동기화 상태를 다시 확인해주세요.'
+            : 'Workspace의 Gmail 계정을 다시 연결하면 Drive 동기화를 계속합니다.');
+        }
+      }).catch((error) => {
+        $('#gmailConnectionStatus').textContent = error.message;
+      });
+    });
+  }
+  $('#loginBrowserDialog').addEventListener('click', (event) => {
+    const profile = event.target.closest('[data-login-browser-profile]');
+    if (profile) {
+      resolveLoginBrowser({
+        browserId: profile.dataset.loginBrowserProfileBrowser,
+        browserProfileId: profile.dataset.loginBrowserProfile
+      });
+      return;
+    }
+    const choice = event.target.closest('[data-login-browser-choice]');
+    if (!choice) return;
+    const browserId = choice.dataset.loginBrowserChoice;
+    if (!browserId) resolveLoginBrowser(null);
+    else if (['chrome', 'edge'].includes(browserId)) void renderLoginBrowserProfiles(browserId);
+    else resolveLoginBrowser({ browserId });
+  });
+  $('#loginBrowserBack').addEventListener('click', () => {
+    renderLoginBrowserChoices();
+    setTimeout(() => $('#loginBrowserChoices button')?.focus());
+  });
+  $('#loginBrowserDialog').addEventListener('cancel', (event) => {
+    event.preventDefault();
+    resolveLoginBrowser(null);
+  });
   $('#inputDialogForm').addEventListener('submit', (event) => {
     event.preventDefault();
     const control = $('#inputDialogSelect').hidden ? $('#inputDialogValue') : $('#inputDialogSelect');
@@ -2557,6 +2812,14 @@ function bindEvents() {
     }
     const activeInSheet = $('#rosterTable').contains(document.activeElement);
     if (state.page !== 'roster' || !activeInSheet) return;
+    const columnSelector = document.activeElement.closest?.('[data-select-column]'); const rowSelector = document.activeElement.closest?.('[data-select-row]'); const allSelector = document.activeElement.closest?.('[data-select-all]');
+    if (['Enter', ' '].includes(event.key) && (columnSelector || rowSelector || allSelector)) {
+      event.preventDefault();
+      if (columnSelector) { const column = Number(columnSelector.dataset.selectColumn); cellSelection = { startRow: -1, endRow: Math.max(-1, state.rows.length - 1), startColumn: column, endColumn: column, dragging: false, rangeDragging: false, mode: 'column' }; }
+      else if (rowSelector) { const row = Number(rowSelector.dataset.selectRow); cellSelection = { startRow: row, endRow: row, startColumn: 0, endColumn: Math.max(0, state.columns.length - 1), dragging: false, rangeDragging: false, mode: 'row' }; }
+      else cellSelection = { startRow: -1, endRow: Math.max(-1, state.rows.length - 1), startColumn: 0, endColumn: Math.max(0, state.columns.length - 1), dragging: false, rangeDragging: false, mode: 'all' };
+      updateCellSelection(); return;
+    }
     const editingCell = document.activeElement.matches('.cell-input');
     if ((event.key === 'Delete' || event.key === 'Backspace') && cellSelection && (!editingCell || isMultiCellSelection())) {
       event.preventDefault();
@@ -2673,6 +2936,7 @@ function bindEvents() {
     state.emptyDraftEnabled = !state.emptyDraftEnabled;
     $('#emptyDraftToggle').textContent = state.emptyDraftEnabled ? '－' : '＋';
     $('#emptyDraftToggle').setAttribute('aria-expanded', String(state.emptyDraftEnabled));
+    $('#emptyDraftToggle').setAttribute('aria-label', state.emptyDraftEnabled ? '빈 초안 생성 설정 접기' : '빈 초안 생성 설정 펼치기');
     updateComposeState();
   });
   $('#emptyDraftCount').addEventListener('input', updateComposeState);
@@ -2717,7 +2981,7 @@ function bindEvents() {
     const count = work.items.length;
     const connection = await sendRuntimeMessage({ type: 'connection-status' });
     if (!connection.configured || !connection.connected) {
-      await showAlert(connection.configured ? '먼저 설정에서 Gmail 계정을 연결해주세요.' : '먼저 manifest.json에 Google OAuth 클라이언트 ID를 설정해주세요.');
+      await showAlert(connection.configured ? '먼저 설정에서 Gmail 계정을 연결해주세요.' : '이 설치본에서 Google 로그인을 준비할 수 없습니다. 최신 설치본을 다시 설치해주세요.');
       $('#settingsDialog').showModal();
       await updateConnectionStatus();
       return;
@@ -3077,6 +3341,7 @@ function bindEvents() {
   $('#accountButton').addEventListener('click', async () => {
     $('#settingsDialog').showModal();
     renderCloudSyncStatus();
+    renderOnlineSchedulerStatus();
     try { await updateConnectionStatus(); } catch (error) { $('#gmailConnectionStatus').textContent = error.message; }
   });
   $('#onlineSchedulerUrl').addEventListener('input', () => { state.onlineSchedulerConfig.url = $('#onlineSchedulerUrl').value; state.onlineSchedulerConfig.verifiedAt = ''; updateComposeState(); });
@@ -3258,6 +3523,30 @@ function bindEvents() {
   });
 }
 
+async function flushCloudSyncForClose(timeoutMs = 2500) {
+  if (state.dataStorageMode !== 'drive' || (!cloudSyncTracker.dirty && !cloudSyncBusy)) return true;
+  if (!state.connectedEmail) {
+    const remoteError = 'Google Drive 저장 모드이지만 연결된 Google 계정이 없습니다.';
+    renderCloudSyncStatus(`이 PC 저장 완료 · Drive 동기화 보류 · ${remoteError}`);
+    return { ok: true, localSaved: true, remotePending: true, remoteError };
+  }
+  let timeout = null;
+  const outcome = await Promise.race([
+    flushCloudSync().then(
+      () => ({ settled: true, ok: true, error: null }),
+      (error) => ({ settled: true, ok: false, error })
+    ),
+    new Promise((resolve) => { timeout = setTimeout(() => resolve({ settled: false, ok: false, error: null }), timeoutMs); })
+  ]);
+  clearTimeout(timeout);
+  if (outcome.settled && outcome.ok) return true;
+  const remoteError = outcome.error?.message || (outcome.settled
+    ? 'Google Drive 동기화를 완료하지 못했습니다.'
+    : 'Google Drive 동기화가 백그라운드에서 아직 끝나지 않았습니다.');
+  renderCloudSyncStatus(`이 PC 저장 완료 · Drive 동기화 보류 · ${remoteError}`);
+  return { ok: true, localSaved: true, remotePending: true, remoteError };
+}
+
 globalThis.flushWorkspaceEdits = async () => {
   clearTimeout(workspaceSaveTimer);
   workspaceSaveTimer = null;
@@ -3273,8 +3562,8 @@ globalThis.flushWorkspaceEdits = async () => {
     return true;
   }
   await flushWorkspaceSave();
-  await flushCloudSync();
-  return true;
+  await withCloudStorageLock(() => cloudStorageWriteTail);
+  return flushCloudSyncForClose();
 };
 
 async function init() {
@@ -3316,6 +3605,8 @@ async function init() {
   renderOnlineSchedulerStatus();
   updateComposeState();
   showPage(rosterManagerMode ? 'roster' : state.page);
+  const accessibilityIssues = gmailFlowAccessibilityIssues();
+  if (accessibilitySmoke && accessibilityIssues.length) throw new Error(`Gmail Flow accessibility smoke failed: ${accessibilityIssues.join(', ')}`);
   restoringWorkspace = false;
   try {
     const connection = await updateConnectionStatus();

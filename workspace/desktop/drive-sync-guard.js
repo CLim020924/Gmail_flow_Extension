@@ -17,6 +17,16 @@ function isUsableDriveEtag(value) {
   return Boolean(etag && !/^W\//i.test(etag));
 }
 
+function hasStableDriveReadIdentity(value = {}) {
+  return Boolean(String(value.fileId || value.id || '').trim()
+    && String(value.version || '').trim()
+    && String(value.modifiedTime || '').trim());
+}
+
+function canConditionallyOverwriteDriveFile(value = {}) {
+  return isUsableDriveEtag(value.etag);
+}
+
 function normalizeSnapshot(snapshot = {}) {
   return {
     fileId: String(snapshot.fileId || snapshot.id || ''),
@@ -43,7 +53,8 @@ function normalizeGuard(value) {
   const state = ['ready', 'empty', 'conflict'].includes(value.state) ? value.state : '';
   if (!state) return null;
   const snapshot = normalizeSnapshot(value);
-  if (state === 'ready' && (!snapshot.fileId || !isUsableDriveEtag(snapshot.etag))) return null;
+  if (state === 'ready' && (!snapshot.fileId
+    || (!isUsableDriveEtag(snapshot.etag) && !hasStableDriveReadIdentity(snapshot)))) return null;
   return {
     state,
     ...snapshot,
@@ -108,6 +119,8 @@ module.exports = {
   connectionGuardKey,
   canonicalJson,
   drivePayloadsEqual,
+  canConditionallyOverwriteDriveFile,
+  hasStableDriveReadIdentity,
   isUsableDriveEtag,
   normalizeGuard,
   normalizeSnapshot
