@@ -137,7 +137,7 @@
   let workflowEditorDraft = [];
   let workflowEditorTemplateDraft = null;
   let gmailFlowSummary = { connected: false, email: '', rosters: 0, templates: 0, structures: 0 };
-  let appUpdateState = { currentVersion: '', packaged: false, portable: false, checking: false, installing: false, canceling: false, checked: null, progress: null, error: '' };
+  let appUpdateState = { currentVersion: '', packaged: false, portable: false, checking: false, installing: false, canceling: false, completed: false, checked: null, progress: null, error: '' };
   let cloudBackupBusy = false;
   let promptedUpdateVersion = '';
   let approvedUpdateVersion = '';
@@ -6026,8 +6026,36 @@
     cancel.hidden = !appUpdateState.installing || appUpdateState.portable;
     cancel.disabled = Boolean(appUpdateState.canceling);
     install.textContent = appUpdateState.portable ? '설치형으로 전환' : appUpdateState.installing ? '업데이트 준비 중…' : '다운로드 후 업데이트';
-    progress.hidden = !appUpdateState.progress;
-    if (appUpdateState.progress) progress.textContent = `다운로드 ${Math.round(appUpdateState.progress.percent || 0)}% · ${Math.round((appUpdateState.progress.received || 0) / 1024 / 1024)}MB / ${Math.round((appUpdateState.progress.total || 0) / 1024 / 1024)}MB`;
+    const updateProgress = appUpdateState.progress || {};
+    const stage = String(updateProgress.stage || (appUpdateState.installing ? 'starting' : ''));
+    const downloadStage = ['starting', 'connecting', 'downloading', 'verifying', 'verified'].includes(stage);
+    progress.hidden = !appUpdateState.installing && !appUpdateState.progress;
+    if (!progress.hidden) progress.textContent = downloadStage
+      ? `${updateProgress.message || '업데이트 준비 중…'}${updateProgress.total ? ` · ${Math.round(updateProgress.percent || 0)}% · ${Math.round((updateProgress.received || 0) / 1024 / 1024)}MB / ${Math.round(updateProgress.total / 1024 / 1024)}MB` : ''}`
+      : updateProgress.message || '업데이트를 준비하고 있습니다.';
+    const dialog = $('#appUpdateDialog');
+    if (!dialog) return;
+    const showDialog = appUpdateState.installing || appUpdateState.completed || Boolean(appUpdateState.error && appUpdateState.progress);
+    if (showDialog && !dialog.open) openDialog('appUpdateDialog');
+    const stageIndex = { starting: 1, connecting: 1, downloading: 1, verifying: 2, verified: 2, saving: 3, 'backup-local': 3, 'backup-cloud': 3, installing: 4, complete: 4, error: 1 }[stage] || 1;
+    $$('#appUpdateStageIndicator span').forEach((item, index) => item.classList.toggle('active', index < stageIndex));
+    dialog.classList.toggle('update-complete', appUpdateState.completed || stage === 'complete');
+    dialog.classList.toggle('update-error', Boolean(appUpdateState.error || stage === 'error'));
+    $('#appUpdateDialogTitle').textContent = appUpdateState.completed ? '업데이트 완료' : appUpdateState.error ? '업데이트를 완료하지 못했습니다' : `CMOE Workspace ${latest || ''} 업데이트`.trim();
+    $('#appUpdateDialogStatus').textContent = appUpdateState.error || updateProgress.message || '업데이트를 준비하고 있습니다.';
+    const dialogProgress = $('#appUpdateDialogProgress');
+    if (downloadStage || appUpdateState.completed || stage === 'error') dialogProgress.value = appUpdateState.completed ? 100 : Number(updateProgress.percent || 0);
+    else dialogProgress.removeAttribute('value');
+    $('#appUpdateDialogDetail').textContent = appUpdateState.completed
+      ? `CMOE Workspace ${appUpdateState.currentVersion}으로 업데이트되었습니다.`
+      : stage === 'installing' ? '잠시 후 앱이 닫히고 설치가 끝나면 자동으로 한 번 다시 실행됩니다.'
+        : appUpdateState.error ? '앱과 기존 자료는 그대로 유지됩니다. 오류 내용을 확인한 뒤 다시 시도해주세요.'
+          : downloadStage ? '다운로드 중에도 취소할 수 있습니다. 파일 검증 후에는 작업 저장과 백업을 진행합니다.'
+            : '사용자 프로젝트·명단·템플릿을 보존하기 위한 단계입니다. 앱을 강제로 종료하지 마세요.';
+    const canCancel = appUpdateState.installing && ['starting', 'connecting', 'downloading'].includes(stage) && !appUpdateState.portable;
+    $('#cancelAppUpdateDialog').hidden = !canCancel;
+    $('#cancelAppUpdateDialog').disabled = Boolean(appUpdateState.canceling);
+    $('#closeAppUpdateDialog').hidden = appUpdateState.installing;
   }
 
   async function checkAppUpdate({ quiet = false } = {}) {
@@ -7616,6 +7644,9 @@
       approvedUpdateVersion = '';
       if (!alreadyApproved && !await showConfirm(`CMOE Workspace ${targetVersion}을 내려받아 검증한 뒤 업데이트할까요?\n작업 내용을 저장하고 앱을 종료한 다음 같은 위치에 설치하고 한 번만 다시 실행합니다.`, { title: '프로그램 업데이트', action: '업데이트' })) return;
       appUpdateState.installing = true; appUpdateState.error = ''; renderAppUpdate();
+      appUpdateState.completed = false;
+      appUpdateState.progress = { stage: 'starting', message: `CMOE Workspace ${targetVersion} 업데이트를 준비하고 있습니다.`, received: 0, total: Number(appUpdateState.checked?.feed?.bytes || 0), percent: 0 };
+      renderAppUpdate();
       try { await globalThis.workspaceDesktop.installUpdate(); }
       catch (error) { appUpdateState.installing = false; appUpdateState.progress = null; appUpdateState.error = error.message; renderAppUpdate(); showToast(`업데이트를 시작하지 못했습니다: ${error.message}`, 'error'); }
     });
@@ -7628,6 +7659,9 @@
       } catch (error) { showToast(`다운로드를 취소하지 못했습니다: ${error.message}`, 'error'); }
       finally { appUpdateState.canceling = false; renderAppUpdate(); }
     });
+    $('#cancelAppUpdateDialog').addEventListener('click', () => $('#cancelAppUpdate').click());
+    $('#closeAppUpdateDialog').addEventListener('click', () => { appUpdateState.completed = false; appUpdateState.progress = null; closeDialog('appUpdateDialog'); });
+    $('#appUpdateDialog').addEventListener('cancel', (event) => { if (appUpdateState.installing) event.preventDefault(); });
     $('#mailEditForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const submitButton = $('#mailEditForm button[type="submit"]');
@@ -9292,7 +9326,18 @@
       $('#appVersion').textContent = `CMOE Workspace ${info.version}`;
       appUpdateState = { ...appUpdateState, currentVersion: info.version };
       try { appUpdateState = { ...appUpdateState, ...(await globalThis.workspaceDesktop.getUpdateStatus()) }; } catch (_) {}
-      globalThis.workspaceDesktop.onUpdateProgress?.((progress) => { appUpdateState.progress = progress; renderAppUpdate(); });
+      globalThis.workspaceDesktop.onUpdateProgress?.((progress) => {
+        appUpdateState.progress = progress;
+        if (progress?.stage === 'error') { appUpdateState.installing = false; appUpdateState.error = progress.message || '업데이트를 완료하지 못했습니다.'; }
+        renderAppUpdate();
+      });
+      if (info.updated) {
+        appUpdateState.completed = true;
+        appUpdateState.progress = { stage: 'complete', message: `CMOE Workspace ${info.version} 업데이트가 완료되었습니다.`, percent: 100 };
+      } else if (info.updateFailed) {
+        appUpdateState.error = '업데이트 설치를 완료하지 못해 기존 앱을 다시 실행했습니다.';
+        appUpdateState.progress = { stage: 'error', message: appUpdateState.error, percent: 100 };
+      }
       renderAppUpdate();
       if (appUpdateState.packaged && !smokeDiagnostics) setTimeout(() => void checkAppUpdate({ quiet: true }), 1500);
       globalThis.workspaceDesktop.onStateChanged((nextState) => {

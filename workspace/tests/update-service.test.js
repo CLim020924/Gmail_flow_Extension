@@ -25,7 +25,7 @@ const feed = {
   });
   assert.equal(checked.available, true);
   const command = updater.helperCommand({ installerPath: `C:/Temp/test's setup.exe`, expectedSha256: 'a'.repeat(64), expectedBytes: 123, expectedVersion: '1.5.10', appPath: 'C:/Apps/CMOE Workspace.exe', pid: 123 });
-  assert.match(command, /Get-Process -Id 123/); assert.match(command, /\.Path/); assert.match(command, /Wait-Process -Id 123/); assert.match(command, /\.Length -ne 123/); assert.match(command, /Get-FileHash/); assert.match(command, /FileVersion/); assert.match(command, /1\.5\.10/); assert.match(command, /test''s setup\.exe/);
+  assert.match(command, /Get-Process -Id 123/); assert.match(command, /SilentlyContinue/); assert.match(command, /if\(\$target\)/); assert.match(command, /\.Path/); assert.match(command, /Wait-Process -Id 123/); assert.match(command, /\.Length -ne 123/); assert.match(command, /Get-FileHash/); assert.match(command, /FileVersion/); assert.match(command, /--update-failed/); assert.match(command, /1\.5\.10/); assert.match(command, /test''s setup\.exe/);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cmoe-update-cancel-'));
   const cancelController = new AbortController(); cancelController.abort();
   const oneByte = Buffer.from([0]);
@@ -39,6 +39,11 @@ const feed = {
       /취소/
     );
     assert.equal(fs.existsSync(path.join(directory, 'update.exe.partial')), false, 'a canceled update must remove the partial installer');
+    const progressEvents = [];
+    const downloaded = await updater.downloadInstaller(cancelFeed, path.join(directory, 'update.exe'), async () => new Response(oneByte, { status: 200, headers: { 'content-length': String(oneByte.length) } }), (progress) => progressEvents.push(progress));
+    assert.equal(fs.readFileSync(downloaded).equals(oneByte), true);
+    assert.deepEqual([...new Set(progressEvents.map(({ stage }) => stage))], ['connecting', 'downloading', 'verifying', 'verified']);
+    assert.equal(progressEvents.at(-1).percent, 100);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   const backupFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'cmoe-update-backup-'));
   try {

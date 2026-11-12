@@ -171,6 +171,15 @@ const activeConnectionAuthorizationRequests = new Set();
 const startedConnectionAuthorizationRequests = new Set();
 const queuedConnectionAuthorizationCancels = new Set();
 
+function broadcastUpdateProgress(progress, preferredSender = null) {
+  const senders = new Set([
+    preferredSender,
+    mainWindow?.webContents,
+    ...[...programWindows.values()].map((window) => window?.webContents)
+  ].filter((sender) => sender && !sender.isDestroyed()));
+  senders.forEach((sender) => sender.send('workspace:update-progress', progress));
+}
+
 function activeBrowserPickerWindowHandle() {
   const owner = BrowserWindow.getFocusedWindow() || mainWindow;
   if (!owner || owner.isDestroyed()) return '';
@@ -1077,7 +1086,7 @@ function registerIpc() {
       return { ok: true, state: next, merged: mergedState.merged, externalConflict, externalConflictReason };
     });
   });
-  ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData') }));
+  ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData'), updated: process.argv.includes('--updated'), updateFailed: process.argv.includes('--update-failed') }));
   ipcMain.handle('workspace:update-status', () => ({ currentVersion: app.getVersion(), packaged: app.isPackaged, portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR), checked: lastUpdateCheck }));
   ipcMain.handle('workspace:update-check', async () => {
     lastUpdateCheck = await UpdateService.checkForUpdate(app.getVersion());
@@ -1092,10 +1101,12 @@ function registerIpc() {
     const updateRoot = path.join(app.getPath('temp'), 'cmoe-workspace-update', feed.version);
     const installerPath = path.join(updateRoot, path.basename(new URL(feed.url).pathname));
     updateDownloadAbortController = new AbortController();
+    broadcastUpdateProgress({ stage: 'starting', message: `CMOE Workspace ${feed.version} 업데이트를 준비하고 있습니다.`, received: 0, total: feed.bytes, percent: 0 }, event.sender);
     updateDownloadPromise = UpdateService.downloadInstaller(feed, installerPath, globalThis.fetch, (progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send('workspace:update-progress', progress);
+      broadcastUpdateProgress(progress, event.sender);
     }, { signal: updateDownloadAbortController.signal }).then((downloadedPath) => {
       pendingUpdateLaunch = { installerPath: downloadedPath, expectedSha256: feed.sha256, expectedBytes: feed.bytes, expectedVersion: feed.version, appPath: process.execPath, pid: process.pid };
+      broadcastUpdateProgress({ stage: 'saving', message: '작업 내용을 저장하고 안전 백업을 준비하고 있습니다.', received: feed.bytes, total: feed.bytes, percent: 100 }, event.sender);
       setTimeout(() => app.quit(), 300);
       return { ready: true, version: feed.version };
     }).finally(() => { updateDownloadPromise = null; updateDownloadAbortController = null; });
@@ -1795,6 +1806,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitFlushInProgress) return;
   quitFlushInProgress = true;
+  if (pendingUpdateLaunch) broadcastUpdateProgress({ stage: 'saving', message: '열린 작업과 메일 상태를 안전하게 저장하고 있습니다.', percent: 100 });
   documentTools?.requestShutdownDrain?.();
   const windows = [...new Set([mainWindow, ...programWindows.values(), ...rosterPickerWindows.values()].filter((window) => window && !window.isDestroyed()))];
   windows.forEach((window) => window.setEnabled(false));
@@ -1827,10 +1839,12 @@ app.on('before-quit', (event) => {
       await showRemoteSyncPendingWarning(parent, remoteWarnings).catch(console.error);
     }
     if (pendingUpdateLaunch) {
+      broadcastUpdateProgress({ stage: 'backup-local', message: '사용자 자료의 로컬 안전 백업을 만들고 있습니다.', percent: 100 });
       const backup = await backupWorkspacePersistentData(pendingUpdateLaunch.expectedVersion);
       pendingUpdateLaunch.backupPath = backup.snapshotPath;
       const updateState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
       if (updateState.preferences.storageMode === 'drive') {
+        broadcastUpdateProgress({ stage: 'backup-cloud', message: 'Google Drive 안전 백업을 만들고 있습니다.', percent: 100 });
         const cloudBackup = await withOperationTimeout(
           createWorkspaceCloudBackup(pendingUpdateLaunch.expectedVersion, { recordState: false }), 5 * 60_000,
           'Google Drive 업데이트 백업이 완료되지 않아 업데이트를 취소했습니다.',
@@ -1838,6 +1852,7 @@ app.on('before-quit', (event) => {
         );
         pendingUpdateLaunch.cloudBackupFile = cloudBackup.name;
       }
+      broadcastUpdateProgress({ stage: 'installing', message: '백업이 완료되었습니다. 앱을 종료하고 업데이트를 설치합니다.', percent: 100 });
     }
     quitReady = true; isQuitting = true; app.quit();
   })().catch((error) => {
@@ -1845,6 +1860,10 @@ app.on('before-quit', (event) => {
     documentTools?.resumeAfterShutdownAbort?.();
     void gmailFlowHost?.resumeMailQueue?.().catch(console.error);
     windows.forEach((window) => { if (!window.isDestroyed()) window.setEnabled(true); });
+    if (pendingUpdateLaunch) {
+      broadcastUpdateProgress({ stage: 'error', message: error?.message || '업데이트 전에 작업을 저장하지 못했습니다.', percent: 100 });
+      pendingUpdateLaunch = null;
+    }
     const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
     void dialog.showMessageBox(parent, { type: 'warning', title: '변경사항 저장 필요', message: '아직 저장하지 못한 변경사항이 있어 앱을 종료하지 않았습니다.', detail: error?.message || '잠시 후 다시 시도해주세요.' });
   });
@@ -1980,6 +1999,13 @@ app.whenReady().then(async () => {
             };
             const assert = (condition, label) => { if (!condition) throw new Error(label); };
             await waitFor(() => document.querySelector('#newProjectButton'), 'app ready');
+            const updateDialog = document.querySelector('#appUpdateDialog');
+            const updateProgress = document.querySelector('#appUpdateDialogProgress');
+            assert(updateDialog && updateProgress && document.querySelector('#cancelAppUpdateDialog') && document.querySelector('#closeAppUpdateDialog'), 'global update progress dialog controls must exist');
+            updateDialog.showModal(); await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const updateDialogRect = updateDialog.getBoundingClientRect();
+            assert(updateDialogRect.width > 300 && updateDialogRect.left >= 0 && updateDialogRect.right <= innerWidth, 'global update progress dialog must fit in the window');
+            updateDialog.close();
             assert(document.querySelector('#dashboardEmpty h1')?.textContent.includes('어떤 작업'), 'first-use choice should be understandable');
             assert(document.querySelector('[data-nav="modules"]')?.textContent.includes('추가 프로그램'), 'navigation should use user-facing names');
             const plusTile = document.querySelector('#dashboardEmpty .empty-illustration[data-open-new-project]');

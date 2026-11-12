@@ -687,6 +687,15 @@ button.variable-chip.valid:hover { border-color: #397c60; background: #e1f3e9; }
 .preset-card small { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .confirm-dialog { width: min(440px, calc(100vw - 40px)); }
 .confirm-dialog .dialog-body p { margin: 0; color: #475463; line-height: 1.65; white-space: pre-line; }
+.app-update-dialog { width: min(520px, calc(100vw - 40px)); }
+.app-update-dialog .dialog-body { gap: 12px; }
+.app-update-dialog .dialog-body > strong { font-size: 15px; line-height: 1.5; }
+.app-update-dialog progress { width: 100%; height: 10px; accent-color: var(--primary); }
+.app-update-stage-indicator { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.app-update-stage-indicator span { height: 4px; background: #dce2e7; }
+.app-update-stage-indicator span.active { background: var(--primary); }
+.app-update-dialog.update-complete .app-update-stage-indicator span { background: #217346; }
+.app-update-dialog.update-error .app-update-stage-indicator span.active { background: #b42318; }
 .roster-import-preview-dialog { width: min(900px, calc(100vw - 40px)); }
 .roster-import-preview-body { min-height: 320px; }
 .roster-import-preview-summary { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 10px 12px; border: 1px solid #c8d8cf; border-left: 3px solid #217346; border-radius: 5px; background: #f2f8f5; color: #315b46; font-size: 10px; }

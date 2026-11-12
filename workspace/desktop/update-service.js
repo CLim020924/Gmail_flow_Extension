@@ -110,16 +110,21 @@ async function downloadInstaller(feedInput, destination, fetchImpl = globalThis.
   if (externalSignal?.aborted) abortFromCaller();
   else externalSignal?.addEventListener?.('abort', abortFromCaller, { once: true });
   try {
+    onProgress({ stage: 'connecting', message: '업데이트 서버에 연결하고 있습니다.', received: 0, total: feed.bytes, percent: 0 });
     const response = await fetchImpl(feed.url, { redirect: 'follow', signal: controller.signal });
     if (!response.ok || !response.body) throw new Error(`업데이트 파일을 내려받지 못했습니다. (${response.status})`);
     validateDownloadUrl(response.url || feed.url, { redirected: (response.url || feed.url) !== feed.url });
     const contentLength = Number(response.headers?.get?.('content-length') || 0);
     if (contentLength && contentLength !== feed.bytes) throw new Error('업데이트 파일 크기가 배포 정보와 다릅니다.');
     let received = 0; const hash = crypto.createHash('sha256');
-    const source = Readable.fromWeb(response.body); source.on('data', (chunk) => { received += chunk.length; if (received > MAX_INSTALLER_BYTES) source.destroy(new Error('업데이트 파일이 허용 크기를 초과했습니다.')); hash.update(chunk); onProgress({ received, total: feed.bytes, percent: Math.min(100, received / feed.bytes * 100) }); });
+    onProgress({ stage: 'downloading', message: '업데이트 파일을 다운로드하고 있습니다.', received: 0, total: feed.bytes, percent: 0 });
+    const source = Readable.fromWeb(response.body); source.on('data', (chunk) => { received += chunk.length; if (received > MAX_INSTALLER_BYTES) source.destroy(new Error('업데이트 파일이 허용 크기를 초과했습니다.')); hash.update(chunk); onProgress({ stage: 'downloading', message: '업데이트 파일을 다운로드하고 있습니다.', received, total: feed.bytes, percent: Math.min(100, received / feed.bytes * 100) }); });
     await pipeline(source, fs.createWriteStream(partial, { flags: 'wx' }));
-    if (received !== feed.bytes || hash.digest('hex') !== feed.sha256) throw new Error('업데이트 파일 검증에 실패했습니다. 파일을 실행하지 않습니다.');
+    onProgress({ stage: 'verifying', message: '다운로드한 파일의 크기와 SHA-256을 검증하고 있습니다.', received, total: feed.bytes, percent: 100 });
+    const actualSha256 = hash.digest('hex');
+    if (received !== feed.bytes || actualSha256 !== feed.sha256) throw new Error('업데이트 파일 검증에 실패했습니다. 파일을 실행하지 않습니다.');
     await fs.promises.rm(destination, { force: true }); await fs.promises.rename(partial, destination);
+    onProgress({ stage: 'verified', message: '다운로드와 파일 검증이 완료되었습니다.', received, total: feed.bytes, percent: 100 });
     return destination;
   } catch (error) {
     await fs.promises.rm(partial, { force: true });
@@ -135,7 +140,7 @@ function helperCommand({ installerPath, expectedSha256, expectedBytes, expectedV
   const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
   const numericPid = Number(pid);
   const numericBytes = Number(expectedBytes);
-  return `$ErrorActionPreference='Stop'; $app=${quote(appPath)}; $target=Get-Process -Id ${numericPid} -ErrorAction Stop; if([IO.Path]::GetFullPath($target.Path) -ne [IO.Path]::GetFullPath($app)){exit 32}; Wait-Process -Id ${numericPid} -ErrorAction Stop; $installer=${quote(installerPath)}; if(!(Test-Path -LiteralPath $installer -PathType Leaf)){exit 30}; if((Get-Item -LiteralPath $installer).Length -ne ${numericBytes}){exit 33}; if((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ${quote(expectedSha256)}){exit 31}; $process=Start-Process -FilePath $installer -ArgumentList '/S','--updated' -Wait -PassThru; if($process.ExitCode -ne 0){exit $process.ExitCode}; if(!(Test-Path -LiteralPath $app -PathType Leaf)){exit 34}; $installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($app).FileVersion; if(!$installedVersion -or $installedVersion.Split('+')[0] -ne ${quote(expectedVersion)}){exit 35}; Start-Process -FilePath $app -ArgumentList '--updated'`;
+  return `$ErrorActionPreference='Stop'; $app=${quote(appPath)}; try { $target=Get-Process -Id ${numericPid} -ErrorAction SilentlyContinue; if($target){if([IO.Path]::GetFullPath($target.Path) -ne [IO.Path]::GetFullPath($app)){throw 'APP_IDENTITY_MISMATCH'}; Wait-Process -Id ${numericPid} -ErrorAction Stop}; $installer=${quote(installerPath)}; if(!(Test-Path -LiteralPath $installer -PathType Leaf)){throw 'INSTALLER_MISSING'}; if((Get-Item -LiteralPath $installer).Length -ne ${numericBytes}){throw 'INSTALLER_SIZE_MISMATCH'}; if((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne ${quote(expectedSha256)}){throw 'INSTALLER_HASH_MISMATCH'}; $process=Start-Process -FilePath $installer -ArgumentList '/S','--updated' -Wait -PassThru; if($process.ExitCode -ne 0){throw ('INSTALLER_EXIT_'+$process.ExitCode)}; if(!(Test-Path -LiteralPath $app -PathType Leaf)){throw 'UPDATED_APP_MISSING'}; $installedVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($app).FileVersion; if(!$installedVersion -or $installedVersion.Split('+')[0] -ne ${quote(expectedVersion)}){throw 'UPDATED_VERSION_MISMATCH'}; Start-Process -FilePath $app -ArgumentList '--updated' } catch { if(Test-Path -LiteralPath $app -PathType Leaf){Start-Process -FilePath $app -ArgumentList '--update-failed'}; exit 40 }`;
 }
 
 module.exports = { PRODUCT, PLATFORM, FEED_URL, MAX_INSTALLER_BYTES, compareVersions, validateFeed, validateDownloadUrl, checkForUpdate, downloadInstaller, createUpdateDataBackup, helperCommand };
