@@ -1,7 +1,6 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { spawn } = require('node:child_process');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { JsonStorage } = require('./storage');
 const { readWorkbookSheets, exportProjectWorkbook, exportWorkItemWorkbook } = require('./spreadsheet');
@@ -39,6 +38,7 @@ const { repairInstalledAppShortcuts } = require('./install-shortcuts');
 const { DocumentTools } = require('./document-tools');
 const { createLoginBrowserLauncher } = require('./login-browser');
 const UpdateService = require('./update-service');
+const UpdateHelperLauncher = require('./update-helper-launcher');
 const CloudBackup = require('./cloud-backup');
 const PUBLIC_OAUTH_CLIENTS = require('./public-oauth-clients');
 const { loadGoogleOAuthReleaseConfig } = require('./google-oauth-release-config');
@@ -1795,13 +1795,6 @@ app.setAppUserModelId('kr.co.cmoe.workspace');
 app.on('before-quit', (event) => {
   if (quitReady) {
     isQuitting = true;
-    if (pendingUpdateLaunch) {
-      const command = UpdateService.helperCommand(pendingUpdateLaunch);
-      pendingUpdateLaunch = null;
-      const encoded = Buffer.from(command, 'utf16le').toString('base64');
-      const helper = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Sta', '-EncodedCommand', encoded], { detached: true, stdio: 'ignore', windowsHide: true });
-      helper.unref();
-    }
     return;
   }
   event.preventDefault();
@@ -1854,6 +1847,8 @@ app.on('before-quit', (event) => {
         pendingUpdateLaunch.cloudBackupFile = cloudBackup.name;
       }
       broadcastUpdateProgress({ stage: 'installing', message: '백업이 완료되었습니다. 앱을 종료하고 업데이트를 설치합니다.', percent: 100 });
+      await UpdateHelperLauncher.launchUpdateHelper(pendingUpdateLaunch);
+      pendingUpdateLaunch = null;
     }
     quitReady = true; isQuitting = true; app.quit();
   })().catch((error) => {

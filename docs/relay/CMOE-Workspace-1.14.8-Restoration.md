@@ -230,3 +230,10 @@
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.37-Windows.exe`, 크기 `111,030,789` bytes, SHA-256 `F9344ABD6325B927F90D3A8E34EBAEAC1FAC92CF0CF507C7AA693F458AA18248`, FileVersion 1.15.37, 서명 없음.
 - 사용자는 환경 설정에서 업데이트를 시작한 뒤 앱이 꺼져도 별도 `CMOE Workspace 업데이트` 창이 닫힐 때까지 앱이나 바탕화면 아이콘을 다시 누르지 않는다. 설치 완료 뒤 1.15.37이 자동으로 열리고 같은 업데이트가 재표시되지 않아야 통과다.
 - GitHub Release와 Cresero Worker `4392b35b-d1c2-461c-86c6-8c85f2c0dad6`에 배포했다. 공개 파일 크기·SHA-256·FileVersion 일치와 앱 코드의 1.15.36→1.15.37 발견을 확인했다.
+
+## 1.15.38 helper 선기동과 준비 확인
+
+- 1.15.36→1.15.37 시험에서도 설치 파일과 안전 백업은 정상 생성됐지만 `update-helper.log`가 없고 실제 버전은 1.15.36에 남았다. helper가 실행된 뒤 실패한 것이 아니라 최종 종료 이벤트에서 시작되지 않은 것이다.
+- 설치 helper를 `before-quit`의 마지막 순간에 직접 detached spawn하던 구조를 제거했다. 백업 직후 앱이 살아 있을 때 bootstrap PowerShell이 Windows `Start-Process`로 helper를 독립 실행하고, helper가 네이티브 창을 표시한 뒤 `helper ready`를 로그에 쓴 것을 확인해야만 앱을 종료한다.
+- 실제 Windows 시험에서 부모 Node 프로세스 종료 뒤에도 helper가 살아남아 앱 종료를 감지하고 다음 단계까지 기록했다. 전체 Node 시험과 11개 가이드·215단계 스모크도 통과했다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.38-Windows.exe`, 크기 `111,031,606` bytes, SHA-256 `F4CF7AB88D07944C0926EE4B56855EB25C465F10DE52244B5AF1549C02D94CEC`, FileVersion 1.15.38, 서명 없음.
