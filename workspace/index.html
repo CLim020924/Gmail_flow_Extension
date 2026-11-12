@@ -819,9 +819,18 @@
 
       <section id="page-settings" class="page" data-page="settings">
         <div class="page-heading">
-          <div><span class="eyebrow">환경 설정</span><h1>저장 및 표시 설정</h1><p>자료를 이 PC에만 둘지 Google Drive에서도 사용할지 선택합니다.</p></div>
+          <div><span class="eyebrow">환경 설정</span><h1>환경 설정</h1><p>프로그램 업데이트, 자료 저장 위치와 표시 방식을 관리합니다.</p></div>
         </div>
         <div class="settings-layout">
+          <section class="settings-panel update-settings-panel">
+            <div class="update-settings-heading"><span class="eyebrow">APP VERSION</span><h2>업데이트 확인</h2><p>현재 버전과 새 버전을 직접 확인하고, 준비된 업데이트를 실행할 수 있습니다.</p></div>
+            <div class="update-settings-controls">
+              <p id="appVersionStatus" class="field-help">현재 버전을 확인하고 있습니다.</p>
+              <div class="button-row"><button id="checkAppUpdate" class="secondary-button" type="button">업데이트 확인</button><button id="installAppUpdate" class="primary-button" type="button" hidden>다운로드 후 업데이트</button><button id="cancelAppUpdate" class="secondary-button" type="button" hidden>다운로드 취소</button></div>
+              <p id="appUpdateProgress" class="field-help" hidden></p>
+              <details><summary>업데이트 세부정보</summary><p class="field-help">Cresero의 고정 업데이트 정보에서 제품·Windows 64비트·숫자 버전·파일 크기·SHA-256과 공식 GitHub 릴리스 주소를 확인한 뒤 설치합니다. 사용자 프로젝트와 로그인 자료는 설치 파일과 분리하여 보존합니다.</p></details>
+            </div>
+          </section>
           <section class="settings-panel">
             <h2>자료 저장 위치</h2>
             <label class="form-field">어디에 저장할까요?
@@ -842,13 +851,6 @@
             <label class="form-field">Workspace 기본 시간대<input id="workspaceTimezone" list="workspaceTimezoneOptions" autocomplete="off" spellcheck="false" aria-describedby="workspaceTimezoneHelp"></label>
             <p id="workspaceTimezoneHelp" class="field-help">새 프로젝트와 별도 시간대를 정하지 않은 프로젝트의 캘린더·Zoom 일정에 적용됩니다.</p>
             <label class="check-row"><input id="showArchivedSetting" type="checkbox"> 완료되어 보관한 프로젝트도 목록에 표시</label>
-          </section>
-          <section class="settings-panel">
-            <h2>프로그램 업데이트</h2>
-            <p id="appVersionStatus" class="field-help">현재 버전을 확인하고 있습니다.</p>
-            <div class="button-row"><button id="checkAppUpdate" class="secondary-button" type="button">새 버전 확인</button><button id="installAppUpdate" class="primary-button" type="button" hidden>다운로드 후 업데이트</button><button id="cancelAppUpdate" class="secondary-button" type="button" hidden>다운로드 취소</button></div>
-            <p id="appUpdateProgress" class="field-help" hidden></p>
-            <details><summary>업데이트 세부정보</summary><p class="field-help">Cresero의 고정 업데이트 정보에서 제품·Windows 64비트·숫자 버전·파일 크기·SHA-256과 공식 GitHub 릴리스 주소를 확인한 뒤 설치합니다. 사용자 프로젝트와 로그인 자료는 설치 파일과 분리하여 보존합니다.</p></details>
           </section>
           <section class="settings-panel guide-settings-panel">
             <div class="guide-settings-copy">
