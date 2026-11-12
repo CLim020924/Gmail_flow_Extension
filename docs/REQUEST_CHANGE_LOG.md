@@ -228,7 +228,7 @@
 - 최종 동작: 선택 범위 앞뒤 문구는 유지되고 PPTX의 기존 텍스트 런 글꼴·색상·크기 속성을 보존한다. 값의 글자 수는 고정하지 않아 두 글자 한글 이름, 긴 영문 이름, 짧거나 긴 이메일을 같은 템플릿으로 생성할 수 있다. 문단을 가로지르는 선택은 오류 방지를 위해 줄마다 따로 연결하도록 안내한다.
 - 구현: `workspace/desktop/pptx-template.js`, `workspace/desktop/document-tools.js`, `workspace/document-tools-ui.js`, `workspace/index.html`, `workspace/styles.css`, `workspace/tests/pptx-template.test.js`, 개발 스모크 검증.
 - 검증: 서로 다른 서식의 세 텍스트 런을 가로지르는 이름 범위, 두 글자 한글 이름, 긴 영문 이름, 짧은 이메일, 동일 상자 복수 범위, 원문 불일치 거부를 단위 시험으로 확인했다. Workspace 전체 테스트·빌드 사전검사와 980×680 화면의 드래그 인식, 11개 가이드·215단계 개발판 스모크가 통과했다.
-- 커밋: `진행 중`
+- 커밋: `60cf8bf`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
