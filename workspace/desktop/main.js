@@ -38,6 +38,7 @@ const { safeShortcutLabel, shortcutPathInside } = require('./shortcut-path');
 const { DocumentTools } = require('./document-tools');
 const { createLoginBrowserLauncher } = require('./login-browser');
 const UpdateService = require('./update-service');
+const CloudBackup = require('./cloud-backup');
 const PUBLIC_OAUTH_CLIENTS = require('./public-oauth-clients');
 const { loadGoogleOAuthReleaseConfig } = require('./google-oauth-release-config');
 const WorkspaceCore = require('../workspace-core');
@@ -827,6 +828,64 @@ async function backupWorkspacePersistentData(version) {
   });
 }
 
+function selectedWorkspaceDriveConnection(state) {
+  const connection = WorkspaceCore.workspaceDriveConnection(state);
+  if (!connection || connection.status !== 'connected') throw new Error('Drive 백업에 사용할 Google 계정을 먼저 연결하고 선택해주세요.');
+  return connection;
+}
+
+async function createWorkspaceCloudBackup(version = app.getVersion(), { recordState = true } = {}) {
+  const workspaceState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+  const connection = selectedWorkspaceDriveConnection(workspaceState);
+  const gmailData = await gmailFlowHost.storage.get(null);
+  const documentProfiles = await documentTools.storage.get('certificateProfiles', []);
+  const payload = await CloudBackup.createCloudBackupPayload({
+    version,
+    workspaceState,
+    gmailData,
+    documentProfiles,
+    fileRoots: {
+      extensions: path.join(app.getPath('userData'), 'extensions'),
+      'document-templates': path.join(app.getPath('userData'), 'document-tools', 'templates')
+    }
+  });
+  const uploaded = await driveWorkspaceClient.createBackupFile(connection.id, payload);
+  if (recordState) {
+    workspaceState.preferences.lastCloudBackupAt = payload.createdAt;
+    workspaceState.preferences.lastCloudBackupFile = uploaded.name;
+    workspaceState.updatedAt = new Date().toISOString();
+    workspaceState._revision = Number(workspaceState._revision || 0) + 1;
+    workspaceState._baseRevision = workspaceState._revision;
+    await storage.set('workspaceState', workspaceState);
+  }
+  return { createdAt: payload.createdAt, name: uploaded.name, fileId: uploaded.fileId, files: payload.files.length };
+}
+
+async function restoreLatestWorkspaceCloudBackup() {
+  const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+  const connection = selectedWorkspaceDriveConnection(current);
+  const downloaded = await driveWorkspaceClient.readLatestBackup(connection.id);
+  if (!downloaded) throw new Error('선택한 Google Drive 계정에 복원할 Workspace 백업이 없습니다.');
+  const payload = CloudBackup.validateCloudBackupPayload(downloaded.payload);
+  const restoredState = WorkspaceCore.normalizeState(preserveLocalConnectionContext(payload.workspaceState, current));
+  restoredState.preferences.storageMode = 'drive';
+  restoredState.preferences.workspaceDriveConnectionId = connection.id;
+  restoredState.preferences.lastCloudBackupAt = payload.createdAt;
+  restoredState.preferences.lastCloudRestoreAt = new Date().toISOString();
+  restoredState.updatedAt = new Date().toISOString();
+  restoredState._revision = Number(current._revision || 0) + 1;
+  restoredState._baseRevision = restoredState._revision;
+  const fileResult = await CloudBackup.restoreCloudBackupFiles(payload, {
+    extensions: path.join(app.getPath('userData'), 'extensions'),
+    'document-templates': path.join(app.getPath('userData'), 'document-tools', 'templates')
+  });
+  await gmailFlowHost.storage.set(CloudBackup.safeGmailData(payload.gmailData));
+  await documentTools.storage.set('certificateProfiles', Array.isArray(payload.documentData?.certificateProfiles) ? payload.documentData.certificateProfiles : []);
+  await storage.set('workspaceState', restoredState);
+  broadcastState(restoredState);
+  return { createdAt: payload.createdAt, appVersion: payload.appVersion, files: fileResult.restored.length };
+}
+
 function flushWorkspaceWindow(targetWindow, timeoutMs = 10_000) {
   if (!targetWindow || targetWindow.isDestroyed()) return Promise.resolve(normalizeCloseFlushResult(true));
   return new Promise((resolve, reject) => {
@@ -1048,6 +1107,14 @@ function registerIpc() {
     return { canceled: true };
   });
   ipcMain.handle('workspace:update-open-downloads', () => shell.openExternal('https://cresero.com/downloads/cmoe-workspace'));
+  ipcMain.handle('workspace:cloud-backup-create', () => createWorkspaceCloudBackup());
+  ipcMain.handle('workspace:cloud-backup-latest', async () => {
+    const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+    const connection = selectedWorkspaceDriveConnection(current);
+    const files = await driveWorkspaceClient.listBackupFiles(connection.id);
+    return files[0] || null;
+  });
+  ipcMain.handle('workspace:cloud-backup-restore', () => restoreLatestWorkspaceCloudBackup());
   ipcMain.handle('workspace:external-reserve', (event, payload = {}) => {
     assertGuideModeAllows(event, '외부 서비스 작업');
     pruneExternalReservations();
@@ -1762,6 +1829,15 @@ app.on('before-quit', (event) => {
     if (pendingUpdateLaunch) {
       const backup = await backupWorkspacePersistentData(pendingUpdateLaunch.expectedVersion);
       pendingUpdateLaunch.backupPath = backup.snapshotPath;
+      const updateState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
+      if (updateState.preferences.storageMode === 'drive') {
+        const cloudBackup = await withOperationTimeout(
+          createWorkspaceCloudBackup(pendingUpdateLaunch.expectedVersion, { recordState: false }), 5 * 60_000,
+          'Google Drive 업데이트 백업이 완료되지 않아 업데이트를 취소했습니다.',
+          'UPDATE_CLOUD_BACKUP_TIMEOUT'
+        );
+        pendingUpdateLaunch.cloudBackupFile = cloudBackup.name;
+      }
     }
     quitReady = true; isQuitting = true; app.quit();
   })().catch((error) => {

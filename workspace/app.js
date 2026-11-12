@@ -138,6 +138,9 @@
   let workflowEditorTemplateDraft = null;
   let gmailFlowSummary = { connected: false, email: '', rosters: 0, templates: 0, structures: 0 };
   let appUpdateState = { currentVersion: '', packaged: false, portable: false, checking: false, installing: false, canceling: false, checked: null, progress: null, error: '' };
+  let cloudBackupBusy = false;
+  let promptedUpdateVersion = '';
+  let approvedUpdateVersion = '';
   let guideSession = null;
   let guideStarting = false;
   let guideRefreshFrame = null;
@@ -5997,6 +6000,12 @@
         : state.preferences.lastDriveSyncAt
           ? `${selectedDrive?.label || '선택한 계정'} · 마지막 저장 ${formatUpdatedAt(state.preferences.lastDriveSyncAt)}`
           : selectedDrive ? `${selectedDrive.label} 계정에 Workspace 전체를 저장합니다.` : 'Google Drive에 연결한 계정이 있어야 사용할 수 있습니다.';
+    const cloudBackupReady = state.preferences.storageMode === 'drive' && Boolean(selectedDrive);
+    $('#createDriveBackup').disabled = !cloudBackupReady || cloudBackupBusy;
+    $('#restoreDriveBackup').disabled = !cloudBackupReady || cloudBackupBusy;
+    $('#driveBackupStatus').textContent = state.preferences.lastCloudBackupAt
+      ? `최근 안전 백업: ${formatUpdatedAt(state.preferences.lastCloudBackupAt)} · 로그인 토큰과 Apps Script 연결 키 제외`
+      : 'Drive 안전 백업은 로그인 토큰과 Apps Script 연결 키를 제외하고 버전별로 보관합니다.';
     $('#showArchivedSetting').checked = Boolean(state.preferences.showArchivedProjects);
     $('#toggleArchived').textContent = state.preferences.showArchivedProjects ? '진행만' : '보관함';
     renderAppUpdate();
@@ -6024,7 +6033,15 @@
   async function checkAppUpdate({ quiet = false } = {}) {
     if (!globalThis.workspaceDesktop?.checkForUpdates || appUpdateState.checking) return;
     appUpdateState.checking = true; appUpdateState.error = ''; renderAppUpdate();
-    try { appUpdateState.checked = await globalThis.workspaceDesktop.checkForUpdates(); appUpdateState.portable = Boolean(appUpdateState.checked.portable); }
+    try {
+      appUpdateState.checked = await globalThis.workspaceDesktop.checkForUpdates(); appUpdateState.portable = Boolean(appUpdateState.checked.portable);
+      const nextVersion = appUpdateState.checked?.available ? String(appUpdateState.checked.feed?.version || '') : '';
+      if (nextVersion && promptedUpdateVersion !== nextVersion) {
+        promptedUpdateVersion = nextVersion;
+        const accepted = await showConfirm(`CMOE Workspace ${nextVersion} 업데이트가 준비되었습니다.\n앱이 자동으로 다운로드·검증·설치하고 다시 실행합니다. 사용자 자료는 업데이트 전에 백업됩니다.`, { title: '새 업데이트', action: '업데이트' });
+        if (accepted) { approvedUpdateVersion = nextVersion; $('#installAppUpdate')?.click(); }
+      }
+    }
     catch (error) { appUpdateState.error = error.message; if (!quiet) showToast(`업데이트를 확인하지 못했습니다: ${error.message}`, 'error'); }
     finally { appUpdateState.checking = false; renderAppUpdate(); }
   }
@@ -7594,7 +7611,10 @@
     $('#checkAppUpdate').addEventListener('click', () => void checkAppUpdate());
     $('#installAppUpdate').addEventListener('click', async () => {
       if (appUpdateState.portable) { await globalThis.workspaceDesktop.openUpdateDownloads(); return; }
-      if (!await showConfirm(`CMOE Workspace ${appUpdateState.checked?.feed?.version || ''}을 내려받아 검증한 뒤 업데이트할까요?\n작업 내용을 저장하고 앱을 종료한 다음 같은 위치에 설치하고 한 번만 다시 실행합니다.`, { title: '프로그램 업데이트', action: '업데이트' })) return;
+      const targetVersion = String(appUpdateState.checked?.feed?.version || '');
+      const alreadyApproved = approvedUpdateVersion === targetVersion;
+      approvedUpdateVersion = '';
+      if (!alreadyApproved && !await showConfirm(`CMOE Workspace ${targetVersion}을 내려받아 검증한 뒤 업데이트할까요?\n작업 내용을 저장하고 앱을 종료한 다음 같은 위치에 설치하고 한 번만 다시 실행합니다.`, { title: '프로그램 업데이트', action: '업데이트' })) return;
       appUpdateState.installing = true; appUpdateState.error = ''; renderAppUpdate();
       try { await globalThis.workspaceDesktop.installUpdate(); }
       catch (error) { appUpdateState.installing = false; appUpdateState.progress = null; appUpdateState.error = error.message; renderAppUpdate(); showToast(`업데이트를 시작하지 못했습니다: ${error.message}`, 'error'); }
@@ -7862,6 +7882,31 @@
       if (state.preferences.storageMode === 'drive') await flushDriveStateSync(true, { force: true });
     });
     $('#pushDriveState').addEventListener('click', () => { if (state.preferences.storageMode !== 'drive') { showToast('저장 위치를 Google Drive 동기화로 바꾼 뒤 저장해주세요.'); return; } void flushDriveStateSync(true, { force: true }); });
+    $('#createDriveBackup').addEventListener('click', async () => {
+      if (cloudBackupBusy) return;
+      cloudBackupBusy = true; renderSettings();
+      try {
+        await flushDriveStateSync(false, { force: true });
+        const result = await globalThis.workspaceDesktop.createCloudBackup();
+        state.preferences.lastCloudBackupAt = result.createdAt; renderSettings();
+        showToast(`Google Drive 안전 백업을 만들었습니다. (${result.files}개 파일)`, 'success');
+      } catch (error) { showToast(`Drive 안전 백업을 만들지 못했습니다: ${error.message}`, 'error'); }
+      finally { cloudBackupBusy = false; renderSettings(); }
+    });
+    $('#restoreDriveBackup').addEventListener('click', async () => {
+      if (cloudBackupBusy) return;
+      let latest;
+      try { latest = await globalThis.workspaceDesktop.latestCloudBackup(); }
+      catch (error) { showToast(`Drive 백업을 확인하지 못했습니다: ${error.message}`, 'error'); return; }
+      if (!latest) { showToast('선택한 Drive 계정에 복원할 안전 백업이 없습니다.', 'error'); return; }
+      if (!await showConfirm(`최근 Drive 안전 백업(${formatUpdatedAt(latest.createdTime || latest.modifiedTime)})을 이 PC에 복원할까요?\n현재 자료는 삭제하지 않고 백업의 프로젝트·명단·양식과 파일을 덮어써 복구합니다.`, { title: 'Drive 백업 복원', action: '복원' })) return;
+      cloudBackupBusy = true; renderSettings();
+      try {
+        const result = await globalThis.workspaceDesktop.restoreCloudBackup();
+        showToast(`Drive 백업을 복원했습니다. (${result.files}개 파일)`, 'success');
+      } catch (error) { showToast(`Drive 백업을 복원하지 못했습니다: ${error.message}`, 'error'); }
+      finally { cloudBackupBusy = false; renderSettings(); }
+    });
     $('#pullDriveState').addEventListener('click', async () => {
       let connection = connectedDrive();
       if (!connection) { const connectedCount = state.connections.filter((item) => item.type === 'drive' && item.status === 'connected').length; showToast(state.preferences.workspaceDriveConnectionId ? '선택한 Workspace Drive 계정에 다시 로그인하거나 다른 계정을 선택해주세요.' : connectedCount > 1 ? '환경 설정에서 가져올 Workspace Drive 계정을 선택해주세요.' : 'Google Drive에서 자료를 가져올 계정에 먼저 로그인해주세요.', 'error'); if (!connectedCount) navigate('connections'); return; }

@@ -100,6 +100,9 @@ contextBridge.exposeInMainWorld('workspaceDesktop', {
   installUpdate: () => ipcRenderer.invoke('workspace:update-install'),
   cancelUpdate: () => ipcRenderer.invoke('workspace:update-cancel'),
   openUpdateDownloads: () => ipcRenderer.invoke('workspace:update-open-downloads'),
+  createCloudBackup: () => invokeWithStructuredError('workspace:cloud-backup-create'),
+  latestCloudBackup: () => invokeWithStructuredError('workspace:cloud-backup-latest'),
+  restoreCloudBackup: () => invokeWithStructuredError('workspace:cloud-backup-restore'),
   onUpdateProgress: (callback) => {
     const listener = (_event, progress) => callback(progress);
     ipcRenderer.on('workspace:update-progress', listener);

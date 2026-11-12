@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 
 const WORKSPACE_FILE_NAME = 'cmoe-workspace-state.json';
+const BACKUP_FILE_PREFIX = 'cmoe-workspace-backup-';
 
 function normalizeIdentity(value = {}) {
   return {
@@ -128,6 +129,68 @@ class DriveWorkspaceClient {
     } catch (error) {
       throw annotateError(error, 'DRIVE_API_ERROR', { operation: 'list-workspace-files' });
     }
+  }
+
+  async listBackupFiles(connectionId) {
+    const query = encodeURIComponent(`name contains '${BACKUP_FILE_PREFIX}' and trashed=false`);
+    try {
+      const found = await this.authManager.request(connectionId, `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${query}&fields=files(id%2Cname%2CcreatedTime%2CmodifiedTime%2Cversion)&pageSize=10&orderBy=createdTime%20desc`);
+      return (Array.isArray(found?.files) ? found.files : []).map((file) => ({
+        id: String(file?.id || ''), name: String(file?.name || ''), createdTime: String(file?.createdTime || ''),
+        modifiedTime: String(file?.modifiedTime || ''), version: String(file?.version || '')
+      })).filter((file) => file.id && file.name.startsWith(BACKUP_FILE_PREFIX));
+    } catch (error) {
+      throw annotateError(error, 'DRIVE_API_ERROR', { operation: 'list-backup-files' });
+    }
+  }
+
+  async createBackupFile(connectionId, payload) {
+    if (!payload || payload.format !== 'cmoe-workspace-cloud-backup') throw driveError('REMOTE_DRIVE_PAYLOAD_INVALID', 'Drive 백업 형식을 확인할 수 없습니다.');
+    const compactTime = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+    const version = String(payload.appVersion || 'unknown').replace(/[^0-9A-Za-z.-]/g, '_').slice(0, 32);
+    const name = `${BACKUP_FILE_PREFIX}${compactTime}-v${version}-${this.randomBytes(4).toString('hex')}.json`;
+    const boundary = `cmoe_backup_${this.randomBytes(12).toString('hex')}`;
+    const body = [
+      `--${boundary}`, 'Content-Type: application/json; charset=UTF-8', '',
+      JSON.stringify({ name, parents: ['appDataFolder'] }),
+      `--${boundary}`, 'Content-Type: application/json; charset=UTF-8', '',
+      JSON.stringify(payload), `--${boundary}--`, ''
+    ].join('\r\n');
+    let response;
+    try {
+      response = await this.authManager.requestWithMetadata(connectionId, 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id%2Cname%2CcreatedTime%2CmodifiedTime%2Cversion', {
+        method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body
+      });
+    } catch (error) { throw annotateError(error, 'DRIVE_API_ERROR', { operation: 'create-backup-file' }); }
+    const fileId = String(response?.data?.id || '');
+    if (!fileId) throw driveError('REMOTE_DRIVE_VERSION_MISSING', 'Drive 백업 파일 ID를 확인하지 못했습니다.');
+    const restored = await this.readBackupFile(connectionId, fileId);
+    if (restored.payload.digest !== payload.digest) throw driveError('REMOTE_DRIVE_STATE_CHANGED', 'Drive 백업 저장 직후 내용이 일치하지 않습니다.', restored.identity);
+    return { ...restored.identity, name };
+  }
+
+  async readBackupFile(connectionId, fileId) {
+    const normalizedFileId = String(fileId || '');
+    if (!normalizedFileId) throw driveError('REMOTE_DRIVE_VERSION_MISSING', 'Drive 백업 파일 ID를 확인할 수 없습니다.');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = await this.fetchWorkspaceMetadata(connectionId, normalizedFileId);
+      if (!hasStableReadIdentity(before)) throw driveError('REMOTE_DRIVE_VERSION_MISSING', 'Drive 백업의 안정된 변경 버전을 확인할 수 없습니다.', before);
+      let content;
+      try { content = await this.authManager.requestWithMetadata(connectionId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(normalizedFileId)}?alt=media`); }
+      catch (error) { throw annotateError(error, 'DRIVE_API_ERROR', { operation: 'read-backup-file', fileId: normalizedFileId }); }
+      const after = await this.fetchWorkspaceMetadata(connectionId, normalizedFileId);
+      if (!hasStableReadIdentity(after) || !identitiesMatch(before, after)) continue;
+      if (!content?.data || content.data.format !== 'cmoe-workspace-cloud-backup') throw driveError('REMOTE_DRIVE_PAYLOAD_INVALID', 'Drive 백업 파일 형식을 확인할 수 없습니다.', after);
+      return { payload: content.data, identity: after };
+    }
+    throw driveError('REMOTE_DRIVE_STATE_CHANGED', 'Drive 백업을 읽는 동안 파일이 변경되었습니다.', { fileId: normalizedFileId });
+  }
+
+  async readLatestBackup(connectionId) {
+    const files = await this.listBackupFiles(connectionId);
+    if (!files.length) return null;
+    const result = await this.readBackupFile(connectionId, files[0].id);
+    return { ...result, file: files[0] };
   }
 
   async fetchWorkspaceMetadata(connectionId, fileId) {
@@ -266,6 +329,7 @@ class DriveWorkspaceClient {
 }
 
 module.exports = {
+  BACKUP_FILE_PREFIX,
   DriveWorkspaceClient,
   WORKSPACE_FILE_NAME,
   authoritativeIdentityMatches,

@@ -125,10 +125,23 @@
 |---|---|---:|---|---|
 | 설치형 | `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.2-Windows.exe` | 111,026,062 bytes | `2A6C4C5D5F28FCF1CD9A9B2CB8D8BCF2D2EEE897569A33ED2605CA1B05DF857B` | NotSigned |
 
+## 1.15.3 Google Drive 안전 백업·앱 내부 업데이트
+
+- Drive 동기화 계정의 숨김 앱 데이터 영역에 삭제하지 않는 버전별 안전 백업을 만든다.
+- 프로젝트·명단·메일 양식/이력·문서 프로필·사용자 문서 템플릿·사용자 확장 파일을 포함한다.
+- OAuth 토큰, Google Client Secret, Apps Script 연결 키는 Drive 백업에서 제외하며 새 PC에서 다시 로그인한다.
+- 파일별 SHA-256과 전체 payload digest, 허용된 복원 루트, 최대 파일/전체 크기를 검증한다.
+- Drive 모드의 자동 업데이트는 로컬 스냅샷과 Drive 안전 백업 중 하나라도 실패하면 설치를 중단한다.
+- 앱 시작 1.5초 뒤 고정 업데이트 피드를 확인하고 새 버전이 있으면 업데이트 확인창을 표시한다. 사용자가 업데이트를 누르면 앱 안에서 다운로드·검증·설치·재실행한다.
+
+| 종류 | 경로 | 크기 | SHA-256 | 서명 |
+|---|---|---:|---|---|
+| 설치형 | `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.3-Windows.exe` | 111,030,235 bytes | `4002EBAC019C8B3CDD324D2C69FBE4E93763F6E4A30FB07A84FDD2E030B1D25D` | NotSigned |
+
 ## 다음 작업자 릴레이 목록
 
 1. 실제 Google 계정에서 Apps Script 웹 앱을 배포하고 Gmail 발신 계정 일치·예약 도달 발송·취소·상태 동기화를 확인한다.
-2. 분리된 Windows 테스트 PC/VM에 1.14.8을 먼저 설치하고 1.15.2 업데이트·제거·재시작·사용자 데이터 보존·백업 복원을 검증한다.
+2. 분리된 Windows 테스트 PC/VM에 구 설치본을 먼저 설치하고 1.15.3 앱 내부 업데이트·제거·재시작·로컬/Drive 데이터 보존·백업 복원을 검증한다.
 3. 코드 서명 인증서를 준비한 후 두 EXE에 서명하고 SmartScreen 표시를 외부 PC에서 확인한다.
-4. 사용자의 명시적 배포 요청 후에만 GitHub Release, Cresero 다운로드, `update.json`을 1.15.2 설치형 해시와 함께 게시한다.
+4. GitHub Release, Cresero 다운로드, `update.json`을 1.15.3 설치형 해시와 함께 게시하고 구 설치본의 시작 알림을 확인한다.
 5. 게시 후 다운로드 본이 로컬 산출물과 크기·SHA-256이 일치하는지 재검증한다.
