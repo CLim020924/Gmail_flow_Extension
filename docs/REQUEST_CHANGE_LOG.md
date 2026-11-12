@@ -178,7 +178,7 @@
 - 구현: 추출본의 Workspace·Gmail Flow 소스, 문서/브라우저 리소스, 온라인 예약 클라이언, 업데이터 IPC/UI, 빌드 사전검사, 통합 테스트, `docs/relay/CMOE-Workspace-1.14.8-Restoration.md`.
 - 검증: 1.14.8 소스 누락 0개, 패키징 리소스 누락·변형 0개, 개발 Electron 스모크 통과, Workspace·Gmail Flow·Apps Script 통합 테스트 전체 통과, 빌드 사전검사 통과. 1.15.0 설치형·휴대형을 생성하고 해시와 내부 리소스를 확인했다.
 - 남은 확인: 실제 Google Apps Script 발송, 분리 Windows PC의 1.14.8→1.15.0 대화형 업데이트, 코드 서명, 운영 배포.
-- 커밋: `진행 중`
+- 커밋: `c09f5b9`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
