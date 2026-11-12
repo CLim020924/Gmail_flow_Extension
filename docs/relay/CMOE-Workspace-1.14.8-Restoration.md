@@ -272,3 +272,4 @@
 
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.44-Windows.exe`, 크기 `111,031,645` bytes, SHA-256 `24645D6015511755741D34920A2F75E3DC85B98118A5AAA0E74CCCEA0BB45BC2`, FileVersion 1.15.44, 서명 없음.
 - 현재 PC는 1.15.43으로 유지하고 1.15.44를 앱 내부 업데이트로 시험한다.
+- GitHub Release와 Cresero Worker `b4f6ce3e-bc17-42a1-a36e-dfc6980c6c19`에 배포했다. 실제 앱 코드가 설치된 1.15.43에 1.15.44를 제안한다.
