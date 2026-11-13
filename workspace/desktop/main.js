@@ -1,6 +1,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { createRequire } = require('node:module');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, shell } = require('electron');
 const { JsonStorage } = require('./storage');
 const { readWorkbookSheets, exportProjectWorkbook, exportWorkItemWorkbook } = require('./spreadsheet');
@@ -37,9 +38,17 @@ const { safeShortcutLabel, shortcutPathInside } = require('./shortcut-path');
 const { repairInstalledAppShortcuts } = require('./install-shortcuts');
 const { DocumentTools } = require('./document-tools');
 const { createLoginBrowserLauncher } = require('./login-browser');
-const UpdateService = require('./update-service');
-const UpdateHelperLauncher = require('./update-helper-launcher');
+const updaterRuntimeRequire = app.isPackaged
+  ? createRequire(path.join(process.resourcesPath, 'updater-runtime', 'package.json'))
+  : require;
+const { autoUpdater, CancellationToken } = updaterRuntimeRequire('electron-updater');
+const updateLog = updaterRuntimeRequire('electron-log/main');
+updateLog.transports.file.level = 'info';
+if (app.isPackaged) updateLog.transports.console.level = false;
+const UpdateDataBackup = require('./update-data-backup');
 const { createUpdateLaunchNotice } = require('./update-launch-notice');
+const { StandardUpdater } = require('./standard-updater');
+const { collectOwnedWindows, UpdateShutdownGate } = require('./update-shutdown-policy');
 const CloudBackup = require('./cloud-backup');
 const PUBLIC_OAUTH_CLIENTS = require('./public-oauth-clients');
 const { loadGoogleOAuthReleaseConfig } = require('./google-oauth-release-config');
@@ -157,10 +166,8 @@ let remoteSyncWarningFingerprint = '';
 let remoteSyncWarningAt = 0;
 let driveSyncGuards;
 let driveWorkspaceClient;
-let lastUpdateCheck = null;
-let updateDownloadPromise = null;
-let updateDownloadAbortController = null;
-let pendingUpdateLaunch = null;
+let pendingStandardInstall = null;
+const updateShutdownGate = new UpdateShutdownGate();
 const updateLaunchNotice = createUpdateLaunchNotice(process.argv);
 const externalArtifactReservations = new Map();
 const externalReservationOwners = new Set();
@@ -177,10 +184,30 @@ const queuedConnectionAuthorizationCancels = new Set();
 function broadcastUpdateProgress(progress, preferredSender = null) {
   const senders = new Set([
     preferredSender,
-    mainWindow?.webContents,
-    ...[...programWindows.values()].map((window) => window?.webContents)
+    ...BrowserWindow.getAllWindows().map((window) => window?.webContents)
   ].filter((sender) => sender && !sender.isDestroyed()));
   senders.forEach((sender) => sender.send('workspace:update-progress', progress));
+}
+
+const standardUpdater = new StandardUpdater({
+  autoUpdater,
+  currentVersion: app.getVersion(),
+  packaged: app.isPackaged,
+  portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR),
+  broadcast: broadcastUpdateProgress,
+  logger: updateLog,
+  createCancellationToken: () => new CancellationToken()
+});
+const updateE2EMode = app.getName() === 'cmoe-workspace-update-test' && process.argv.includes('--update-e2e');
+
+async function writeUpdateE2EResult(payload) {
+  if (app.getName() !== 'cmoe-workspace-update-test') return;
+  const resultPath = path.join(app.getPath('userData'), 'update-e2e-result.json');
+  await fs.promises.writeFile(resultPath, `${JSON.stringify({ ...payload, recordedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
+}
+
+function assertUpdateNotClosing() {
+  updateShutdownGate.assertOpenAllowed();
 }
 
 function activeBrowserPickerWindowHandle() {
@@ -833,7 +860,7 @@ function workspacePersistentBackupEntries() {
 }
 
 async function backupWorkspacePersistentData(version) {
-  return UpdateService.createUpdateDataBackup({
+  return UpdateDataBackup.createUpdateDataBackup({
     version,
     backupRoot: path.join(app.getPath('appData'), 'CMOE Workspace Backups'),
     entries: workspacePersistentBackupEntries()
@@ -959,6 +986,7 @@ function protectWorkspaceWindowClose(targetWindow) {
 }
 
 function createProgramWindow(programId, options = {}) {
+  assertUpdateNotClosing();
   const resolvedLaunch = resolveProgramLaunch(programId, options);
   programId = resolvedLaunch.programId; options = resolvedLaunch.options;
   const windowKey = programWindowKey(programId, options);
@@ -985,6 +1013,7 @@ function createProgramWindow(programId, options = {}) {
 }
 
 function createRosterPickerWindow(projectId, parentWindow = mainWindow) {
+  assertUpdateNotClosing();
   const key = String(projectId || 'quick');
   const existing = rosterPickerWindows.get(key);
   if (existing && !existing.isDestroyed()) {
@@ -1090,36 +1119,17 @@ function registerIpc() {
     });
   });
   ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData'), ...updateLaunchNotice.consume() }));
-  ipcMain.handle('workspace:update-status', () => ({ currentVersion: app.getVersion(), packaged: app.isPackaged, portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR), checked: lastUpdateCheck }));
-  ipcMain.handle('workspace:update-check', async () => {
-    lastUpdateCheck = await UpdateService.checkForUpdate(app.getVersion());
-    return { ...lastUpdateCheck, packaged: app.isPackaged, portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR) };
-  });
+  ipcMain.handle('workspace:update-status', () => standardUpdater.status());
+  ipcMain.handle('workspace:update-check', () => standardUpdater.check());
   ipcMain.handle('workspace:update-install', async (event) => {
-    if (!app.isPackaged) throw new Error('개발 실행에서는 업데이트 설치를 시작하지 않습니다.');
-    if (process.env.PORTABLE_EXECUTABLE_DIR) throw new Error('휴대형은 자동 설치하지 않습니다. 다운로드 페이지에서 새 휴대형 파일을 받아주세요.');
-    if (!lastUpdateCheck?.available) throw new Error('먼저 새 버전 확인을 완료해주세요.');
-    if (updateDownloadPromise) return updateDownloadPromise;
-    const feed = lastUpdateCheck.feed;
-    const updateRoot = path.join(app.getPath('temp'), 'cmoe-workspace-update', feed.version);
-    const installerPath = path.join(updateRoot, path.basename(new URL(feed.url).pathname));
-    updateDownloadAbortController = new AbortController();
-    broadcastUpdateProgress({ stage: 'starting', message: `CMOE Workspace ${feed.version} 업데이트를 준비하고 있습니다.`, received: 0, total: feed.bytes, percent: 0 }, event.sender);
-    updateDownloadPromise = UpdateService.downloadInstaller(feed, installerPath, globalThis.fetch, (progress) => {
-      broadcastUpdateProgress(progress, event.sender);
-    }, { signal: updateDownloadAbortController.signal }).then((downloadedPath) => {
-      pendingUpdateLaunch = { installerPath: downloadedPath, expectedSha256: feed.sha256, expectedBytes: feed.bytes, expectedVersion: feed.version, appPath: process.execPath, pid: process.pid };
-      broadcastUpdateProgress({ stage: 'saving', message: '작업 내용을 저장하고 안전 백업을 준비하고 있습니다.', received: feed.bytes, total: feed.bytes, percent: 100 }, event.sender);
-      setTimeout(() => app.quit(), 300);
-      return { ready: true, version: feed.version };
-    }).finally(() => { updateDownloadPromise = null; updateDownloadAbortController = null; });
-    return updateDownloadPromise;
+    const result = await standardUpdater.download();
+    pendingStandardInstall = { expectedVersion: result.version };
+    updateShutdownGate.begin();
+    broadcastUpdateProgress({ stage: 'saving', message: '모든 CMOE 창과 작업을 저장하고 안전하게 종료합니다.', percent: 100 }, event.sender);
+    setTimeout(() => app.quit(), 300);
+    return result;
   });
-  ipcMain.handle('workspace:update-cancel', () => {
-    if (!updateDownloadAbortController || !updateDownloadPromise) return { canceled: false };
-    updateDownloadAbortController.abort();
-    return { canceled: true };
-  });
+  ipcMain.handle('workspace:update-cancel', () => standardUpdater.cancel());
   ipcMain.handle('workspace:update-open-downloads', () => shell.openExternal('https://cresero.com/downloads/cmoe-workspace'));
   ipcMain.handle('workspace:cloud-backup-create', () => createWorkspaceCloudBackup());
   ipcMain.handle('workspace:cloud-backup-latest', async () => {
@@ -1146,8 +1156,8 @@ function registerIpc() {
     return { ok: true, token, expiresAt, keys };
   });
   ipcMain.handle('workspace:external-release', (event, token) => ({ ok: true, released: releaseExternalReservation(String(token || ''), event.sender.id) }));
-  ipcMain.handle('program:open', (event, programId, options = {}) => { assertGuideModeAllows(event, '별도 프로그램 열기'); if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
-  ipcMain.handle('workspace:roster:open-picker', (event, projectId) => { assertGuideModeAllows(event, '공용 명단 관리 창 열기'); createRosterPickerWindow(projectId, BrowserWindow.fromWebContents(event.sender) || mainWindow); return { ok: true }; });
+  ipcMain.handle('program:open', (event, programId, options = {}) => { assertGuideModeAllows(event, '별도 프로그램 열기'); assertUpdateNotClosing(); if (!isProgramId(programId)) throw new Error('알 수 없는 프로그램입니다.'); createProgramWindow(programId, options); return { ok: true }; });
+  ipcMain.handle('workspace:roster:open-picker', (event, projectId) => { assertGuideModeAllows(event, '공용 명단 관리 창 열기'); assertUpdateNotClosing(); createRosterPickerWindow(projectId, BrowserWindow.fromWebContents(event.sender) || mainWindow); return { ok: true }; });
   ipcMain.handle('workspace:roster:sources', async (_event, projectId) => {
     const current = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
     const project = current.projects.find((item) => item.id === (projectId || current.activeProjectId)) || current.quickWorkspaces?.people;
@@ -1802,9 +1812,9 @@ app.on('before-quit', (event) => {
   event.preventDefault();
   if (quitFlushInProgress) return;
   quitFlushInProgress = true;
-  if (pendingUpdateLaunch) broadcastUpdateProgress({ stage: 'saving', message: '열린 작업과 메일 상태를 안전하게 저장하고 있습니다.', percent: 100 });
+  if (pendingStandardInstall) broadcastUpdateProgress({ stage: 'saving', message: '열린 작업과 메일 상태를 안전하게 저장하고 있습니다.', percent: 100 });
   documentTools?.requestShutdownDrain?.();
-  const windows = [...new Set([mainWindow, ...programWindows.values(), ...rosterPickerWindows.values()].filter((window) => window && !window.isDestroyed()))];
+  const windows = collectOwnedWindows(BrowserWindow);
   windows.forEach((window) => window.setEnabled(false));
   (async () => {
     const flushResults = await Promise.all(windows.map((window) => flushWorkspaceWindow(window, 15_000)));
@@ -1834,23 +1844,25 @@ app.on('before-quit', (event) => {
       const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : windows.find((window) => !window.isDestroyed());
       await showRemoteSyncPendingWarning(parent, remoteWarnings).catch(console.error);
     }
-    if (pendingUpdateLaunch) {
+    if (pendingStandardInstall) {
       broadcastUpdateProgress({ stage: 'backup-local', message: '사용자 자료의 로컬 안전 백업을 만들고 있습니다.', percent: 100 });
-      const backup = await backupWorkspacePersistentData(pendingUpdateLaunch.expectedVersion);
-      pendingUpdateLaunch.backupPath = backup.snapshotPath;
+      const backup = await backupWorkspacePersistentData(pendingStandardInstall.expectedVersion);
+      pendingStandardInstall.backupPath = backup.snapshotPath;
       const updateState = WorkspaceCore.normalizeState(await storage.get('workspaceState', null));
       if (updateState.preferences.storageMode === 'drive') {
         broadcastUpdateProgress({ stage: 'backup-cloud', message: 'Google Drive 안전 백업을 만들고 있습니다.', percent: 100 });
         const cloudBackup = await withOperationTimeout(
-          createWorkspaceCloudBackup(pendingUpdateLaunch.expectedVersion, { recordState: false }), 5 * 60_000,
+          createWorkspaceCloudBackup(pendingStandardInstall.expectedVersion, { recordState: false }), 5 * 60_000,
           'Google Drive 업데이트 백업이 완료되지 않아 업데이트를 취소했습니다.',
           'UPDATE_CLOUD_BACKUP_TIMEOUT'
         );
-        pendingUpdateLaunch.cloudBackupFile = cloudBackup.name;
+        pendingStandardInstall.cloudBackupFile = cloudBackup.name;
       }
-      broadcastUpdateProgress({ stage: 'installing', message: '백업이 완료되었습니다. 앱을 종료하고 업데이트를 설치합니다.', percent: 100 });
-      await UpdateHelperLauncher.launchUpdateHelper(pendingUpdateLaunch);
-      pendingUpdateLaunch = null;
+      broadcastUpdateProgress({ stage: 'installing', message: '백업이 완료되었습니다. 모든 CMOE 창을 닫고 표준 설치기로 전환합니다.', percent: 100 });
+      pendingStandardInstall = null;
+      quitReady = true; isQuitting = true;
+      standardUpdater.install();
+      return;
     }
     quitReady = true; isQuitting = true; app.quit();
   })().catch((error) => {
@@ -1858,16 +1870,18 @@ app.on('before-quit', (event) => {
     documentTools?.resumeAfterShutdownAbort?.();
     void gmailFlowHost?.resumeMailQueue?.().catch(console.error);
     windows.forEach((window) => { if (!window.isDestroyed()) window.setEnabled(true); });
-    if (pendingUpdateLaunch) {
+    if (pendingStandardInstall) {
       broadcastUpdateProgress({ stage: 'error', message: error?.message || '업데이트 전에 작업을 저장하지 못했습니다.', percent: 100 });
-      pendingUpdateLaunch = null;
+      pendingStandardInstall = null;
     }
+    updateShutdownGate.reset();
     const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
     void dialog.showMessageBox(parent, { type: 'warning', title: '변경사항 저장 필요', message: '아직 저장하지 못한 변경사항이 있어 앱을 종료하지 않았습니다.', detail: error?.message || '잠시 후 다시 시도해주세요.' });
   });
 });
 app.on('activate', () => { if (!mainWindow && !programWindows.size) showWindow(); });
 app.on('second-instance', (_event, argv) => {
+  if (updateShutdownGate.active) { if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); } return; }
   const programId = requestedProgram(argv);
   if (programId) createProgramWindow(programId, { projectId: requestedProjectId(argv), documentMode: requestedDocumentMode(argv) });
   else { if (mainWindow?.isMinimized()) mainWindow.restore(); showWindow(); }
@@ -1990,6 +2004,31 @@ app.whenReady().then(async () => {
     await fs.promises.writeFile(versionMarkerPath, `${JSON.stringify({ version: app.getVersion(), executablePath: process.execPath, confirmedAt: new Date().toISOString() }, null, 2)}\n`, 'utf8');
   }
   if (initialProgram && !isSmokeTest) createProgramWindow(initialProgram, { projectId: requestedProjectId(), documentMode: requestedDocumentMode() }); else createWindow();
+
+  if (app.getName() === 'cmoe-workspace-update-test' && startedAfterUpdate) {
+    const marker = await storage.get('updateE2EMarker', null);
+    await writeUpdateE2EResult({ phase: 'restarted', version: app.getVersion(), markerPreserved: marker?.value === 'preserve-across-standard-update' });
+  } else if (updateE2EMode) {
+    await storage.set('updateE2EMarker', { value: 'preserve-across-standard-update', createdByVersion: app.getVersion() });
+    setTimeout(async () => {
+      try {
+        createProgramWindow('gmailFlow');
+        createProgramWindow(DOCUMENT_EDITOR_ID);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const openWindows = collectOwnedWindows(BrowserWindow).map((window) => window.getTitle()).sort();
+        await writeUpdateE2EResult({ phase: 'windows-open', version: app.getVersion(), openWindows });
+        const checked = await standardUpdater.check();
+        if (!checked.available) throw new Error('E2E 피드에 후속 버전이 없습니다.');
+        const downloaded = await standardUpdater.download();
+        pendingStandardInstall = { expectedVersion: downloaded.version };
+        updateShutdownGate.begin();
+        await writeUpdateE2EResult({ phase: 'downloaded', version: app.getVersion(), targetVersion: downloaded.version, openWindows });
+        app.quit();
+      } catch (error) {
+        await writeUpdateE2EResult({ phase: 'failed', version: app.getVersion(), error: error?.stack || String(error) }).catch(console.error);
+      }
+    }, 2000);
+  }
 
   if (isSmokeTest) {
     writeSmokeResult('running', { step: 'started' });

@@ -6028,7 +6028,7 @@
     install.textContent = appUpdateState.portable ? '설치형으로 전환' : appUpdateState.installing ? '업데이트 준비 중…' : '다운로드 후 업데이트';
     const updateProgress = appUpdateState.progress || {};
     const stage = String(updateProgress.stage || (appUpdateState.installing ? 'starting' : ''));
-    const downloadStage = ['starting', 'connecting', 'downloading', 'verifying', 'verified'].includes(stage);
+    const downloadStage = ['starting', 'checking', 'connecting', 'downloading', 'verifying', 'verified'].includes(stage);
     progress.hidden = !appUpdateState.installing && !appUpdateState.progress;
     if (!progress.hidden) progress.textContent = downloadStage
       ? `${updateProgress.message || '업데이트 준비 중…'}${updateProgress.total ? ` · ${Math.round(updateProgress.percent || 0)}% · ${Math.round((updateProgress.received || 0) / 1024 / 1024)}MB / ${Math.round(updateProgress.total / 1024 / 1024)}MB` : ''}`
@@ -6037,7 +6037,7 @@
     if (!dialog) return;
     const showDialog = appUpdateState.installing || appUpdateState.completed || Boolean(appUpdateState.error && appUpdateState.progress);
     if (showDialog && !dialog.open) openDialog('appUpdateDialog');
-    const stageIndex = { starting: 1, connecting: 1, downloading: 1, verifying: 2, verified: 2, saving: 3, 'backup-local': 3, 'backup-cloud': 3, installing: 4, complete: 4, error: 1 }[stage] || 1;
+    const stageIndex = { starting: 1, checking: 1, connecting: 1, downloading: 1, verifying: 2, verified: 2, saving: 3, 'backup-local': 3, 'backup-cloud': 3, installing: 4, complete: 4, error: 1 }[stage] || 1;
     $$('#appUpdateStageIndicator span').forEach((item, index) => item.classList.toggle('active', index < stageIndex));
     dialog.classList.toggle('update-complete', appUpdateState.completed || stage === 'complete');
     dialog.classList.toggle('update-error', Boolean(appUpdateState.error || stage === 'error'));
@@ -9339,7 +9339,7 @@
         appUpdateState.progress = { stage: 'error', message: appUpdateState.error, percent: 100 };
       }
       renderAppUpdate();
-      if (appUpdateState.packaged && !smokeDiagnostics) setTimeout(() => void checkAppUpdate({ quiet: true }), 1500);
+      if (appUpdateState.packaged && !smokeDiagnostics && !standaloneProgram) setTimeout(() => void checkAppUpdate({ quiet: true }), 1500);
       globalThis.workspaceDesktop.onStateChanged((nextState) => {
         const normalized = Core.normalizeState(nextState);
         if (guideSession) {

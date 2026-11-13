@@ -291,3 +291,16 @@
 - 성공·실패·일반 실행과 두 번째 요청을 검사하는 회귀 시험, 전체 Node 시험, 빌드 사전검사를 통과했다.
 - 1.15.46 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.46-Windows.exe`, 크기 `111,032,222` bytes, SHA-256 `9E0A03E618350499A41822E4DFBA769B35F30118C0493E0D9ABEFD4D863CB486`, FileVersion 1.15.46, 서명 없음.
 - 현재 설치된 1.15.45의 자동 업데이트 후속판으로 배포해 한 번만 표시되는지 확인한다.
+
+## 1.15.46 표준 electron-updater 전환
+
+- 반복된 자체 PowerShell helper 문제를 구조적으로 끝내기 위해 자체 다운로드, bootstrap, Windows Forms helper와 수동 재실행 소유권을 제거했다. 1.15.46은 `electron-updater 6.8.12`의 `NsisUpdater`와 one-click NSIS를 사용한다.
+- 1.15.45까지는 기존 Cresero `update.json`이 전환용 1.15.46을 제공해야 한다. 1.15.46 이후에는 `/downloads/cmoe-workspace/updater/latest.yml`, 버전 설치 파일, `.blockmap` 세 표준 파일을 사용한다.
+- 전체 CMOE `BrowserWindow`를 저장·비활성화한 뒤 문서 처리, Gmail 작업 큐, Drive 동기화, 로컬/선택형 Drive 백업이 끝나야 `quitAndInstall(false, true)`로 넘긴다. 종료 준비 중 새 프로그램 창·명단 창·두 번째 인스턴스 실행은 차단한다. 외부 로그인 브라우저는 종료 대상이 아니다.
+- 앱이 열린 동안은 다운로드 실제 바이트를 표시하고, 앱 종료 뒤에는 실제 one-click NSIS 진행 창이 표시된다. 보조 설치기의 다음/완료 버튼 대기는 없고 설치가 끝나면 1회 자동 재실행한다.
+- 패키지에서는 `electron-log` 콘솔 전송을 꺼 GUI 앱의 닫힌 stdout `EPIPE`를 방지한다. 로그 파일은 `%APPDATA%/cmoe-workspace/logs/main.log`에 남는다. Generic provider는 `useMultipleRangeRequest: false`, `disableWebInstaller: true`다.
+- 설치본 런타임은 `resources/updater-runtime/node_modules`의 명시적 허용 목록으로 포함한다. preflight가 목록과 설치 여부를 확인한다. 런타임 `npm audit --omit=dev`는 취약점 0건이다.
+- 분리 시험 앱에서 1.15.46→1.15.47 실제 종단 시험을 통과했다. 열린 창은 Workspace/Gmail Flow/문서 편집 세 개였고, 다운로드·종료·NSIS 진행·자동 재실행 뒤 설치 EXE는 1.15.47, 저장 표식 보존은 true였다. `before-1.15.47-*` 로컬 스냅샷도 생성됐다.
+- 전체 Node 시험, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크가 통과했다.
+- 최종 운영 전환 산출물: `CMOE-Workspace-Setup-1.15.46-Windows.exe`, 111,711,150 bytes, SHA-256 `AB325D23350B0C95F203DCBE334D2F9986A71DC6259112726029B4E3088DFE7D`, FileVersion 1.15.46, NotSigned. blockmap 118,377 bytes, `latest.yml` size·SHA-512 일치.
+- 아직 공개하지 않은 상태에서는 1.15.45 운영 피드를 유지한다. 공개할 때 GitHub Release의 전환 설치 파일, 기존 `update.json`, 새 `/updater/latest.yml`·설치 파일·blockmap을 한 배포 단위로 올린다.

@@ -29,6 +29,17 @@ try {
   assert.equal(packageJson.build?.beforeBuild, 'scripts/electron-builder-hooks.js', 'electron-builder must use the self-contained runtime hook.');
   assert.equal(typeof require(path.join(workspaceRoot, packageJson.build.beforeBuild)).beforeBuild, 'function', 'electron-builder beforeBuild hook is invalid.');
   assert.ok((packageJson.build?.files || []).includes('desktop/**/*'), 'electron-builder must package all desktop runtime modules.');
+  const runtimePackages = [
+    'electron-log', 'electron-updater', 'builder-util-runtime', 'debug', 'ms', 'sax',
+    'fs-extra', 'graceful-fs', 'jsonfile', 'universalify', 'js-yaml', 'argparse',
+    'lazy-val', 'lodash.escaperegexp', 'lodash.isequal', 'semver', 'tiny-typed-emitter'
+  ];
+  const updaterRuntimeFiles = resources.find((entry) => entry?.from === 'node_modules' && entry?.to === 'updater-runtime/node_modules');
+  assert.ok(updaterRuntimeFiles, 'Installer updater runtime resource set is missing.');
+  runtimePackages.forEach((name) => {
+    assert.ok((updaterRuntimeFiles.filter || []).includes(`${name}/**/*`), `Installer runtime allowlist is missing ${name}.`);
+    require.resolve(`${name}/package.json`, { paths: [workspaceRoot] });
+  });
   [
     'certificate-roster-core.js',
     'document-tools-ui.js',
@@ -41,7 +52,8 @@ try {
     'desktop/drive-sync-guard.js',
     'desktop/external-commit.js',
     'desktop/transaction-queue.js',
-    'desktop/update-service.js',
+    'desktop/update-data-backup.js',
+    'desktop/standard-updater.js',
     'extensions/document-editor/manifest.json',
     'extensions/project-calendar/manifest.json',
     'build/installer.nsh'
@@ -65,6 +77,7 @@ try {
   assert.equal(packageJson.build?.appId, 'kr.co.cmoe.workspace', 'CMOE Workspace appId must remain stable for updates.');
   assert.equal(packageJson.build?.productName, 'CMOE Workspace', 'CMOE Workspace product name changed unexpectedly.');
   assert.equal(packageJson.build?.nsis?.include, 'build/installer.nsh', 'Installer maintenance UI must be included.');
+  assert.equal(packageJson.build?.nsis?.oneClick, true, 'Standard updater requires the one-click NSIS progress flow.');
   assert.equal(packageJson.build?.nsis?.deleteAppDataOnUninstall, false, 'Uninstall must preserve user data.');
   assert.equal(packageJson.build?.nsis?.allowToChangeInstallationDirectory, false, 'The installed app must keep one stable per-user installation path.');
   assert.deepEqual(packageJson.build?.win?.target, ['nsis'], 'CMOE Workspace must be distributed as an installer only.');

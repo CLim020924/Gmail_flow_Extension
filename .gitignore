@@ -8,5 +8,6 @@ desktop/oauth-credentials.local.js
 workspace/desktop/google-oauth-client.generated.json
 outputs/
 workspace/desktop-dist/
+workspace/desktop-dist-update-*/
 workspace/node_modules/
 workspace/vendor/node_modules/

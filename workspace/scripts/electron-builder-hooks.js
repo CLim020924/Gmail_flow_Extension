@@ -1,8 +1,7 @@
 async function beforeBuild() {
-  // Runtime dependencies are deliberately copied by build.files/extraResources.
-  // Returning false prevents electron-builder from trying to rediscover the
-  // development-only node_modules tree with a machine-specific package manager.
-  return false;
+  // Keep electron-builder's normal production dependency collection enabled.
+  // The explicit build.files allowlist below limits the application sources,
+  // while electron-builder resolves the updater's production dependency tree.
 }
 
 module.exports = { beforeBuild };

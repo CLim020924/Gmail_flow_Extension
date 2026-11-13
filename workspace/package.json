@@ -9,11 +9,12 @@
   "scripts": {
     "postinstall": "npm --prefix vendor ci --omit=dev",
     "desktop": "electron .",
-    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/google-forms.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node tests/drive-sync-guard.test.js && node tests/cloud-backup.test.js && node tests/transaction-queue.test.js && node tests/gmail-flow-host.test.js && node tests/external-commit.test.js && node tests/pptx-template.test.js && node tests/update-service.test.js && node tests/update-helper-launcher.test.js && node tests/update-launch-notice.test.js && node tests/install-shortcuts.test.js && node ../tests/cloud-sync-revision.test.js && node ../tests/oauth-optional-secret.test.js && node ../tests/background-attachment.test.js && node ../tests/oauth-login-hint.test.js && node ../tests/desktop-storage.test.js && node ../tests/online-scheduler-client.test.js && node ../tests/background-online-scheduler.test.js && node ../tests/apps-script-scheduler.test.js",
+    "test": "node tests/workspace-core.test.js && node tests/operations-core.test.js && node tests/google-forms.test.js && node tests/spreadsheet.test.js && node tests/auth-manager.test.js && node tests/extension-core.test.js && node tests/mail-mime.test.js && node tests/state-merge.test.js && node tests/drive-sync-guard.test.js && node tests/cloud-backup.test.js && node tests/transaction-queue.test.js && node tests/gmail-flow-host.test.js && node tests/external-commit.test.js && node tests/pptx-template.test.js && node tests/update-data-backup.test.js && node tests/standard-updater.test.js && node tests/update-shutdown-policy.test.js && node tests/update-launch-notice.test.js && node tests/install-shortcuts.test.js && node ../tests/cloud-sync-revision.test.js && node ../tests/oauth-optional-secret.test.js && node ../tests/background-attachment.test.js && node ../tests/oauth-login-hint.test.js && node ../tests/desktop-storage.test.js && node ../tests/online-scheduler-client.test.js && node ../tests/background-online-scheduler.test.js && node ../tests/apps-script-scheduler.test.js",
     "smoke": "node scripts/run-smoke.js",
     "preflight:build": "node scripts/preflight-build.js",
     "prebuild:installer": "npm run preflight:build",
-    "build:installer": "electron-builder --win nsis --x64"
+    "build:installer": "electron-builder --win nsis --x64",
+    "build:update-e2e": "electron-builder --win nsis --x64 --config build/update-e2e.config.js"
   },
   "devDependencies": {
     "electron": "43.2.0",
@@ -22,6 +23,14 @@
   "build": {
     "appId": "kr.co.cmoe.workspace",
     "productName": "CMOE Workspace",
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://cresero.com/downloads/cmoe-workspace/updater/",
+        "useMultipleRangeRequest": false
+      }
+    ],
+    "electronUpdaterCompatibility": ">=6.8.12",
     "beforeBuild": "scripts/electron-builder-hooks.js",
     "asar": true,
     "directories": {
@@ -67,6 +76,29 @@
         ]
       },
       {
+        "from": "node_modules",
+        "to": "updater-runtime/node_modules",
+        "filter": [
+          "electron-log/**/*",
+          "electron-updater/**/*",
+          "builder-util-runtime/**/*",
+          "debug/**/*",
+          "ms/**/*",
+          "sax/**/*",
+          "fs-extra/**/*",
+          "graceful-fs/**/*",
+          "jsonfile/**/*",
+          "universalify/**/*",
+          "js-yaml/**/*",
+          "argparse/**/*",
+          "lazy-val/**/*",
+          "lodash.escaperegexp/**/*",
+          "lodash.isequal/**/*",
+          "semver/**/*",
+          "tiny-typed-emitter/**/*"
+        ]
+      },
+      {
         "from": "..",
         "to": "gmail-flow",
         "filter": [
@@ -92,7 +124,7 @@
     },
     "nsis": {
       "artifactName": "CMOE-Workspace-Setup-${version}-Windows.${ext}",
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
@@ -102,5 +134,12 @@
       "allowElevation": false,
       "include": "build/installer.nsh"
     }
+  },
+  "dependencies": {
+    "electron-log": "5.4.4",
+    "electron-updater": "6.8.12"
+  },
+  "overrides": {
+    "js-yaml": "4.3.2"
   }
 }
