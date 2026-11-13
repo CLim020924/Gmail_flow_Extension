@@ -378,8 +378,9 @@
 - 실제 종단 검증: 운영 앱과 AppId·설치 폴더·userData가 분리된 시험 앱으로 1.15.46→1.15.47을 수행했다. 시작 시 `CMOE Workspace`, `Gmail Flow`, `문서 편집 · CMOE Workspace` 세 창이 열린 사실을 기록했고, 증분 다운로드·검증 후 세 창이 모두 닫히고 NSIS 진행 창만 남았다. 설치 완료 후 EXE FileVersion 1.15.47, 자동 재실행, 저장 표식 보존 `true`, 업데이트 전 로컬 스냅샷 생성을 확인했다.
 - 자동 검증: 전체 Node 회귀 시험, 빌드 사전검사, 런타임 의존성 감사, 11개 가이드·215단계 UI 스모크가 통과했다. 시험용 별도 앱/로컬 피드 구성은 `workspace/build/update-e2e.config.js`, `workspace/scripts/serve-update-e2e.js`에 남겨 다음 업데이트에도 재사용한다.
 - 최종 전환 설치 파일: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.46-Windows.exe`, 111,711,150 bytes, SHA-256 `AB325D23350B0C95F203DCBE334D2F9986A71DC6259112726029B4E3088DFE7D`, FileVersion 1.15.46, 서명 없음. `latest.yml`의 size·SHA-512와 실제 파일이 일치하고 blockmap은 118,377 bytes다.
-- 상태: 구현·로컬 종단 검증 완료 · 공개 배포 전환 작업 진행 중
-- 커밋: 진행 중
+- 공개 배포: 소스·배포 자산 GitHub Release `cmoe-workspace-v1.15.46`을 게시하고 Cresero Worker `10f58166-f12b-43dd-9300-a558b2c7800e`를 배포했다. 기존 `update.json`과 새 `updater/latest.yml`은 모두 1.15.46을 제공한다. 공개 설치 파일을 다시 내려받아 111,711,150 bytes와 SHA-256 일치를 확인했고 blockmap은 118,377 bytes다.
+- 상태: 구현·로컬 종단 검증·공개 배포 완료
+- 커밋: `0b2805e`
 
 ## 현재 미완료 또는 계속 개선할 항목
 

@@ -303,4 +303,4 @@
 - 분리 시험 앱에서 1.15.46→1.15.47 실제 종단 시험을 통과했다. 열린 창은 Workspace/Gmail Flow/문서 편집 세 개였고, 다운로드·종료·NSIS 진행·자동 재실행 뒤 설치 EXE는 1.15.47, 저장 표식 보존은 true였다. `before-1.15.47-*` 로컬 스냅샷도 생성됐다.
 - 전체 Node 시험, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크가 통과했다.
 - 최종 운영 전환 산출물: `CMOE-Workspace-Setup-1.15.46-Windows.exe`, 111,711,150 bytes, SHA-256 `AB325D23350B0C95F203DCBE334D2F9986A71DC6259112726029B4E3088DFE7D`, FileVersion 1.15.46, NotSigned. blockmap 118,377 bytes, `latest.yml` size·SHA-512 일치.
-- 아직 공개하지 않은 상태에서는 1.15.45 운영 피드를 유지한다. 공개할 때 GitHub Release의 전환 설치 파일, 기존 `update.json`, 새 `/updater/latest.yml`·설치 파일·blockmap을 한 배포 단위로 올린다.
+- GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.46`과 Cresero Worker `10f58166-f12b-43dd-9300-a558b2c7800e`를 공개했다. 기존 `update.json`과 새 `/updater/latest.yml`을 한 배포 단위로 1.15.46에 맞췄고, 공개 설치 파일 재다운로드 결과 111,711,150 bytes와 SHA-256이 원본과 일치했다. blockmap은 118,377 bytes다.

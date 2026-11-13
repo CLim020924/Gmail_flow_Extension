@@ -97,6 +97,6 @@
     "sourceLicenseZip": null,
     "localInstallResult": "isolated standard-updater E2E passed; production installation was not changed during local verification",
     "siteDeploymentExplicitScope": "publish the 1.15.46 bridge through the legacy update.json and publish the standard updater directory atomically",
-    "siteDeploymentResult": "pending public GitHub Release and Cresero deployment"
+    "siteDeploymentResult": "GitHub source and distribution releases cmoe-workspace-v1.15.46 published; Cresero Worker 10f58166-f12b-43dd-9300-a558b2c7800e deployed; legacy update.json and standard latest.yml verified; public installer bytes and SHA-256 match"
   }
 }
