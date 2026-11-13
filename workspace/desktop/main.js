@@ -39,6 +39,7 @@ const { DocumentTools } = require('./document-tools');
 const { createLoginBrowserLauncher } = require('./login-browser');
 const UpdateService = require('./update-service');
 const UpdateHelperLauncher = require('./update-helper-launcher');
+const { createUpdateLaunchNotice } = require('./update-launch-notice');
 const CloudBackup = require('./cloud-backup');
 const PUBLIC_OAUTH_CLIENTS = require('./public-oauth-clients');
 const { loadGoogleOAuthReleaseConfig } = require('./google-oauth-release-config');
@@ -160,6 +161,7 @@ let lastUpdateCheck = null;
 let updateDownloadPromise = null;
 let updateDownloadAbortController = null;
 let pendingUpdateLaunch = null;
+const updateLaunchNotice = createUpdateLaunchNotice(process.argv);
 const externalArtifactReservations = new Map();
 const externalReservationOwners = new Set();
 const guideModeOwners = new Set();
@@ -1087,7 +1089,7 @@ function registerIpc() {
       return { ok: true, state: next, merged: mergedState.merged, externalConflict, externalConflictReason };
     });
   });
-  ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData'), updated: process.argv.includes('--updated'), updateFailed: process.argv.includes('--update-failed') }));
+  ipcMain.handle('workspace:app-info', () => ({ version: app.getVersion(), userDataPath: app.getPath('userData'), ...updateLaunchNotice.consume() }));
   ipcMain.handle('workspace:update-status', () => ({ currentVersion: app.getVersion(), packaged: app.isPackaged, portable: Boolean(process.env.PORTABLE_EXECUTABLE_DIR), checked: lastUpdateCheck }));
   ipcMain.handle('workspace:update-check', async () => {
     lastUpdateCheck = await UpdateService.checkForUpdate(app.getVersion());
