@@ -312,4 +312,4 @@
 - Chrome 확장, 독립 Gmail Flow, CMOE Workspace 내 Gmail Flow가 공유하는 화면·코어에 적용했다. 버전은 확장 0.6.1, 독립 Gmail Flow 0.7.1, Workspace 1.15.47이다.
 - 전체/일부/해제 상태 단위시험, Gmail Flow 전체 시험, Workspace 전체 시험, 빌드 사전검사를 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.47-Windows.exe`, 111,711,351 bytes, SHA-256 `AFDA7C88ADA1AE63E59F43A11A311F291938196A2D2E46175A170099E308402E`, FileVersion 1.15.47, NotSigned. blockmap은 118,374 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
-- 공개 GitHub Release와 Cresero 업데이트 피드 배포 결과는 배포 완료 후 이 항목에 이어서 기록한다.
+- GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.47`과 Cresero Worker `2c536791-07d3-43eb-90a2-de6a75b7ba84`를 공개했다. `update.json`과 `updater/latest.yml`은 1.15.47을 제공한다. 공개 설치 파일을 다시 내려받아 111,711,351 bytes와 SHA-256이 로컬 원본과 일치함을 확인했고 공개 blockmap은 118,374 bytes다.

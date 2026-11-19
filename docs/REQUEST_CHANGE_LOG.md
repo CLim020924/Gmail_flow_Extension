@@ -391,8 +391,10 @@
 - 적용 범위: Chrome 확장 Gmail Flow, 독립 Gmail Flow 데스크톱, CMOE Workspace에 포함된 Gmail Flow가 같은 `popup.html`·`popup.js`·`core.js`를 사용하므로 모두 적용한다.
 - 검증: 일괄 승인 Set 생성·전체/일부/미확인 판정 단위시험, Gmail Flow 전체 시험, Workspace 전체 시험, 11개 가이드·215단계 Workspace UI 스모크를 통과했다.
 - 버전: Gmail Flow 데스크톱 0.7.1, Chrome 확장 0.6.1, CMOE Workspace 1.15.47.
-- 상태: 구현·회귀 검증 완료 · 설치형 빌드 및 공개 배포 진행 중
-- 커밋: 진행 중
+- 설치 파일: 111,711,351 bytes, SHA-256 `AFDA7C88ADA1AE63E59F43A11A311F291938196A2D2E46175A170099E308402E`, FileVersion 1.15.47, 서명 없음. blockmap은 118,374 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
+- 배포: GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.47`, Cresero Worker `2c536791-07d3-43eb-90a2-de6a75b7ba84`. 공개 `update.json`과 `updater/latest.yml`이 1.15.47을 제공하며, 공개 설치 파일 재다운로드 결과 크기·SHA-256이 로컬 원본과 일치했다.
+- 상태: 구현·회귀 검증·설치형 빌드·공개 배포 완료
+- 커밋: 앱 `c920853`, 사이트 `84ed737`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
