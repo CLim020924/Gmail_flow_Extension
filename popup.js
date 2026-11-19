@@ -97,7 +97,7 @@ const state = {
   draftEditBatchId: ''
 };
 
-const sendReviewState = { items: [], approved: new Set(), index: 0, senderEmail: '', method: '', scheduledAt: '', attachmentCount: 0, resolve: null };
+const sendReviewState = { items: [], approved: new Set(), index: 0, senderEmail: '', method: '', scheduledAt: '', attachmentCount: 0, intervalSeconds: 5, resolve: null };
 const WORKSPACE_DRAFT_KEY = 'workspaceDraft';
 const DATA_STORAGE_MODE_KEY = 'dataStorageMode';
 const CLOUD_SYNC_META_KEY = 'cloudSyncMeta';
@@ -2184,7 +2184,7 @@ function showTemplateDetail(id) {
   pushSubView('template-detail');
 }
 
-const STATUS_TEXT = { queued: '대기', processing: '처리 중', canceling: '취소 중', scheduled: '예약 대기', 'waiting-auth': 'Gmail 연결 필요', completed: '완료', failed: '실패', canceled: '취소' };
+const STATUS_TEXT = { queued: '대기', processing: '처리 중', canceling: '취소 중', scheduled: '예약 대기', verifying: '보낸편지함 확인 중', 'waiting-auth': 'Gmail 연결 필요', completed: '발송 확인', failed: '발송 실패', unconfirmed: '전송 확인 실패', canceled: '취소' };
 
 function statusText(status) { return STATUS_TEXT[status] || status || '대기'; }
 
@@ -2206,7 +2206,7 @@ async function sendRuntimeMessage(message) {
 }
 
 async function refreshMailActivity() {
-  if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'canceled'].includes(batch.status))) {
+  if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'unconfirmed', 'canceled'].includes(batch.status))) {
     try { await sendRuntimeMessage({ type: 'sync-online-mail-batches' }); } catch (_) {}
   }
   state.mailBatches = await storage.get('mailBatches', []);
@@ -2216,7 +2216,7 @@ async function refreshMailActivity() {
 }
 
 function batchProgress(batch) {
-  return batch.items.filter((item) => ['completed', 'failed', 'canceled', 'scheduled'].includes(item.status)).length;
+  return batch.items.filter((item) => ['completed', 'failed', 'unconfirmed', 'canceled', 'scheduled'].includes(item.status)).length;
 }
 
 function batchTotal(batch) {
@@ -2226,7 +2226,7 @@ function batchTotal(batch) {
 
 function renderOperationStatus() {
   const panel = $('#operationStatus');
-  const batch = state.mailBatches.find((item) => !['completed', 'failed', 'canceled'].includes(item.status));
+  const batch = state.mailBatches.find((item) => !['completed', 'failed', 'unconfirmed', 'canceled'].includes(item.status));
   if (!batch) { panel.hidden = true; return; }
   const processed = batchProgress(batch);
   const total = batchTotal(batch) || 1;
@@ -2258,7 +2258,7 @@ function renderHistory() {
 
 function renderQueue() {
   const container = $('#queueItems');
-  const active = state.mailBatches.filter((batch) => !['completed', 'failed', 'canceled'].includes(batch.status));
+  const active = state.mailBatches.filter((batch) => !['completed', 'failed', 'unconfirmed', 'canceled'].includes(batch.status));
   if (!active.length) {
     container.innerHTML = '<div class="empty-state">대기 중인 작업이 없습니다.</div>';
     return;
@@ -2369,7 +2369,10 @@ function showHistoryBatch(id, { push = true, checkStatus = true } = {}) {
   const draftStatusText = draftSummary
     ? ` · Gmail 확인 ${formatDateTime(draftSummary.checkedAt)}${draftSummary.modified ? ` · 수정됨 ${draftSummary.modified}` : ''}${draftSummary.missing ? ` · 삭제/발송 ${draftSummary.missing}` : ''}`
     : '';
-  $('#historyBatchMeta').textContent = `${formatDateTime(batch.createdAt)} · ${batch.method} · ${statusText(batch.status)} ${batch.completed || 0}/${batch.total || batch.items.length}${batch.attachments?.length ? ` · 첨부 ${batch.attachments.length}개` : ''}${draftStatusText}`;
+  const deliveryResultText = batch.method === '임시 저장'
+    ? ''
+    : ` · 보낸편지함 확인 ${batch.completed || 0} · 발송 실패 ${batch.failed || 0}${batch.unconfirmed ? ` · 확인 실패 ${batch.unconfirmed}` : ''}`;
+  $('#historyBatchMeta').textContent = `${formatDateTime(batch.createdAt)} · ${batch.method} · ${statusText(batch.status)} ${batch.completed || 0}/${batch.total || batch.items.length}${deliveryResultText}${batch.sendIntervalMs ? ` · ${Math.round(batch.sendIntervalMs / 1000)}초 간격` : ''}${batch.attachments?.length ? ` · 첨부 ${batch.attachments.length}개` : ''}${draftStatusText}`;
   $('#editDraftBatch').hidden = batch.method !== '임시 저장' || !batch.items.some((item) => item.draftId);
   $('#refreshDraftStatus').hidden = batch.method !== '임시 저장' || !batch.items.some((item) => item.draftId);
   $('#retryFailedBatch').hidden = !batch.items.some((item) => item.status === 'failed');
@@ -2460,14 +2463,27 @@ function renderSendReviewItem() {
   $('#sendReviewApproveAll').indeterminate = approval.partial;
   $('#previousSendReview').disabled = sendReviewState.index === 0;
   $('#nextSendReview').disabled = sendReviewState.index >= sendReviewState.items.length - 1;
-  $('#confirmSendReview').disabled = !approval.all;
+  updateSendReviewInterval();
 }
 
 function finishSendReview(approved) {
   const resolve = sendReviewState.resolve;
   sendReviewState.resolve = null;
   if ($('#sendReviewDialog').open) $('#sendReviewDialog').close();
-  resolve?.(approved);
+  resolve?.(approved ? { approved: true, sendIntervalSeconds: sendReviewState.intervalSeconds } : null);
+}
+
+function updateSendReviewInterval() {
+  const input = $('#sendReviewIntervalSeconds');
+  const numeric = Math.round(Number(input.value));
+  const valid = Number.isFinite(numeric) && numeric >= 2 && numeric <= 60;
+  input.setCustomValidity(valid ? '' : '2초에서 60초 사이의 값을 입력해주세요.');
+  if (valid) sendReviewState.intervalSeconds = numeric;
+  const approval = GmailFlowCore.reviewApprovalState(sendReviewState.items.length, sendReviewState.approved);
+  $('#confirmSendReview').disabled = !approval.all || !valid;
+  $('#sendReviewIntervalHint').textContent = valid && numeric < 5
+    ? '5초 미만은 Gmail 또는 수신 회사의 제한에 걸릴 가능성이 높습니다.'
+    : '권장값은 5초입니다. 같은 회사로 집중 발송할 때는 8~10초가 더 안전합니다.';
 }
 
 function openSendReview(items, method, scheduledAt, senderEmail, attachments = state.attachments) {
@@ -2478,6 +2494,8 @@ function openSendReview(items, method, scheduledAt, senderEmail, attachments = s
   sendReviewState.method = method;
   sendReviewState.scheduledAt = scheduledAt;
   sendReviewState.attachmentCount = Array.isArray(attachments) ? attachments.length : 0;
+  sendReviewState.intervalSeconds = 5;
+  $('#sendReviewIntervalSeconds').value = '5';
   $('#sendReviewTitle').textContent = method === '예약 발송' ? '예약 발송 최종 확인' : '즉시 발송 최종 확인';
   $('#sendReviewRecipient').replaceChildren(...items.map((item, index) => {
     const option = document.createElement('option');
@@ -2978,9 +2996,14 @@ function bindEvents() {
     sendReviewState.approved = GmailFlowCore.createReviewApprovalSet(sendReviewState.items.length, event.target.checked);
     renderSendReviewItem();
   });
+  $('#sendReviewIntervalSeconds').addEventListener('input', updateSendReviewInterval);
   $('#previousSendReview').addEventListener('click', () => { if (sendReviewState.index > 0) { sendReviewState.index -= 1; renderSendReviewItem(); } });
   $('#nextSendReview').addEventListener('click', () => { if (sendReviewState.index < sendReviewState.items.length - 1) { sendReviewState.index += 1; renderSendReviewItem(); } });
-  $('#confirmSendReview').addEventListener('click', () => { if (sendReviewState.approved.size === sendReviewState.items.length) finishSendReview(true); });
+  $('#confirmSendReview').addEventListener('click', () => {
+    updateSendReviewInterval();
+    if (!$('#sendReviewIntervalSeconds').reportValidity()) return;
+    if (sendReviewState.approved.size === sendReviewState.items.length) finishSendReview(true);
+  });
   $('#cancelSendReview').addEventListener('click', () => finishSendReview(false));
   $('#cancelSendReviewTop').addEventListener('click', () => finishSendReview(false));
   $('#sendReviewDialog').addEventListener('cancel', (event) => { event.preventDefault(); finishSendReview(false); });
@@ -3003,6 +3026,7 @@ function bindEvents() {
       return;
     }
     const scheduledAt = method === '예약 발송' ? new Date(`${$('#scheduleDate').value}T${$('#scheduleTime').value}`).toISOString() : '';
+    let sendReviewResult = null;
     if (method === '임시 저장') {
       if (!await showConfirm(`${count}개의 Gmail 초안을 생성할까요?`, '초안 생성 확인', '생성')) return;
     } else {
@@ -3010,8 +3034,8 @@ function bindEvents() {
         ? `예약 발송 형식입니다.\n${count}명에게 ${formatDateTime(scheduledAt)}에 발송하시겠습니까?\nGmail 초안으로 저장한 뒤 온라인에서 발송하므로 등록 후 PC를 꺼도 됩니다.`
         : `즉시 발송 형식입니다.\n${count}명에게 지금 바로 발송하시겠습니까?`;
       if (!await showConfirm(firstWarning, '발송 확인', method === '예약 발송' ? '예약' : '계속')) return;
-      const individuallyApproved = await openSendReview(rechecked.items, method, scheduledAt, connection.email || '');
-      if (!individuallyApproved) return;
+      sendReviewResult = await openSendReview(rechecked.items, method, scheduledAt, connection.email || '');
+      if (!sendReviewResult) return;
     }
     $('#composeAction').disabled = true;
     try {
@@ -3026,6 +3050,7 @@ function bindEvents() {
           bodyTemplate: $('#body').value,
           postscriptTemplate: $('#postscript').value,
           scheduledAt,
+          sendIntervalMs: (sendReviewResult?.sendIntervalSeconds || 5) * 1000,
           senderEmail: connection.email || '',
           attachments: state.attachments,
           items: rechecked.items
@@ -3034,7 +3059,10 @@ function bindEvents() {
       await refreshMailActivity();
       state.attachments = [];
       renderAttachments();
-      await showAlert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}\nGmail 초안 저장 완료 · 예약 시각에는 온라인에서 발송됩니다.`);
+      const registrationDetail = method === '예약 발송'
+        ? 'Gmail 초안 저장 완료 · 예약 시각에 발송한 뒤 보낸편지함 기록까지 확인합니다.'
+        : '발송한 뒤 Gmail 보낸편지함에서 실제 기록이 확인되어야 성공으로 표시됩니다.';
+      await showAlert(`${batch.name} 작업이 등록되었습니다.\n현재 상태: ${statusText(batch.status)}\n${registrationDetail}`);
       showPage(method === '예약 발송' ? 'queue' : 'history');
     } catch (error) {
       await showAlert(error.message);
@@ -3364,7 +3392,7 @@ function bindEvents() {
       const config = await saveOnlineSchedulerSettings({ test: true });
       const result = await sendRuntimeMessage({ type: 'online-scheduler-test', config });
       state.onlineSchedulerConfig.verifiedAt = result.verifiedAt || new Date().toISOString();
-      renderOnlineSchedulerStatus(`연결됨 · ${result.senderEmail || 'Google 계정'} · ${result.triggerReady ? '1분 트리거 정상' : '트리거 확인 필요'} · 5초 안전 간격`);
+      renderOnlineSchedulerStatus(`연결됨 · ${result.senderEmail || 'Google 계정'} · ${result.triggerReady ? '1분 트리거 정상' : '트리거 확인 필요'} · 발송할 때 2~60초 간격 선택`);
       updateComposeState();
     } catch (error) {
       renderOnlineSchedulerStatus(`연결 실패 · ${error.message}`);
@@ -3518,7 +3546,8 @@ function bindEvents() {
       return;
     }
     if (!await showConfirm(`실패한 ${failedItems.length}명에게만 즉시 다시 보낼까요?\n이미 성공한 대상은 포함하지 않습니다.`, '실패 대상 재전송', '본문 확인')) return;
-    if (!await openSendReview(failedItems, '즉시 발송', '', connection.email || '', batch.attachments || [])) return;
+    const retryReviewResult = await openSendReview(failedItems, '즉시 발송', '', connection.email || '', batch.attachments || []);
+    if (!retryReviewResult) return;
     const button = $('#retryFailedBatch');
     button.disabled = true;
     try {
@@ -3526,6 +3555,7 @@ function bindEvents() {
         type: 'enqueue-mail-batch',
         payload: {
           name: `${batch.name} · 실패 재전송`, method: '즉시 발송', senderEmail: connection.email || '', scheduledAt: '', label: '',
+          sendIntervalMs: (retryReviewResult.sendIntervalSeconds || 5) * 1000,
           subjectTemplate: batch.subjectTemplate || '', bodyTemplate: batch.bodyTemplate || '', postscriptTemplate: batch.postscriptTemplate || '',
           attachments: batch.attachments || [],
           items: failedItems.map((item) => ({ email: item.email, subject: item.subject, body: item.body, variables: item.variables || {} }))
@@ -3621,7 +3651,7 @@ async function init() {
   } catch (_) {
     state.onlineSchedulerConfig = { mode: 'online', url: '', secret: '', verifiedAt: '' };
   }
-  if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'canceled'].includes(batch.status))) {
+  if (state.mailBatches.some((batch) => batch.schedulerMode === 'online' && !['completed', 'failed', 'unconfirmed', 'canceled'].includes(batch.status))) {
     try {
       await sendRuntimeMessage({ type: 'sync-online-mail-batches' });
       state.mailBatches = await storage.get('mailBatches', []);

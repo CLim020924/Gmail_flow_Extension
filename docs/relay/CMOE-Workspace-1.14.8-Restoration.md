@@ -324,3 +324,12 @@
 - 전체 Node 시험, Retry-After·영구 오류·혼합 결과·로컬 영속 큐·온라인 12명 분할 시험, 빌드 사전검사, 11개 가이드·215단계 UI 스모크를 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.48-Windows.exe`, 111,720,067 bytes, SHA-256 `1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4`, FileVersion 1.15.48, NotSigned. blockmap은 118,413 bytes이며 `latest.yml`과 일치한다.
 - GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.48`과 Cresero Worker `f0136cc6-110e-4ac2-aa26-8cbda98320f3`를 공개했다. 공개 피드 2종, 설치 파일, blockmap, 변경 안내와 온라인 설정 ZIP을 확인했고 재다운로드 설치 파일의 크기·SHA-256이 로컬 원본과 일치했다.
+
+## 1.15.49 작업별 발송 간격과 Gmail 보낸편지함 확인
+
+- 즉시 발송·예약 발송·실패 대상 재전송의 최종 확인창에서 2~60초 간격을 작업마다 선택한다. 기본 5초, 5초 미만 경고, 동일 회사 집중 발송 8~10초 안내를 유지한다. 1초 간격은 발송과 보낸편지함 확인 API 합산 할당량 때문에 제외한다.
+- 로컬 Gmail 큐는 선택 간격을 작업에 영속 저장하고 발신 계정 전체 대기 시각에 적용한다. 온라인 Apps Script는 정책 버전 3에서 같은 간격을 사용하며, 긴 간격에는 실행당 처리 수를 줄여 누적 sleep이 4분을 넘지 않게 한다.
+- Gmail API 발송 응답만으로 성공 처리하지 않는다. 반환된 메시지 ID를 다시 조회해 `SENT` 시스템 라벨이 확인된 경우에만 `발송 확인`으로 완료한다. 조회 지연은 조회만 최대 10회 재시도하며 절대 다시 발송하지 않는다. 끝내 확인하지 못하면 `전송 확인 실패`로 분리하고 실패 대상 재전송에서 제외한다.
+- 전체 Gmail Flow 및 Workspace Node 시험, 11개 가이드·215단계 Electron UI 스모크, 빌드 사전검사를 통과했다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.49-Windows.exe`, 111,722,707 bytes, SHA-256 `4E5D35C7C0EEAE35D97730841845457877C394B6ACDE69911F194270C8F7F842`, FileVersion/ProductVersion 1.15.49, NotSigned. blockmap 118,438 bytes이며 `latest.yml`과 일치한다.
+- 패키지의 Gmail Flow와 `online-scheduler-setup`에 전송 간격 UI, 정책 버전 3, 보낸편지함 확인 코드가 포함된 것을 확인했다. 1.15.49 공개 배포는 이번 변경 시점에 수행하지 않았으며 기존 1.15.48 피드는 유지된다.

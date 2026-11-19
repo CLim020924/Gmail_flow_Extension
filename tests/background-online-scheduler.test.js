@@ -37,7 +37,7 @@ global.fetch = async (url, options = {}) => {
   assert.match(String(url), /^https:\/\/script\.google\.com\//);
   const request = JSON.parse(options.body);
   scriptRequests.push(request);
-  if (request.action === 'health') return response({ senderEmail, triggerReady: true, deliveryPolicyVersion: 2, sendIntervalMs: 5000 });
+  if (request.action === 'health') return response({ senderEmail, triggerReady: true, deliveryPolicyVersion: 3, sendIntervalMs: 5000, configurableSendInterval: true });
   if (request.action === 'enqueue') return response(remoteJob(request.job));
   if (request.action === 'status') return response({ jobs: [remoteJob({ id: request.jobIds[0], name: '온라인 테스트', senderEmail, scheduledAt: '2030-01-01T00:00:00.000Z', items: [{ id: 'item-1', email: 'to@example.com', subject: '제목', body: '본문', variables: {} }] })], checkedAt: new Date().toISOString() });
   if (request.action === 'cancel') { remoteStatus = 'canceled'; return response(remoteJob({ id: request.jobId, name: '온라인 테스트', senderEmail, scheduledAt: '2030-01-01T00:00:00.000Z', items: [{ id: 'item-1', email: 'to@example.com', subject: '제목', body: '본문', variables: {} }] })); }
@@ -53,7 +53,7 @@ function remoteJob(job) {
   const items = (job.items || []).map((item) => ({ ...item, status, attempts: 0, error: '', draftId: 'draft-1', scheduledAt: job.scheduledAt }));
   return {
     id: job.id, onlineJobId: job.id, schedulerMode: 'online', name: job.name,
-    method: '예약 발송', senderEmail: job.senderEmail, scheduledAt: job.scheduledAt,
+    method: '예약 발송', senderEmail: job.senderEmail, scheduledAt: job.scheduledAt, sendIntervalMs: job.sendIntervalMs,
     status, total: items.length, completed: status === 'completed' ? items.length : 0, failed: 0,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), items
   };
@@ -78,15 +78,18 @@ function send(message) {
     type: 'enqueue-mail-batch',
     payload: {
       name: '온라인 테스트', method: '예약 발송', senderEmail, scheduledAt: '2030-01-01T00:00:00.000Z',
+      sendIntervalMs: 10000,
       attachments: [], subjectTemplate: '제목', bodyTemplate: '본문', postscriptTemplate: '',
       items: [{ id: 'item-1', email: 'to@example.com', subject: '제목', body: '본문', variables: {} }]
     }
   });
   assert.equal(enqueued.ok, true);
   assert.equal(enqueued.data.schedulerMode, 'online');
+  assert.equal(enqueued.data.sendIntervalMs, 10000);
   assert.equal(data.mailBatches[0].status, 'scheduled');
   assert.equal(alarmCreates, 0, 'online jobs must not be armed in the local alarm queue');
   assert.deepEqual(scriptRequests.map((request) => request.action), ['health', 'health', 'enqueue']);
+  assert.equal(scriptRequests.find((request) => request.action === 'enqueue').job.sendIntervalMs, 10000);
 
   const synced = await send({ type: 'sync-online-mail-batches' });
   assert.equal(synced.ok, true);

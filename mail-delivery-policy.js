@@ -1,9 +1,18 @@
 (function initMailDeliveryPolicy(globalScope) {
   const policy = Object.freeze({
     sendIntervalMs: 5_000,
+    minSendIntervalMs: 2_000,
+    maxSendIntervalMs: 60_000,
     maxAttempts: 8,
     maxRetryDelayMs: 24 * 60 * 60 * 1000
   });
+
+  function normalizeSendIntervalMs(value, fallback = policy.sendIntervalMs) {
+    const numeric = Number(value);
+    const fallbackValue = Number.isFinite(Number(fallback)) ? Number(fallback) : policy.sendIntervalMs;
+    const milliseconds = Number.isFinite(numeric) ? Math.round(numeric) : Math.round(fallbackValue);
+    return Math.max(policy.minSendIntervalMs, Math.min(policy.maxSendIntervalMs, milliseconds));
+  }
 
   function parseRetryAfter(value, now = Date.now()) {
     const text = String(value || '').trim();
@@ -37,7 +46,7 @@
     return Math.min(policy.maxRetryDelayMs, delay + Math.floor(Math.max(0, Number(random()) || 0) * Math.min(base, 30_000)));
   }
 
-  const api = { classify, parseRetryAfter, policy, retryDelayMs };
+  const api = { classify, normalizeSendIntervalMs, parseRetryAfter, policy, retryDelayMs };
   globalScope.GmailFlowMailDeliveryPolicy = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

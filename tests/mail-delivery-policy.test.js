@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 assert.equal(Delivery.policy.sendIntervalMs, 5_000);
+assert.equal(Delivery.normalizeSendIntervalMs(10_000), 10_000);
+assert.equal(Delivery.normalizeSendIntervalMs(0), 2_000);
+assert.equal(Delivery.normalizeSendIntervalMs(90_000), 60_000);
+assert.equal(Delivery.normalizeSendIntervalMs(undefined), 5_000);
 assert.equal(Delivery.policy.maxAttempts, 8);
 assert.equal(Delivery.parseRetryAfter('120', 0), 120_000);
 assert.equal(Delivery.parseRetryAfter('Thu, 01 Jan 2026 00:02:00 GMT', Date.parse('2026-01-01T00:00:00Z')), 120_000);
@@ -19,6 +23,8 @@ assert.equal(Delivery.retryDelayMs({ status: 503 }, 3, () => 0), 20_000);
 const popupHtml = fs.readFileSync(path.join(__dirname, '..', 'popup.html'), 'utf8');
 const popupScript = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
 assert.match(popupHtml, /id="retryFailedBatch"/);
+assert.match(popupHtml, /id="sendReviewIntervalSeconds"[^>]*min="2"[^>]*max="60"[^>]*value="5"/);
+assert.match(popupScript, /sendIntervalMs: \(sendReviewResult\?\.sendIntervalSeconds \|\| 5\) \* 1000/);
 assert.match(popupScript, /filter\(\(item\) => item\.status === 'failed'\)/);
 assert.match(popupScript, /이미 성공한 대상은 포함하지 않습니다/);
 

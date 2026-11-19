@@ -241,6 +241,11 @@ button.compose-variable-chip { cursor: pointer; }
 .send-review-checks .review-check + .review-check { border-top: 1px solid #e3e3df; }
 .review-check-all { background: #f3f5f6; color: #25313c; font-weight: 700; }
 .review-check input { margin-top: 2px; }
+.send-interval-field { margin: 12px 0; }
+.send-interval-control { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.send-interval-control input { width: 92px; }
+.send-interval-control span { color: #333; font-weight: 700; }
+.send-interval-field small { margin-top: 5px; }
 .send-review-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .send-review-actions > div { display: flex; gap: 6px; }
 .empty-state { padding: 40px 20px; text-align: center; color: #70757a; }

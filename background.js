@@ -10,11 +10,10 @@ if (!globalThis.GmailFlowMailDeliveryPolicy) {
 const BATCHES_KEY = 'mailBatches';
 const BATCH_CANCEL_REQUESTS_KEY = 'mailBatchCancelRequests';
 const ONLINE_SCHEDULER_CONFIG_KEY = 'onlineSchedulerConfig';
-const ONLINE_DELIVERY_POLICY_VERSION = 2;
+const ONLINE_DELIVERY_POLICY_VERSION = 3;
 const QUEUE_ALARM = 'gmail-flow-queue';
 const MAX_ATTEMPTS = GmailFlowMailDeliveryPolicy.policy.maxAttempts;
 const BATCH_SIZE = 40;
-const SEND_INTERVAL_MS = GmailFlowMailDeliveryPolicy.policy.sendIntervalMs;
 const OAUTH_PLACEHOLDER = 'replace-with-google-oauth-client';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
@@ -45,7 +44,7 @@ const activeCancelOperations = new Set();
 const cancelRequestedBatches = new Set();
 
 const nowIso = () => new Date().toISOString();
-const isTerminal = (status) => ['completed', 'failed', 'canceled'].includes(status);
+const isTerminal = (status) => ['completed', 'failed', 'unconfirmed', 'canceled'].includes(status);
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 
 function networkTimeoutError(timeoutMs, cause) {
@@ -721,6 +720,27 @@ async function sendDraft(item, request = gmailFetch) {
   return { messageId: message.id || '', threadId: message.threadId || '' };
 }
 
+async function verifySentRecord(item, request = gmailFetch) {
+  if (!item.messageId) {
+    const error = new Error('Gmail 발송 결과의 메시지 ID가 없어 보낸편지함 기록을 확인할 수 없습니다.');
+    error.code = 'SENT_RECORD_ID_MISSING';
+    throw error;
+  }
+  const message = await request(`/messages/${encodeURIComponent(item.messageId)}?format=metadata&fields=id,threadId,labelIds,internalDate`);
+  if (!Array.isArray(message?.labelIds) || !message.labelIds.includes('SENT')) {
+    const error = new Error('Gmail 보낸편지함에서 아직 해당 메일을 확인하지 못했습니다.');
+    error.code = 'SENT_RECORD_NOT_FOUND';
+    throw error;
+  }
+  return {
+    messageId: message.id || item.messageId,
+    threadId: message.threadId || item.threadId || '',
+    sentRecordState: 'confirmed',
+    sentRecordCheckedAt: nowIso(),
+    sentRecordInternalDate: message.internalDate || ''
+  };
+}
+
 function isDeliveryStep(batch, item) {
   return batch.method === '즉시 발송' && item.status === 'queued'
     || batch.method === '예약 발송' && item.status === 'scheduled';
@@ -729,6 +749,7 @@ function isDeliveryStep(batch, item) {
 function canProcess(batch, item, now) {
   if (isTerminal(item.status) || item.status === 'waiting-auth') return false;
   if (item.nextAttemptAt && new Date(item.nextAttemptAt).getTime() > now) return false;
+  if (item.status === 'verifying') return true;
   if (isDeliveryStep(batch, item) && batch.nextSendAt && new Date(batch.nextSendAt).getTime() > now) return false;
   if (item.status === 'scheduled') return new Date(item.scheduledAt).getTime() <= now;
   return item.status === 'queued';
@@ -738,27 +759,64 @@ async function processItem(batch, item, labelCache, request) {
   const previousStatus = item.status;
   const deliveryStep = isDeliveryStep(batch, item);
   try {
-    if (batch.method === '임시 저장') {
+    if (previousStatus === 'verifying') {
+      Object.assign(item, await verifySentRecord(item, request));
+      item.status = 'completed';
+    } else if (batch.method === '임시 저장') {
       Object.assign(item, await createDraft(item, [batch.label], labelCache, batch.attachments, request));
       item.status = 'completed';
     } else if (batch.method === '즉시 발송') {
       Object.assign(item, await sendMessage(item, batch.attachments, request));
-      item.status = 'completed';
+      item.status = 'verifying';
+      item.sentRecordState = 'checking';
+      item.verificationAttempts = 0;
+      item.nextAttemptAt = new Date(Date.now() + 2_000).toISOString();
+      try {
+        Object.assign(item, await verifySentRecord(item, request));
+        item.status = 'completed';
+      } catch (verificationError) {
+        item.error = verificationError?.message || 'Gmail 보낸편지함 기록을 확인하고 있습니다.';
+      }
     } else if (previousStatus === 'queued') {
       Object.assign(item, await createDraft(item, [batch.label, batch.scheduleLabel], labelCache, batch.attachments, request));
       item.status = 'scheduled';
     } else if (previousStatus === 'scheduled') {
       Object.assign(item, await sendDraft(item, request));
       await removeLabel(item.messageId, batch.scheduleLabel, labelCache, request);
-      item.status = 'completed';
+      item.status = 'verifying';
+      item.sentRecordState = 'checking';
+      item.verificationAttempts = 0;
+      item.nextAttemptAt = new Date(Date.now() + 2_000).toISOString();
+      try {
+        Object.assign(item, await verifySentRecord(item, request));
+        item.status = 'completed';
+      } catch (verificationError) {
+        item.error = verificationError?.message || 'Gmail 보낸편지함 기록을 확인하고 있습니다.';
+      }
     }
-    item.error = '';
-    item.nextAttemptAt = '';
+    if (item.status === 'completed') {
+      item.error = '';
+      item.nextAttemptAt = '';
+    } else if (item.status !== 'verifying') item.error = '';
     item.updatedAt = nowIso();
     return { sent: deliveryStep };
   } catch (error) {
     item.error = error?.message || '알 수 없는 오류';
     item.updatedAt = nowIso();
+    if (previousStatus === 'verifying') {
+      item.verificationAttempts = Number(item.verificationAttempts || 0) + 1;
+      if (item.verificationAttempts >= 10) {
+        item.status = 'unconfirmed';
+        item.sentRecordState = 'unconfirmed';
+        item.nextAttemptAt = '';
+        item.error = 'Gmail API 발송 응답은 받았지만 보낸편지함 기록을 끝내 확인하지 못했습니다. 중복 발송 방지를 위해 실패 대상 재전송에는 포함하지 않습니다.';
+      } else {
+        item.status = 'verifying';
+        item.sentRecordState = 'checking';
+        item.nextAttemptAt = new Date(Date.now() + Math.min(60_000, 2_000 * (2 ** Math.min(5, item.verificationAttempts - 1)))).toISOString();
+      }
+      return { verifying: true };
+    }
     if (error?.code === 'AUTH_REQUIRED' || error?.code === 'OAUTH_NOT_CONFIGURED' || error?.code === 'ACCOUNT_MISMATCH') {
       item.status = 'waiting-auth';
       return { auth: true };
@@ -793,14 +851,17 @@ function deferSenderBatches(batches, senderEmail, nextSendAt) {
 function updateBatchSummary(batch) {
   const completed = batch.items.filter((item) => item.status === 'completed').length;
   const failed = batch.items.filter((item) => item.status === 'failed').length;
+  const unconfirmed = batch.items.filter((item) => item.status === 'unconfirmed').length;
   const canceled = batch.items.filter((item) => item.status === 'canceled').length;
   const waitingAuth = batch.items.some((item) => item.status === 'waiting-auth');
   batch.completed = completed;
   batch.failed = failed;
+  batch.unconfirmed = unconfirmed;
   batch.updatedAt = nowIso();
   if (completed === batch.items.length) batch.status = 'completed';
-  else if (completed + failed + canceled === batch.items.length) batch.status = failed ? 'failed' : 'canceled';
+  else if (completed + failed + unconfirmed + canceled === batch.items.length) batch.status = failed ? 'failed' : unconfirmed ? 'unconfirmed' : 'canceled';
   else if (waitingAuth) batch.status = 'waiting-auth';
+  else if (batch.items.some((item) => item.status === 'verifying')) batch.status = 'verifying';
   else if (batch.items.some((item) => item.status === 'scheduled')) batch.status = 'scheduled';
   else batch.status = 'processing';
 }
@@ -813,6 +874,7 @@ async function scheduleNextRun(batches) {
     const pacedAt = isDeliveryStep(batch, item) && batch.nextSendAt ? new Date(batch.nextSendAt).getTime() : 0;
     if (item.status === 'queued') times.push(Math.max(item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : Date.now() + 1000, pacedAt));
     if (item.status === 'scheduled') times.push(Math.max(new Date(item.scheduledAt).getTime(), item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : 0, pacedAt));
+    if (item.status === 'verifying') times.push(item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : Date.now() + 2_000);
   }));
   const next = times.filter(Number.isFinite).sort((a, b) => a - b)[0];
   if (next) await chrome.alarms.create(QUEUE_ALARM, { when: Math.max(next, Date.now() + 1000) });
@@ -821,6 +883,7 @@ async function scheduleNextRun(batches) {
 function markBatchWaitingForAccount(batch, error) {
   batch.items.forEach((item) => {
     if (isTerminal(item.status)) return;
+    item.resumeStatus = item.status;
     item.status = 'waiting-auth';
     item.error = error?.message || '이 작업을 만든 Gmail 계정을 다시 연결해주세요.';
     item.updatedAt = nowIso();
@@ -841,6 +904,7 @@ async function cancelBatchInPlace(batch, request = null) {
   }
   for (const item of batch.items) {
     if (isTerminal(item.status)) continue;
+    if (item.status === 'verifying') continue;
     if (item.draftId && gmailRequest) {
       try { await gmailRequest(`/drafts/${encodeURIComponent(item.draftId)}`, { method: 'DELETE' }); } catch (_) {}
     }
@@ -895,7 +959,10 @@ async function processQueueExclusive() {
         batch.updatedAt = nowIso();
         await saveBatches(batches);
         const outcome = await processItem(batch, item, labelCache, account.request);
-        if (outcome?.sent) deferSenderBatches(batches, batch.senderEmail, new Date(Date.now() + SEND_INTERVAL_MS).toISOString());
+        if (outcome?.sent) {
+          const sendIntervalMs = GmailFlowMailDeliveryPolicy.normalizeSendIntervalMs(batch.sendIntervalMs);
+          deferSenderBatches(batches, batch.senderEmail, new Date(Date.now() + sendIntervalMs).toISOString());
+        }
         else if (outcome?.rateLimited && outcome.retryAt) deferSenderBatches(batches, batch.senderEmail, outcome.retryAt);
         processed += 1;
         if (cancelRequestedBatches.has(batch.id)) {
@@ -947,7 +1014,7 @@ async function prepareMailQueueForQuit() {
 async function resumeMailQueueAfterQuitCanceled() {
   queuePausedForQuit = false;
   const batches = await getBatches();
-  if ((await getCancelRequests()).length || batches.some((batch) => batch.items.some((item) => item.status === 'queued' || item.status === 'scheduled'))) return processQueue();
+  if ((await getCancelRequests()).length || batches.some((batch) => batch.items.some((item) => item.status === 'queued' || item.status === 'scheduled' || item.status === 'verifying'))) return processQueue();
   await scheduleNextRun(batches);
   return { resumed: true };
 }
@@ -963,6 +1030,7 @@ async function enqueueLocalBatch(payload) {
       name: String(payload.name || payload.label || payload.subject || payload.method || '메일 작업').trim(),
       method: payload.method,
       senderEmail: account.email,
+      sendIntervalMs: GmailFlowMailDeliveryPolicy.normalizeSendIntervalMs(payload.sendIntervalMs),
       attachments,
       subjectTemplate: String(payload.subjectTemplate ?? payload.subject ?? ''),
       bodyTemplate: String(payload.bodyTemplate ?? ''),
@@ -1032,6 +1100,7 @@ async function enqueueOnlineBatch(payload) {
       name: String(payload.name || payload.label || payload.subject || '예약 발송').trim(),
       senderEmail: account.email,
       scheduledAt: payload.scheduledAt,
+      sendIntervalMs: GmailFlowMailDeliveryPolicy.normalizeSendIntervalMs(payload.sendIntervalMs),
       attachments,
       items: payload.items
     }
@@ -1041,6 +1110,7 @@ async function enqueueOnlineBatch(payload) {
     name: String(payload.name || payload.label || payload.subject || '예약 발송').trim(),
     method: '예약 발송',
     senderEmail: account.email,
+    sendIntervalMs: GmailFlowMailDeliveryPolicy.normalizeSendIntervalMs(payload.sendIntervalMs),
     scheduledAt: payload.scheduledAt,
     createdAt,
     updatedAt: createdAt,
@@ -1101,7 +1171,8 @@ async function resumeWaitingAuth() {
           item.error = accountMismatchError(normalizeEmail(batch.senderEmail), account.email).message;
           return;
         }
-        item.status = item.draftId && batch.method === '예약 발송' ? 'scheduled' : 'queued';
+        item.status = item.resumeStatus || (item.draftId && batch.method === '예약 발송' ? 'scheduled' : 'queued');
+        item.resumeStatus = '';
         item.error = '';
       });
       updateBatchSummary(batch);

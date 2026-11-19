@@ -119,7 +119,15 @@ const context = vm.createContext({
     getProjectTriggers: () => triggers,
     newTrigger: (handler) => ({ timeBased: () => ({ everyMinutes: () => ({ create: () => triggers.push({ getHandlerFunction: () => handler }) }) }) }),
     deleteTrigger: (trigger) => triggers.splice(triggers.indexOf(trigger), 1),
-    getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/test/exec' })
+    getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/test/exec' }),
+    getOAuthToken: () => 'apps-script-oauth-token'
+  },
+  UrlFetchApp: {
+    fetch: (url, options) => {
+      assert.equal(options.headers.Authorization, 'Bearer apps-script-oauth-token');
+      const id = decodeURIComponent(String(url).match(/\/messages\/([^?]+)/)?.[1] || 'message');
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ id, threadId: `thread-${id}`, labelIds: ['SENT'], internalDate: String(now) }) };
+    }
   },
   Session: { getEffectiveUser: () => ({ getEmail: () => 'sender@example.com' }), getScriptTimeZone: () => 'Asia/Seoul' },
   ContentService: {
@@ -146,6 +154,7 @@ assert.equal(unauthorized.code, 'UNAUTHORIZED');
 
 const job = {
   id: 'job-1', name: '테스트 예약', senderEmail: 'sender@example.com', scheduledAt: '2026-11-12T00:02:00.000Z', attachments: [],
+  sendIntervalMs: 5000,
   items: [{ id: 'item-1', email: 'to@example.com', subject: '제목', body: '본문', variables: { 이름: '테스트' } }]
 };
 const enqueued = post({ action: 'enqueue', secret: setup.secret, job });
@@ -164,10 +173,11 @@ assert.equal(drafts.size, 0);
 const completed = post({ action: 'status', secret: setup.secret, jobIds: ['job-1'] });
 assert.equal(completed.data.jobs[0].status, 'completed');
 assert.match(completed.data.jobs[0].items[0].messageId, /^message-draft-/);
+assert.equal(completed.data.jobs[0].items[0].sentRecordState, 'confirmed');
 assert.deepEqual(sleepCalls, [], 'a single recipient does not need an interval wait');
 
 const pacedJob = {
-  ...job, id: 'job-paced', scheduledAt: '2026-11-12T00:03:01.000Z',
+  ...job, id: 'job-paced', scheduledAt: '2026-11-12T00:03:01.000Z', sendIntervalMs: 10000,
   items: Array.from({ length: 14 }, (_, index) => ({ id: `paced-${index + 1}`, email: `paced-${index + 1}@example.com`, subject: '제목', body: '본문', variables: {} }))
 };
 assert.equal(post({ action: 'enqueue', secret: setup.secret, job: pacedJob }).ok, true);
@@ -176,7 +186,7 @@ context.runScheduledJobs();
 let pacedStatus = post({ action: 'status', secret: setup.secret, jobIds: ['job-paced'] }).data.jobs[0];
 assert.equal(pacedStatus.completed, 12, 'one trigger run must cap a job to the safe delivery slice');
 assert.equal(pacedStatus.status, 'scheduled');
-assert.equal(sleepCalls.filter((value) => value === 5000).length, 11, 'five-second spacing is applied between sends');
+assert.equal(sleepCalls.filter((value) => value === 10000).length, 11, 'the selected ten-second spacing is applied between sends');
 now += 60 * 1000;
 context.runScheduledJobs();
 pacedStatus = post({ action: 'status', secret: setup.secret, jobIds: ['job-paced'] }).data.jobs[0];

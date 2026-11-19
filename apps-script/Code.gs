@@ -1,5 +1,5 @@
 const GF_CONFIG = Object.freeze({
-  deliveryPolicyVersion: 2,
+  deliveryPolicyVersion: 3,
   sheetName: '_gmail_flow_online_queue',
   spreadsheetIdKey: 'GF_SPREADSHEET_ID',
   folderIdKey: 'GF_FOLDER_ID',
@@ -8,7 +8,10 @@ const GF_CONFIG = Object.freeze({
   maxAttempts: 8,
   maxJobsPerRun: 5,
   maxItemsPerJobRun: 12,
-  sendIntervalMs: 5000,
+  defaultSendIntervalMs: 5000,
+  minSendIntervalMs: 2000,
+  maxSendIntervalMs: 60000,
+  maxPacingWaitPerRunMs: 240000,
   terminalRetentionDays: 90,
   columns: ['jobId', 'status', 'senderEmail', 'scheduledAt', 'total', 'completed', 'failed', 'canceled', 'createdAt', 'updatedAt', 'fileId', 'lastError']
 });
@@ -92,7 +95,8 @@ function health_() {
     timeZone: Session.getScriptTimeZone(),
     triggerReady: ScriptApp.getProjectTriggers().some(function(trigger) { return trigger.getHandlerFunction() === GF_CONFIG.triggerHandler; }),
     deliveryPolicyVersion: GF_CONFIG.deliveryPolicyVersion,
-    sendIntervalMs: GF_CONFIG.sendIntervalMs,
+    sendIntervalMs: GF_CONFIG.defaultSendIntervalMs,
+    configurableSendInterval: true,
     checkedAt: new Date().toISOString()
   };
 }
@@ -113,6 +117,7 @@ function enqueueJob_(job) {
     const stored = {
       id: String(job.id), name: String(job.name || '예약 발송'), method: '예약 발송',
       senderEmail: String(job.senderEmail || ownerEmail), scheduledAt: new Date(job.scheduledAt).toISOString(),
+      sendIntervalMs: normalizeSendIntervalMs_(job.sendIntervalMs),
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'scheduled',
       items: []
     };
@@ -155,12 +160,13 @@ function cancelJob_(jobId) {
     if (isTerminal_(job.status)) return publicJob_(job, found.record);
     job.items.forEach(function(item) {
       if (isTerminal_(item.status)) return;
+      if (item.status === 'verifying') return;
       if (item.draftId) {
         try { const draft = GmailApp.getDraft(item.draftId); if (draft) draft.deleteDraft(); } catch (_) {}
       }
       item.status = 'canceled'; item.error = ''; item.updatedAt = new Date().toISOString();
     });
-    job.status = 'canceled'; job.updatedAt = new Date().toISOString();
+    summarizeJob_(job); job.updatedAt = new Date().toISOString();
     writeJobFile_(found.record.fileId, job);
     updateRecord_(found.row, job, found.record.fileId, '');
     return publicJob_(job, readRecord_(found.row));
@@ -176,7 +182,7 @@ function runScheduledJobs() {
   try {
     const now = Date.now();
     readAllRecords_().filter(function(record) {
-      return record.status === 'scheduled' && new Date(record.scheduledAt).getTime() <= now;
+      return ['scheduled', 'verifying', 'processing'].includes(String(record.status)) && new Date(record.scheduledAt).getTime() <= now;
     }).slice(0, GF_CONFIG.maxJobsPerRun).forEach(function(record) {
       processDueJob_(record);
     });
@@ -193,30 +199,57 @@ function processDueJob_(record) {
   job.status = 'processing'; job.updatedAt = new Date().toISOString();
   updateRecord_(found.row, job, record.fileId, '');
   let attemptsThisRun = 0;
+  let sendsThisRun = 0;
+  const sendIntervalMs = normalizeSendIntervalMs_(job.sendIntervalMs);
+  const maxItemsThisRun = Math.max(1, Math.min(GF_CONFIG.maxItemsPerJobRun, 1 + Math.floor(GF_CONFIG.maxPacingWaitPerRunMs / sendIntervalMs)));
   job.items.forEach(function(item) {
-    if (item.status !== 'scheduled') return;
-    if (attemptsThisRun >= GF_CONFIG.maxItemsPerJobRun) return;
+    if (!['scheduled', 'verifying'].includes(String(item.status))) return;
+    if (attemptsThisRun >= maxItemsThisRun) return;
     if (item.nextAttemptAt && new Date(item.nextAttemptAt).getTime() > Date.now()) return;
-    if (attemptsThisRun > 0) Utilities.sleep(GF_CONFIG.sendIntervalMs);
+    if (item.status === 'scheduled' && sendsThisRun > 0) Utilities.sleep(sendIntervalMs);
     attemptsThisRun += 1;
-    item.attempts = Number(item.attempts || 0) + 1;
     item.updatedAt = new Date().toISOString();
-    try {
-      const draft = GmailApp.getDraft(item.draftId);
-      if (!draft) {
-        item.status = 'failed';
-        item.error = 'Gmail 초안을 찾을 수 없어 중복 발송 방지를 위해 다시 보내지 않았습니다.';
-      } else {
-        const sent = draft.send();
-        item.status = 'completed'; item.error = ''; item.nextAttemptAt = '';
-        item.messageId = sent && sent.getId ? sent.getId() : '';
-        item.threadId = sent && sent.getThread && sent.getThread() ? sent.getThread().getId() : '';
+    if (item.status === 'scheduled') {
+      sendsThisRun += 1;
+      item.attempts = Number(item.attempts || 0) + 1;
+      try {
+        const draft = GmailApp.getDraft(item.draftId);
+        if (!draft) {
+          item.status = 'failed';
+          item.error = 'Gmail 초안을 찾을 수 없어 중복 발송 방지를 위해 다시 보내지 않았습니다.';
+        } else {
+          const sent = draft.send();
+          item.status = 'verifying'; item.error = ''; item.nextAttemptAt = '';
+          item.sentRecordState = 'checking'; item.verificationAttempts = 0;
+          item.messageId = sent && sent.getId ? sent.getId() : '';
+          item.threadId = sent && sent.getThread && sent.getThread() ? sent.getThread().getId() : '';
+        }
+      } catch (error) {
+        item.error = error.message || String(error);
+        const retryable = isRetryableSendError_(error);
+        item.status = !retryable || item.attempts >= GF_CONFIG.maxAttempts ? 'failed' : 'scheduled';
+        item.nextAttemptAt = item.status === 'scheduled' ? new Date(Date.now() + appsScriptRetryDelayMs_(error, item.attempts)).toISOString() : '';
       }
-    } catch (error) {
-      item.error = error.message || String(error);
-      const retryable = isRetryableSendError_(error);
-      item.status = !retryable || item.attempts >= GF_CONFIG.maxAttempts ? 'failed' : 'scheduled';
-      item.nextAttemptAt = item.status === 'scheduled' ? new Date(Date.now() + appsScriptRetryDelayMs_(error, item.attempts)).toISOString() : '';
+    }
+    if (item.status === 'verifying') {
+      try {
+        const confirmed = verifySentRecord_(item.messageId);
+        item.messageId = confirmed.id || item.messageId;
+        item.threadId = confirmed.threadId || item.threadId;
+        item.sentRecordState = 'confirmed'; item.sentRecordCheckedAt = new Date().toISOString();
+        item.sentRecordInternalDate = confirmed.internalDate || '';
+        item.status = 'completed'; item.error = ''; item.nextAttemptAt = '';
+      } catch (error) {
+        item.verificationAttempts = Number(item.verificationAttempts || 0) + 1;
+        item.error = error.message || String(error);
+        if (item.verificationAttempts >= 10) {
+          item.status = 'unconfirmed'; item.sentRecordState = 'unconfirmed'; item.nextAttemptAt = '';
+          item.error = 'Gmail API 발송 응답은 받았지만 보낸편지함 기록을 끝내 확인하지 못했습니다. 중복 발송 방지를 위해 실패 대상 재전송에는 포함하지 않습니다.';
+        } else {
+          item.status = 'verifying'; item.sentRecordState = 'checking';
+          item.nextAttemptAt = new Date(Date.now() + Math.min(60 * 1000, 2000 * (2 ** Math.min(5, item.verificationAttempts - 1)))).toISOString();
+        }
+      }
     }
     job.updatedAt = new Date().toISOString();
     summarizeJob_(job);
@@ -244,8 +277,18 @@ function validateJob_(job) {
   const scheduledAt = new Date(job.scheduledAt).getTime();
   if (!Number.isFinite(scheduledAt) || scheduledAt <= Date.now()) throw serviceError_('INVALID_SCHEDULE', '예약 시간은 현재보다 미래여야 합니다.');
   if (!Array.isArray(job.items) || !job.items.length) throw serviceError_('INVALID_JOB', '예약할 메일 대상이 없습니다.');
+  const requestedInterval = Number(job.sendIntervalMs);
+  if (!Number.isFinite(requestedInterval) || requestedInterval < GF_CONFIG.minSendIntervalMs || requestedInterval > GF_CONFIG.maxSendIntervalMs) {
+    throw serviceError_('INVALID_SEND_INTERVAL', '메일 전송 간격은 2초에서 60초 사이여야 합니다.');
+  }
   if (job.items.length > 100) throw serviceError_('TOO_MANY_RECIPIENTS', '한 온라인 예약 작업은 최대 100명까지 등록할 수 있습니다. 작업을 나누어 예약해주세요.');
   job.items.forEach(function(item) { if (!String(item.email || '').includes('@')) throw serviceError_('INVALID_RECIPIENT', '올바르지 않은 받는 사람 주소가 있습니다.'); });
+}
+
+function normalizeSendIntervalMs_(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return GF_CONFIG.defaultSendIntervalMs;
+  return Math.max(GF_CONFIG.minSendIntervalMs, Math.min(GF_CONFIG.maxSendIntervalMs, Math.round(numeric)));
 }
 
 function decodeAttachments_(attachments) {
@@ -261,12 +304,14 @@ function decodeAttachments_(attachments) {
 function summarizeJob_(job) {
   const completed = job.items.filter(function(item) { return item.status === 'completed'; }).length;
   const failed = job.items.filter(function(item) { return item.status === 'failed'; }).length;
+  const unconfirmed = job.items.filter(function(item) { return item.status === 'unconfirmed'; }).length;
   const canceled = job.items.filter(function(item) { return item.status === 'canceled'; }).length;
   if (completed === job.items.length) job.status = 'completed';
-  else if (failed + canceled === job.items.length) job.status = failed ? 'failed' : 'canceled';
+  else if (failed + unconfirmed + canceled === job.items.length) job.status = failed ? 'failed' : unconfirmed ? 'unconfirmed' : 'canceled';
+  else if (job.items.some(function(item) { return item.status === 'verifying'; })) job.status = 'verifying';
   else if (job.items.some(function(item) { return item.status === 'scheduled'; })) job.status = 'scheduled';
   else job.status = 'processing';
-  return { completed: completed, failed: failed, canceled: canceled };
+  return { completed: completed, failed: failed, unconfirmed: unconfirmed, canceled: canceled };
 }
 
 function publicJob_(job, record) {
@@ -274,7 +319,8 @@ function publicJob_(job, record) {
   return {
     id: job.id, name: job.name, method: '예약 발송', senderEmail: job.senderEmail,
     schedulerMode: 'online', onlineJobId: job.id, scheduledAt: job.scheduledAt, status: job.status,
-    total: job.items.length, completed: counts.completed, failed: counts.failed,
+    sendIntervalMs: normalizeSendIntervalMs_(job.sendIntervalMs),
+    total: job.items.length, completed: counts.completed, failed: counts.failed, unconfirmed: counts.unconfirmed,
     createdAt: job.createdAt, updatedAt: job.updatedAt, lastError: record && record.lastError || '',
     items: job.items
   };
@@ -353,6 +399,17 @@ function verifySecret_(secret) {
 
 function effectiveEmail_() { return String(Session.getEffectiveUser().getEmail() || '').trim(); }
 function isConfigured_() { const p = PropertiesService.getScriptProperties(); return Boolean(p.getProperty(GF_CONFIG.spreadsheetIdKey) && p.getProperty(GF_CONFIG.folderIdKey) && p.getProperty(GF_CONFIG.secretKey)); }
-function isTerminal_(status) { return ['completed', 'failed', 'canceled'].includes(String(status)); }
+function isTerminal_(status) { return ['completed', 'failed', 'unconfirmed', 'canceled'].includes(String(status)); }
+function verifySentRecord_(messageId) {
+  if (!String(messageId || '').trim()) throw serviceError_('SENT_RECORD_ID_MISSING', 'Gmail 발송 결과의 메시지 ID가 없어 보낸편지함 기록을 확인할 수 없습니다.');
+  const url = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + encodeURIComponent(String(messageId)) + '?format=metadata&fields=id,threadId,labelIds,internalDate';
+  const response = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+  const status = Number(response.getResponseCode());
+  let data = {};
+  try { data = JSON.parse(response.getContentText() || '{}'); } catch (_) {}
+  if (status < 200 || status >= 300) throw serviceError_('SENT_RECORD_LOOKUP_FAILED', data && data.error && data.error.message || ('Gmail 보낸편지함 확인 오류 (' + status + ')'));
+  if (!Array.isArray(data.labelIds) || !data.labelIds.includes('SENT')) throw serviceError_('SENT_RECORD_NOT_FOUND', 'Gmail 보낸편지함에서 아직 해당 메일을 확인하지 못했습니다.');
+  return data;
+}
 function serviceError_(code, message) { const error = new Error(message); error.code = code; return error; }
 function jsonOutput_(value) { return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON); }

@@ -13,6 +13,11 @@ let blockNextMailBatchRead = false;
 let releaseBlockedMailBatchRead;
 let failNextCancelRequestWrite = false;
 const isGmailProfileRequest = (url) => String(url).endsWith('/gmail/v1/users/me/profile');
+const isSentRecordRequest = (url) => /\/gmail\/v1\/users\/me\/messages\/[^?]+\?format=metadata/.test(String(url));
+const sentRecordResponse = (url) => {
+  const id = decodeURIComponent(String(url).match(/\/messages\/([^?]+)/)?.[1] || 'sent-message');
+  return { ok: true, status: 200, text: async () => JSON.stringify({ id, threadId: `thread-${id}`, labelIds: ['SENT'], internalDate: String(Date.now()) }) };
+};
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const gmailProfileResponse = (options = {}) => {
   const authorization = options?.headers?.Authorization || options?.headers?.authorization || '';
@@ -142,6 +147,7 @@ function send(message) {
   let releaseSend;
   global.fetch = async (url, options = {}) => {
     if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    if (isSentRecordRequest(url)) return sentRecordResponse(url);
     return new Promise((resolve) => {
     releaseSend = () => resolve({ ok: true, status: 200, text: async () => JSON.stringify({ id: 'sent-1', threadId: 'sent-thread-1' }) });
     });
@@ -167,6 +173,7 @@ function send(message) {
   let pacedLocalSendCount = 0;
   global.fetch = async (url, options = {}) => {
     if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    if (isSentRecordRequest(url)) return sentRecordResponse(url);
     pacedLocalSendCount += 1;
     return { ok: true, status: 200, text: async () => JSON.stringify({ id: `paced-local-${pacedLocalSendCount}`, threadId: `paced-thread-${pacedLocalSendCount}` }) };
   };
@@ -174,6 +181,7 @@ function send(message) {
     type: 'enqueue-mail-batch',
     payload: {
       name: 'paced local', method: '즉시 발송', senderEmail: 'sender@example.com', label: '', scheduledAt: '', attachments: [],
+      sendIntervalMs: 10000,
       items: [
         { email: 'paced-one@example.com', subject: 'one', body: 'one', variables: {} },
         { email: 'paced-two@example.com', subject: 'two', body: 'two', variables: {} }
@@ -184,7 +192,8 @@ function send(message) {
   const pacedLocalBatch = data.mailBatches.find((batch) => batch.name === 'paced local');
   assert.equal(pacedLocalSendCount, 1, 'a local queue run must not burst-send consecutive recipients');
   assert.deepEqual(pacedLocalBatch.items.map((item) => item.status), ['completed', 'queued']);
-  assert(new Date(pacedLocalBatch.nextSendAt).getTime() >= Date.now() + 4_000, 'the next recipient must wait for the safe interval');
+  assert.equal(pacedLocalBatch.items[0].sentRecordState, 'confirmed', 'success requires a Gmail SENT record lookup');
+  assert(new Date(pacedLocalBatch.nextSendAt).getTime() >= Date.now() + 9_000, 'the next recipient must wait for the selected interval');
   assert(alarmCreates.some(({ info }) => Number(info?.when) >= new Date(pacedLocalBatch.nextSendAt).getTime()), 'the remaining recipient must be resumed by a durable alarm');
   pacedLocalBatch.nextSendAt = '';
   global.fetch = async (url, options = {}) => {
@@ -194,6 +203,27 @@ function send(message) {
   assert.equal((await send({ type: 'process-queue' })).ok, true);
   assert.deepEqual(pacedLocalBatch.items.map((item) => item.status), ['completed', 'failed']);
   assert.equal(pacedLocalBatch.status, 'failed', 'a mixed completed/failed batch must finish as failed instead of remaining active forever');
+
+  let unconfirmedSendCount = 0;
+  global.fetch = async (url, options = {}) => {
+    if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    if (isSentRecordRequest(url)) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'unconfirmed-message', threadId: 'unconfirmed-thread', labelIds: [] }) };
+    }
+    unconfirmedSendCount += 1;
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'unconfirmed-message', threadId: 'unconfirmed-thread' }) };
+  };
+  assert.equal((await send({
+    type: 'enqueue-mail-batch',
+    payload: { name: 'sent record pending', method: '즉시 발송', senderEmail: 'sender@example.com', label: '', scheduledAt: '', attachments: [], items: [{ email: 'pending@example.com', subject: 'pending', body: 'pending', variables: {} }] }
+  })).ok, true);
+  const sentRecordPendingBatch = data.mailBatches.find((batch) => batch.name === 'sent record pending');
+  assert.equal(sentRecordPendingBatch.items[0].status, 'verifying');
+  assert.equal(unconfirmedSendCount, 1);
+  sentRecordPendingBatch.items[0].nextAttemptAt = '';
+  assert.equal((await send({ type: 'process-queue' })).ok, true);
+  assert.equal(unconfirmedSendCount, 1, 'a SENT lookup retry must never send the message a second time');
+  data.mailBatches = data.mailBatches.filter((batch) => batch.id !== sentRecordPendingBatch.id);
 
   global.fetch = async (url, options = {}) => {
     if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
@@ -218,6 +248,7 @@ function send(message) {
   let concurrentSendCount = 0;
   global.fetch = async (url, options = {}) => {
     if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    if (isSentRecordRequest(url)) return sentRecordResponse(url);
     concurrentSendCount += 1;
     if (concurrentSendCount === 1) {
       return new Promise((resolve) => {

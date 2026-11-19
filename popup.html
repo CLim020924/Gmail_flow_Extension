@@ -281,6 +281,10 @@
       <label class="review-check"><input id="sendReviewApproved" type="checkbox"> 이 대상에게 전송될 받는 사람·제목·본문을 확인했습니다.</label>
       <label class="review-check review-check-all"><input id="sendReviewApproveAll" type="checkbox"> 모든 대상의 받는 사람·제목·본문을 한 번에 체크합니다.</label>
     </div>
+    <label class="field send-interval-field">메일 전송 간격
+      <span class="send-interval-control"><input id="sendReviewIntervalSeconds" type="number" min="2" max="60" step="1" value="5" inputmode="numeric"><span>초에 1통</span></span>
+      <small id="sendReviewIntervalHint" class="muted">권장값은 5초입니다. 같은 회사로 집중 발송할 때는 8~10초가 더 안전합니다.</small>
+    </label>
     <div class="send-review-actions">
       <button id="cancelSendReview" class="button" type="button">취소</button>
       <div><button id="previousSendReview" class="button" type="button">이전</button><button id="nextSendReview" class="button" type="button">다음</button><button id="confirmSendReview" class="primary" type="button" disabled>모두 확인하고 발송</button></div>
