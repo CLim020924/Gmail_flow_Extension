@@ -108,6 +108,6 @@
     "sourceLicenseZip": null,
     "localInstallResult": "all current Node tests, build preflight, 11-guide/215-step Electron UI smoke, and ASAR package inspection passed; the 1.15.51 installer was built and metadata matched; the isolated 1.15.46-to-1.15.47 standard-updater E2E remains the updater architecture baseline; production installation was not changed",
     "siteDeploymentExplicitScope": "the user explicitly requested the missing roster filter and merge behavior be made available, continuing the existing update and deployment format",
-    "siteDeploymentResult": "1.15.51 GitHub releases and Cresero updater/download deployment are pending"
+    "siteDeploymentResult": "published source and distribution releases cmoe-workspace-v1.15.51 and deployed Cresero Worker 033fd83a-1117-4613-9da2-d975de2e68b9; update.json, latest.yml, the download page, blockmap, release notes, and scheduler ZIP were verified; the full public installer redownload matched 111731569 bytes and SHA-256 9B907BC49A45858225C5F4C28A0D5F18D2F7DE38D1652E088ED2ABF44C3B3926"
   }
 }

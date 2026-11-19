@@ -353,4 +353,4 @@
 - 조건 전 연결 인원과 조건 통과 결과 대상을 구분한다. 결과 대상이 0명이어도 헤더를 가진 빈 `일괄 발송 명단`을 만들어 조건 설정을 확인할 수 있다.
 - 동일 통합문서 두 시트에서 이름+전화번호+메일 복합 연결, B 응답 필터, 통합 이메일, A/B 선택 열 순서를 실제 결과 XLSX로 검증했다. 전체 Node 시험, preflight, 11개 가이드·215단계 Electron UI 스모크, ASAR 포함 검사를 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.51-Windows.exe`, 111,731,569 bytes, SHA-256 `9B907BC49A45858225C5F4C28A0D5F18D2F7DE38D1652E088ED2ABF44C3B3926`, FileVersion/ProductVersion 1.15.51, NotSigned. blockmap 118,309 bytes, `latest.yml` size·SHA-512 일치.
-- GitHub Release와 Cresero 업데이트 피드 배포는 진행 중이다.
+- GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.51`과 Cresero Worker `033fd83a-1117-4613-9da2-d975de2e68b9`를 공개했다. `update.json`, `updater/latest.yml`, 다운로드 페이지가 모두 1.15.51을 제공하며 공개 설치 파일 전체 재다운로드의 크기·SHA-256이 로컬 원본과 일치했다. 공개 blockmap은 118,309 bytes, 변경 안내는 1,421 bytes, 온라인 설정 ZIP은 8,659 bytes다.
