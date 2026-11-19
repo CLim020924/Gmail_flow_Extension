@@ -423,8 +423,8 @@
 - 온라인 예약 안정성: 긴 간격에서는 Apps Script의 1회 실행 대기시간이 4분을 넘지 않도록 해당 실행에서 처리할 대상 수를 자동으로 줄이고 나머지는 다음 트리거가 이어서 처리한다. 이전 스크립트가 간격값을 무시하지 않도록 온라인 발송 정책 버전을 3으로 올렸다.
 - 구현: `popup.html`, `popup.js`, `styles.css`, `mail-delivery-policy.js`, `background.js`, `apps-script/Code.gs`.
 - 버전: Gmail Flow 0.7.3, Chrome 확장 0.6.3, CMOE Workspace 1.15.49.
-- 검증: 진행 중
-- 커밋: 진행 중
+- 검증: Gmail Flow 및 Workspace 전체 Node 시험, 선택 간격·온라인 분할·패키지 포함 검사, 빌드 사전검사와 11개 가이드·215단계 Electron UI 스모크 통과. 1.15.49 설치 파일 생성 및 버전·크기·해시·blockmap 확인.
+- 커밋: `eededf7`
 
 ### REQ-20261119-04 · Gmail 보낸편지함 기준 실제 발송 결과 확인
 
@@ -435,8 +435,8 @@
 - 결과 화면: 작업 기록에 보낸편지함 확인, 발송 실패, 확인 실패 인원과 선택한 초 간격을 표시하고 각 대상의 상태에서도 같은 구분을 사용한다.
 - 구현: `background.js`, `apps-script/Code.gs`, `popup.js`.
 - 버전: Gmail Flow 0.7.3, Chrome 확장 0.6.3, CMOE Workspace 1.15.49.
-- 검증: 진행 중
-- 커밋: 진행 중
+- 검증: Gmail `SENT` 확인 성공, 확인 지연 시 조회만 재시도하고 재발송하지 않는 회귀 시험, Apps Script 확인 시험, 전체 Node 시험과 패키지 포함 검사 통과. 실제 Google 계정의 운영 메일 발송은 수행하지 않음.
+- 커밋: `eededf7`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
