@@ -1452,6 +1452,11 @@ function registerIpc() {
     const ownerId = documentTools.registerOwner(event.sender);
     return documentTools.chooseExcelCompareFile(ownerId, BrowserWindow.fromWebContents(event.sender) || mainWindow, payload);
   }));
+  ipcMain.handle('document-tools:excel-compare:refresh', (event, payload = {}) => runDocumentToolIpc(() => {
+    assertGuideModeAllows(event, 'Excel 비교 파일 최신 내용 확인');
+    const ownerId = documentTools.registerOwner(event.sender);
+    return documentTools.refreshExcelCompareFile(ownerId, payload);
+  }));
   ipcMain.handle('document-tools:excel-compare:analyze', (event, payload = {}) => runDocumentToolIpc(() => {
     assertGuideModeAllows(event, 'Excel 명단 비교·분류 분석');
     const ownerId = documentTools.registerOwner(event.sender);

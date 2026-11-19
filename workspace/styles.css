@@ -1542,7 +1542,19 @@ body.guide-mode #saveStatus { color: #217452; font-weight: 700; }
 .excel-dedupe-review-footer-status { align-self: center; color: var(--muted); font-size: 9px; }
 .excel-compare-workbench { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .excel-compare-source { min-width: 0; }
-.excel-compare-rules { grid-column: 1 / -1; }
+.excel-compare-match, .excel-compare-rules { grid-column: 1 / -1; }
+.excel-compare-match { display: grid; gap: 12px; }
+.excel-compare-match-pair { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) auto; gap: 8px; align-items: end; padding: 10px; border: 1px solid #d2dce1; background: #f8fafb; }
+.excel-compare-match-pair .form-field { margin: 0; }
+.excel-compare-auto-refresh { width: fit-content; }
+.excel-compare-base-choice { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0; padding: 11px 12px; border: 1px solid #d2dce1; }
+.excel-compare-base-choice legend { padding: 0 5px; color: #43545e; font-size: 10px; font-weight: 800; }
+.excel-compare-output-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; max-height: 330px; overflow: auto; padding: 2px; }
+.excel-compare-output-column { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px; align-items: center; min-width: 0; min-height: 38px; padding: 7px 8px; border: 1px solid #d2dce1; background: #fff; }
+.excel-compare-output-column.selected { border-color: #8bb79d; background: #f1f8f4; }
+.excel-compare-output-column span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.excel-compare-output-column button { width: 28px; height: 28px; padding: 0; border: 1px solid #ccd5da; background: #fff; color: #4a5b64; cursor: pointer; }
+.excel-compare-output-column button:disabled { opacity: .38; cursor: default; }
 .excel-compare-output { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(260px, .7fr) minmax(320px, 1.3fr); gap: 12px; align-items: end; }
 .excel-compare-output > .document-step-heading, .excel-compare-output > .document-run-card, .excel-compare-output > progress, .excel-compare-output > .document-split-results, .excel-compare-output > .document-completion-actions { grid-column: 1 / -1; }
 .excel-compare-rule-list { display: grid; gap: 8px; }
@@ -1557,6 +1569,10 @@ body.guide-mode #saveStatus { color: #217452; font-weight: 700; }
 .excel-compare-group-preview span { display: inline-flex; gap: 7px; align-items: center; padding: 7px 9px; border-radius: 999px; background: #eaf4ee; color: #24583b; font-size: 10px; }
 .excel-compare-group-preview b { font-size: 11px; }
 .excel-compare-workbench progress { width: 100%; }
+@media (max-width: 760px) {
+  .excel-compare-workbench, .excel-compare-output, .excel-compare-output-columns { grid-template-columns: 1fr; }
+  .excel-compare-match-pair, .excel-compare-rule { grid-template-columns: 1fr; }
+}
 .document-split-source, .document-split-preview { min-height: 560px; }
 .document-split-output { grid-column: 1 / -1; grid-template-columns: minmax(260px, .72fr) minmax(300px, 1fr); }
 .document-split-output > .document-step-heading, .document-split-output > .document-run-card, .document-split-output > .document-progress, .document-split-output > .document-split-results, .document-split-output > .completion-folder-button { grid-column: 1 / -1; }

@@ -450,6 +450,20 @@
 - 배포: GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.49`, Cresero Worker `6e857d2c-8937-41fb-a857-835272fd2339`. 공개 `update.json`과 `updater/latest.yml`, 다운로드 페이지가 1.15.49를 제공한다. 공개 설치 파일을 전체 재다운로드해 111,723,129 bytes와 SHA-256 `D55EE1DA4C7D00C4859EC8CEDFF0D16ACC5D35AE383E9C0545A8C9BE24B6FD1D`가 로컬 원본과 일치함을 확인했다. 공개 blockmap은 118,402 bytes다.
 - 사이트 커밋: 런타임 `200b583`, 배포 기록 `5f7505e`.
 
+### REQ-20261119-06 · 전체명단·참여명단 비교 및 일괄 발송 명단 생성
+
+- 사용자 요청: 실시간으로 늘어나는 설문 참여명단을 전체명단과 비교하고, A/B 파일 또는 같은 파일의 다른 시트를 지원하며, 비교 기준 열·결과 기준 명단·출력할 열을 선택해 새 시트로 만들고 싶다.
+- 이전 동작: 문서 편집기의 `Excel 명단 비교·분류`는 A/B 파일과 한 개의 기준 열, 문자열 분류 규칙을 사용해 양쪽 전체 열을 내보냈다. 여러 열을 함께 대조하거나 결과 기준·출력 열을 선택하는 기능과 원본 새로 읽기는 없었다.
+- 결정: 기존 도구를 별도 고정 양식으로 늘리지 않고 범용 명단 비교기로 확장한다. A/B는 서로 다른 Excel 파일뿐 아니라 같은 파일의 서로 다른 시트도 선택할 수 있다. 최대 12개의 A/B 열 쌍을 모두 만족하는 행만 일치시키며, 전화번호는 하이픈·공백 차이를 무시하고 이메일·일반 문자열은 대소문자와 불필요한 공백을 정규화한다.
+- 최종 동작: 결과 행 순서는 A 또는 B 중 사용자가 고른 기준 명단을 따른다. A/B의 필요한 열만 선택하고 위·아래로 출력 순서를 바꿀 수 있으며, 첫 결과 시트 `일괄 발송 명단`에는 일치한 사람과 선택한 열만 들어간다. 중복 키·A 미일치·B 미일치 검토 시트와 선택형 그룹 분류는 유지한다.
+- 갱신 범위: `최신 내용 다시 읽기`와 30초 자동 확인은 앱이 열린 동안 선택한 로컬 Excel 또는 OneDrive·Drive 등으로 동기화된 로컬 Excel의 파일 변경을 다시 읽는다. Google Forms/Sheets API를 직접 구독하는 온라인 실시간 연동은 이번 범위에 포함하지 않는다. 결과 저장은 사용자가 확인한 뒤 실행해 예상치 못한 파일 덮어쓰기를 피한다.
+- 구현: `workspace/desktop/excel-compare-group.js`, `workspace/desktop/document-tools.js`, `workspace/desktop/main.js`, `workspace/desktop/preload.js`, `workspace/document-tools-ui.js`, `workspace/index.html`, `workspace/styles.css`, `workspace/guide-core.js`.
+- 버전: CMOE Workspace 1.15.50. Gmail Flow 데스크톱 0.7.3과 Chrome 확장 0.6.3은 변경하지 않았다.
+- 검증: 동일 통합문서의 두 시트, 이름+전화번호 복합 대조, 전화번호 표기 차이, B 기준 순서, 선택 열·출력 순서, 미일치 시트 생성을 검사하는 회귀 시험을 추가했다. Workspace 및 루트 전체 Node 시험, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크, 패키지 ASAR 포함 검사를 통과했다.
+- 설치 파일: 111,725,767 bytes, SHA-256 `DD1D9E911E7D9DA7F31A2C615E7A6A5B9FF4E45CF72514C265973C78C43DCD61`, FileVersion/ProductVersion 1.15.50, 서명 없음. blockmap은 118,412 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
+- 배포: 진행 중.
+- 커밋: 진행 중.
+
 ## 현재 미완료 또는 계속 개선할 항목
 
 - 임의 Excel 서식을 셀 병합·수식·인쇄 영역까지 보존하는 자유 출력 틀 편집기

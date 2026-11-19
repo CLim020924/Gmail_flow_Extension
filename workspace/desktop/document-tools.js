@@ -3890,6 +3890,21 @@ class DocumentTools {
     };
   }
 
+  async refreshExcelCompareFile(ownerId, payload = {}) {
+    const slot = payload.slot === 'b' ? 'b' : 'a';
+    const current = this.resolveToken(ownerId, payload.token, `excel-compare-input-${slot}`);
+    const inspection = await this.inspectExcelCompareFile(current.filePath);
+    const changed = inspection.sourceSha256 !== current.metadata?.sourceSha256;
+    const token = changed ? this.issueToken(ownerId, `excel-compare-input-${slot}`, current.filePath, inspection, { reuse: false }) : payload.token;
+    return {
+      canceled: false, slot, changed,
+      file: {
+        token, name: boundedText(path.basename(current.filePath), 200), bytes: Number(inspection.sourceBytes) || 0,
+        sheetCount: Number(inspection.sheetCount) || 0, sheets: Array.isArray(inspection.sheets) ? inspection.sheets : []
+      }
+    };
+  }
+
   excelComparePayload(ownerId, payload = {}) {
     const left = this.resolveToken(ownerId, payload.leftToken, 'excel-compare-input-a');
     const right = this.resolveToken(ownerId, payload.rightToken, 'excel-compare-input-b');
@@ -3897,6 +3912,9 @@ class DocumentTools {
       left, right,
       options: {
         left: payload.left, right: payload.right,
+        matchPairs: Array.isArray(payload.matchPairs) ? payload.matchPairs.slice(0, ExcelCompareGroup.MAX_MATCH_COLUMNS + 1) : [],
+        baseSide: payload.baseSide === 'b' ? 'b' : 'a',
+        outputColumns: Array.isArray(payload.outputColumns) ? payload.outputColumns.slice(0, ExcelCompareGroup.MAX_OUTPUT_COLUMNS + 1) : [],
         rules: Array.isArray(payload.rules) ? payload.rules.slice(0, ExcelCompareGroup.MAX_RULES + 1) : [],
         expectedLeftSha256: left.metadata?.sourceSha256,
         expectedRightSha256: right.metadata?.sourceSha256

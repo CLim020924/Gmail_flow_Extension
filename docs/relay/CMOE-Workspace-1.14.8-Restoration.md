@@ -335,3 +335,13 @@
 - 패키지의 Gmail Flow와 `online-scheduler-setup`에 전송 간격 UI, 정책 버전 3, 보낸편지함 확인 코드가 포함된 것을 확인했다.
 - 후속 분류 보강: 명확한 Gmail 거절만 `미발송 확인`으로 두고, 네트워크·Gmail 5xx 등 요청 결과가 불명확했던 대상은 `결과 불명`으로 분리한다. 재전송 버튼은 `failed`인 미발송 확인 대상만 추출하고 `unconfirmed` 결과 불명 대상은 제외한다.
 - GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.49`과 Cresero Worker `6e857d2c-8937-41fb-a857-835272fd2339`를 공개했다. `update.json`, `updater/latest.yml`, 다운로드 페이지가 모두 1.15.49를 제공하며 공개 설치 파일 전체 재다운로드의 크기·SHA-256이 로컬 원본과 일치했다. 공개 blockmap은 118,402 bytes, 변경 안내는 1,550 bytes, 온라인 설정 ZIP은 8,659 bytes다.
+
+## 1.15.50 전체명단·참여명단 비교와 일괄 발송 명단
+
+- 문서 편집기의 Excel 명단 비교 도구를 전체명단과 실시간 참여명단을 정리하는 범용 도구로 확장했다. 서로 다른 파일뿐 아니라 같은 통합문서의 서로 다른 시트를 A/B로 사용할 수 있다.
+- 최대 12개의 비교 열 쌍을 AND 조건으로 대조한다. 전화번호 표기 차이와 이메일·문자열의 대소문자·불필요한 공백을 정규화하며, 값이 비어 있는 비교 키는 임의로 일치시키지 않는다.
+- 결과 정렬 기준을 A/B 중 선택하고, 양쪽에서 출력할 열과 순서를 정한다. 첫 시트 `일괄 발송 명단`은 일치한 행과 선택한 열만 포함하고, 중복·미일치 검토 시트 및 선택형 그룹 시트는 유지한다.
+- 앱이 열린 동안 로컬 또는 동기화된 Excel의 변경을 수동으로 다시 읽거나 30초마다 확인할 수 있다. 이는 Google Sheets API 직접 실시간 구독이 아니며 결과 파일은 검토 후 사용자가 저장한다.
+- 동일 통합문서 두 시트, 복합 키, 전화번호 정규화, B 기준 정렬, 선택 열 출력, 검토 시트를 회귀 시험으로 확인했다. 전체 Node 시험, preflight, 11개 가이드·215단계 Electron UI 스모크, ASAR 포함 검사를 통과했다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.50-Windows.exe`, 111,725,767 bytes, SHA-256 `DD1D9E911E7D9DA7F31A2C615E7A6A5B9FF4E45CF72514C265973C78C43DCD61`, FileVersion/ProductVersion 1.15.50, NotSigned. blockmap 118,412 bytes, `latest.yml` size·SHA-512 일치.
+- GitHub Release와 Cresero 업데이트 피드 배포는 진행 중이다.

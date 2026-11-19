@@ -664,21 +664,32 @@
             <section class="workbench-panel document-step-panel excel-compare-source" data-excel-compare-source="a">
               <div class="document-step-heading"><span>1A</span><div><h2>A 파일</h2><p>기준이 되는 첫 번째 명단을 선택합니다.</p></div></div>
               <button id="chooseExcelCompareA" class="file-pick-zone" type="button"><strong>A 파일 선택</strong><span>.xlsx</span></button>
+              <button id="refreshExcelCompareA" class="ghost-button" type="button" disabled>최신 내용 다시 읽기</button>
               <div id="excelCompareASummary" class="output-location-card"><strong>파일을 선택해주세요.</strong><span>시트와 비교 열을 확인합니다.</span></div>
               <label class="form-field">비교할 시트<select id="excelCompareASheet"></select></label>
               <label class="form-field">열 이름이 있는 행<select id="excelCompareAHeader"></select><small>제목 행이 위에 있어도 실제 열 이름 행을 고를 수 있습니다.</small></label>
-              <label class="form-field">같은 사람을 찾을 열<select id="excelCompareAKey"></select></label>
+              <label class="form-field">첫 번째 비교 열<select id="excelCompareAKey"></select></label>
             </section>
             <section class="workbench-panel document-step-panel excel-compare-source" data-excel-compare-source="b">
               <div class="document-step-heading"><span>1B</span><div><h2>B 파일</h2><p>A 파일과 대조할 두 번째 명단을 선택합니다.</p></div></div>
-              <button id="chooseExcelCompareB" class="file-pick-zone" type="button"><strong>B 파일 선택</strong><span>.xlsx</span></button>
+              <button id="chooseExcelCompareB" class="file-pick-zone" type="button"><strong>B 파일 선택</strong><span>.xlsx · A와 같은 파일도 선택 가능</span></button>
+              <button id="refreshExcelCompareB" class="ghost-button" type="button" disabled>최신 내용 다시 읽기</button>
               <div id="excelCompareBSummary" class="output-location-card"><strong>파일을 선택해주세요.</strong><span>시트와 비교 열을 확인합니다.</span></div>
               <label class="form-field">비교할 시트<select id="excelCompareBSheet"></select></label>
               <label class="form-field">열 이름이 있는 행<select id="excelCompareBHeader"></select><small>자동 감지가 다르면 올바른 행을 선택하세요.</small></label>
-              <label class="form-field">같은 사람을 찾을 열<select id="excelCompareBKey"></select></label>
+              <label class="form-field">첫 번째 비교 열<select id="excelCompareBKey"></select></label>
+            </section>
+            <section class="workbench-panel document-step-panel excel-compare-match">
+              <div class="document-step-heading"><span>2</span><div><h2>같은 사람 판단과 결과 열</h2><p>이메일 하나 또는 이름+전화번호처럼 여러 조건을 모두 만족하는 행만 연결합니다.</p></div></div>
+              <div id="excelCompareMatchPairList" class="excel-compare-rule-list"></div>
+              <button id="addExcelCompareMatchPair" class="secondary-button" type="button">+ 비교 열 조건 추가</button>
+              <label class="check-row excel-compare-auto-refresh"><input id="excelCompareAutoRefresh" type="checkbox"><span>30초마다 선택한 Excel 파일의 최신 내용 확인</span></label>
+              <fieldset class="excel-compare-base-choice"><legend>결과 행의 기준</legend><label class="check-row"><input type="radio" name="excelCompareBaseSide" value="a" checked><span>A 전체명단 순서·열을 기본으로</span></label><label class="check-row"><input type="radio" name="excelCompareBaseSide" value="b"><span>B 참여명단 순서·열을 기본으로</span></label></fieldset>
+              <div class="section-heading compact"><div><h3>결과에 넣을 열</h3><p>체크한 열만 위에서부터 표시된 순서로 새 시트에 만듭니다.</p></div></div>
+              <div id="excelCompareOutputColumns" class="excel-compare-output-columns"><div class="document-merge-preview-empty"><strong>파일을 먼저 선택해주세요.</strong><span>A/B 파일의 열을 선택할 수 있습니다.</span></div></div>
             </section>
             <section class="workbench-panel document-step-panel excel-compare-rules">
-              <div class="document-step-heading"><span>2</span><div><h2>그룹 분류 규칙</h2><p>같은 사람으로 확인된 행만 위에서부터 첫 번째로 맞는 규칙의 시트에 넣습니다.</p></div></div>
+              <div class="document-step-heading"><span>3</span><div><h2>그룹 분류 규칙 · 선택사항</h2><p>규칙이 없어도 일괄 발송 명단은 만들어집니다. 필요할 때만 그룹별 시트를 추가합니다.</p></div></div>
               <div class="notice info"><strong>예시</strong><span>비교값에 <code>.onsemi</code> 포함 → <code>온세미</code> 시트 · 또는 A/B 파일의 회사 열에 특정 회사명 포함</span></div>
               <div id="excelCompareRuleList" class="excel-compare-rule-list"></div>
               <button id="addExcelCompareRule" class="secondary-button" type="button">+ 분류 규칙 추가</button>
@@ -687,11 +698,11 @@
               <div id="excelCompareGroupPreview" class="excel-compare-group-preview" hidden></div>
             </section>
             <aside class="workbench-panel document-step-panel excel-compare-output">
-              <div class="document-step-heading"><span>3</span><div><h2>그룹별 시트로 저장</h2><p>그룹·기타·미매칭·중복 확인 시트를 하나의 새 XLSX로 만듭니다.</p></div></div>
+              <div class="document-step-heading"><span>4</span><div><h2>새 Excel 명단으로 저장</h2><p>선택한 열의 일괄 발송 명단과 미매칭·중복 확인 시트를 새 XLSX로 만듭니다.</p></div></div>
               <label class="form-field">결과 파일 이름<input id="excelCompareOutputName" type="text" value="Excel 비교 분류 결과" maxlength="120"><small>.xlsx는 자동으로 붙습니다.</small></label>
               <button id="chooseExcelCompareOutput" class="secondary-button" type="button">저장 폴더 선택</button>
               <div id="excelCompareOutputSummary" class="output-location-card"><strong>저장 폴더를 선택해주세요.</strong><span>두 원본 파일은 변경하지 않습니다.</span></div>
-              <div class="document-run-card"><div><strong id="excelCompareRunTitle">저장 준비</strong><span id="excelCompareRunStatus">먼저 매칭 결과를 확인해주세요.</span></div><button id="runExcelCompare" class="primary-button" type="button" disabled>그룹 시트 만들기</button></div>
+              <div class="document-run-card"><div><strong id="excelCompareRunTitle">저장 준비</strong><span id="excelCompareRunStatus">먼저 매칭 결과를 확인해주세요.</span></div><button id="runExcelCompare" class="primary-button" type="button" disabled>일괄 발송 명단 만들기</button></div>
               <progress id="excelCompareProgress" max="2" value="0" hidden></progress>
               <div id="excelCompareResult" class="document-split-results" hidden></div>
               <div class="document-completion-actions"><button id="previewExcelCompareOutput" class="secondary-button" type="button" hidden>결과 파일 열기</button><button id="openExcelCompareOutput" class="primary-button completion-folder-button" type="button" hidden>완료 파일 폴더 열기</button></div>

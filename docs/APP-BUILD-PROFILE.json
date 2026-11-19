@@ -26,7 +26,7 @@
     "appId": "kr.co.cmoe.workspace",
     "productSlug": "cmoe-workspace",
     "exeName": "CMOE Workspace.exe",
-    "version": "1.15.49",
+    "version": "1.15.50",
     "versionComparisonPolicy": "three numeric components; only a numerically newer installer may update; same-version reinstall and downgrade are blocked",
     "installScope": "per-user",
     "installDirectory": "%LOCALAPPDATA%/Programs/CMOE Workspace for new installs; an existing registered installation is updated in place",
@@ -86,24 +86,26 @@
       "1.15.49 tests cover per-job 2-to-60-second pacing in the local and Apps Script queues, long-interval trigger slicing, Gmail SENT record confirmation, lookup-only retries that never send a message twice, and confirmed non-delivery versus ambiguous network/server result separation",
       "Electron UI smoke passed all 11 guides and 215 steps for the 1.15.49 source",
       "1.15.49 build preflight passed; latest.yml size and SHA-512 match the installer; FileVersion and ProductVersion are 1.15.49; packaged Gmail Flow and online-scheduler-setup contain policy version 3 and sent-record verification"
+      ,"1.15.50 tests cover same-workbook different-sheet comparison, multi-column matching, phone normalization, selectable A/B row order, selectable output columns and review sheets"
+      ,"Electron UI smoke passed all 11 guides and 215 steps for the 1.15.50 source; build preflight and ASAR package-content checks passed"
     ],
     "unverified": ["trusted Windows code signing", "real Google time-trigger delivery", "real Google Drive backup and new-PC restore"],
     "evidencePaths": ["docs/relay/CMOE-Workspace-1.14.8-Restoration.md", "workspace/tests/standard-updater.test.js", "workspace/tests/update-data-backup.test.js", "workspace/tests/update-shutdown-policy.test.js", "workspace/build/update-e2e.config.js", "workspace/scripts/serve-update-e2e.js", "workspace/scripts/preflight-build.js"]
   },
   "delivery": {
-    "installerPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.49-Windows.exe",
-    "blockmapPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.49-Windows.exe.blockmap",
+    "installerPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.50-Windows.exe",
+    "blockmapPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.50-Windows.exe.blockmap",
     "latestYmlPath": "workspace/desktop-dist/latest.yml",
     "portablePath": null,
-    "version": "1.15.49",
+    "version": "1.15.50",
     "architecture": "x64",
-    "installerBytes": 111723129,
-    "installerSha256": "D55EE1DA4C7D00C4859EC8CEDFF0D16ACC5D35AE383E9C0545A8C9BE24B6FD1D",
-    "blockmapBytes": 118402,
+    "installerBytes": 111725767,
+    "installerSha256": "DD1D9E911E7D9DA7F31A2C615E7A6A5B9FF4E45CF72514C265973C78C43DCD61",
+    "blockmapBytes": 118412,
     "actualSignatureStatus": "NotSigned (no trusted Windows code-signing certificate configured)",
     "sourceLicenseZip": null,
-    "localInstallResult": "all current Node tests, build preflight, and 11-guide/215-step Electron UI smoke passed; the 1.15.49 installer was built and metadata/package contents were inspected; the isolated 1.15.46-to-1.15.47 standard-updater E2E remains the updater architecture baseline; production installation was not changed",
-    "siteDeploymentExplicitScope": "the user explicitly requested the split correction as an update and asked to replace the existing cresero.com download installer",
-    "siteDeploymentResult": "published source and distribution releases cmoe-workspace-v1.15.49 and deployed Cresero Worker 6e857d2c-8937-41fb-a857-835272fd2339; update.json, latest.yml, the download page, blockmap, release notes, and scheduler ZIP were verified; the full public installer redownload matched 111723129 bytes and SHA-256 D55EE1DA4C7D00C4859EC8CEDFF0D16ACC5D35AE383E9C0545A8C9BE24B6FD1D"
+    "localInstallResult": "all current Node tests, build preflight, 11-guide/215-step Electron UI smoke, and ASAR package inspection passed; the 1.15.50 installer was built and metadata matched; the isolated 1.15.46-to-1.15.47 standard-updater E2E remains the updater architecture baseline; production installation was not changed",
+    "siteDeploymentExplicitScope": "the user explicitly requested this flexible roster comparison as an update and asked that it follow the existing Git and deployment format",
+    "siteDeploymentResult": "1.15.50 GitHub releases and Cresero updater/download deployment are pending"
   }
 }

@@ -9,6 +9,8 @@ const { columnLetter } = require('./excel-deduplicate');
 
 const MAX_COMPARE_ROWS = 500000;
 const MAX_RULES = 100;
+const MAX_MATCH_COLUMNS = 12;
+const MAX_OUTPUT_COLUMNS = 200;
 const RESERVED_GROUP_NAMES = new Set(['기타', '중복 확인', '미매칭 a', '미매칭 b', '결과 없음']);
 
 function compareError(code, message, cause) {
@@ -80,18 +82,61 @@ async function inspectExcelCompareFile(filePath) {
 }
 
 function normalizeSelection(workbook, raw, side) {
-  const sheetIndex = Number(raw?.sheetIndex); const headerRow = Number(raw?.headerRow); const keyColumn = Number(raw?.keyColumn);
+  const sheetIndex = Number(raw?.sheetIndex); const headerRow = Number(raw?.headerRow);
   const sheet = workbook.worksheets[sheetIndex];
   if (!Number.isInteger(sheetIndex) || !sheet) throw compareError('EXCEL_COMPARE_SHEET_INVALID', `${side} 파일에서 비교할 시트를 선택해주세요.`);
   if (!Number.isInteger(headerRow) || headerRow < 1 || headerRow > Math.max(1, Number(sheet.rowCount) || 1)) throw compareError('EXCEL_COMPARE_HEADER_INVALID', `${side} 파일의 열 이름 행을 확인해주세요.`);
-  if (!Number.isInteger(keyColumn) || keyColumn < 1 || keyColumn > Math.max(1, Number(sheet.columnCount) || 0)) throw compareError('EXCEL_COMPARE_KEY_COLUMN_INVALID', `${side} 파일에서 사람을 비교할 열을 선택해주세요.`);
   const columns = sheetColumns(sheet, headerRow);
-  if (!columns.some((column) => column.index === keyColumn)) throw compareError('EXCEL_COMPARE_KEY_COLUMN_INVALID', `${side} 파일의 비교 열에 데이터가 없습니다.`);
-  return { side, sheetIndex, sheet, headerRow, keyColumn, columns };
+  return { side, sheetIndex, sheet, headerRow, columns };
+}
+
+function normalizeMatchValue(value) {
+  const source = String(value ?? '').normalize('NFKC').trim();
+  if (!source) return '';
+  const digits = source.replace(/\D/g, '');
+  if (digits.length >= 7 && /^[+\d\s().-]+$/.test(source)) return `phone:${digits}`;
+  return source.replace(/\s+/g, ' ').toLocaleLowerCase('ko-KR');
+}
+
+function normalizeMatchPairs(rawPairs, left, right, legacy = {}) {
+  const source = Array.isArray(rawPairs) && rawPairs.length
+    ? rawPairs
+    : [{ leftColumn: legacy.leftKeyColumn, rightColumn: legacy.rightKeyColumn }];
+  if (!source.length || source.length > MAX_MATCH_COLUMNS) throw compareError('EXCEL_COMPARE_MATCH_COLUMNS_INVALID', `비교 조건은 1개 이상 ${MAX_MATCH_COLUMNS}개 이하로 선택해주세요.`);
+  const used = new Set();
+  return source.map((raw, index) => {
+    const leftColumn = Number(raw?.leftColumn); const rightColumn = Number(raw?.rightColumn);
+    if (!left.columns.some((column) => column.index === leftColumn) || !right.columns.some((column) => column.index === rightColumn)) throw compareError('EXCEL_COMPARE_MATCH_COLUMNS_INVALID', `${index + 1}번째 비교 조건의 A/B 열을 확인해주세요.`);
+    const key = `${leftColumn}:${rightColumn}`;
+    if (used.has(key)) throw compareError('EXCEL_COMPARE_MATCH_COLUMNS_DUPLICATE', '같은 A/B 비교 조건이 중복되어 있습니다.');
+    used.add(key);
+    return { leftColumn, rightColumn };
+  });
+}
+
+function normalizeOutputColumns(rawColumns, left, right, baseSide = 'a') {
+  const supplied = Array.isArray(rawColumns) && rawColumns.length;
+  const source = supplied ? rawColumns : [
+    ...left.columns.map((column) => ({ source: 'a', columnIndex: column.index, label: `A · ${column.label}` })),
+    ...right.columns.map((column) => ({ source: 'b', columnIndex: column.index, label: `B · ${column.label}` }))
+  ];
+  if (!source.length || source.length > MAX_OUTPUT_COLUMNS) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_INVALID', `결과 열은 1개 이상 ${MAX_OUTPUT_COLUMNS}개 이하로 선택해주세요.`);
+  const used = new Set();
+  return source.map((raw, index) => {
+    const side = raw?.source === 'b' ? 'b' : 'a'; const selection = side === 'a' ? left : right; const columnIndex = Number(raw?.columnIndex);
+    const column = selection.columns.find((candidate) => candidate.index === columnIndex);
+    if (!column) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_INVALID', `${index + 1}번째 결과 열을 확인해주세요.`);
+    const key = `${side}:${columnIndex}`;
+    if (used.has(key)) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_DUPLICATE', '같은 결과 열을 두 번 선택할 수 없습니다.');
+    used.add(key);
+    const prefix = side === baseSide ? '' : `${side.toUpperCase()} · `;
+    return { source: side, columnIndex, label: String(raw?.label || '').trim().slice(0, 100) || `${prefix}${column.label}` };
+  });
 }
 
 function normalizeRules(rules, left, right) {
-  if (!Array.isArray(rules) || !rules.length || rules.length > MAX_RULES) throw compareError('EXCEL_COMPARE_RULE_INVALID', '분류 규칙을 하나 이상 입력해주세요.');
+  if (!Array.isArray(rules)) return [];
+  if (rules.length > MAX_RULES) throw compareError('EXCEL_COMPARE_RULE_INVALID', `분류 규칙은 ${MAX_RULES}개 이하로 입력해주세요.`);
   const groupNames = new Map();
   return rules.map((raw, index) => {
     const source = ['key', 'a', 'b'].includes(raw?.source) ? raw.source : '';
@@ -107,17 +152,16 @@ function normalizeRules(rules, left, right) {
   });
 }
 
-function normalizeKey(value) {
-  return String(value || '').trim().toLocaleLowerCase('en-US');
-}
+function normalizeKey(value) { return normalizeMatchValue(value); }
 
-function collectRecords(selection) {
+function collectRecords(selection, matchColumns) {
   const records = []; const byKey = new Map();
   for (let rowNumber = selection.headerRow + 1; rowNumber <= selection.sheet.rowCount; rowNumber += 1) {
     const row = selection.sheet.getRow(rowNumber); const values = selection.columns.map((column) => cellText(row.getCell(column.index)));
     if (!values.some(Boolean)) continue;
-    const rawKey = cellText(row.getCell(selection.keyColumn)); const key = normalizeKey(rawKey);
-    const record = { side: selection.side, rowNumber, rawKey, key, values, row };
+    const rawKeys = matchColumns.map((column) => cellText(row.getCell(column))); const normalizedKeys = rawKeys.map(normalizeMatchValue);
+    const rawKey = rawKeys.join(' · '); const key = normalizedKeys.every(Boolean) ? JSON.stringify(normalizedKeys) : '';
+    const record = { side: selection.side, rowNumber, rawKey, rawKeys, key, values, row };
     records.push(record);
     if (key) { const group = byKey.get(key) || []; group.push(record); byKey.set(key, group); }
   }
@@ -133,7 +177,10 @@ function ruleValue(rule, pair, left, right) {
 
 function buildComparePlanFromLoaded(leftLoaded, rightLoaded, options = {}) {
   const left = normalizeSelection(leftLoaded.workbook, options.left, 'A'); const right = normalizeSelection(rightLoaded.workbook, options.right, 'B');
-  const rules = normalizeRules(options.rules, left, right); const leftRecords = collectRecords(left); const rightRecords = collectRecords(right);
+  const matchPairs = normalizeMatchPairs(options.matchPairs, left, right, { leftKeyColumn: options.left?.keyColumn, rightKeyColumn: options.right?.keyColumn });
+  const baseSide = options.baseSide === 'b' ? 'b' : 'a'; const outputColumns = normalizeOutputColumns(options.outputColumns, left, right, baseSide);
+  const rules = normalizeRules(options.rules, left, right);
+  const leftRecords = collectRecords(left, matchPairs.map((pair) => pair.leftColumn)); const rightRecords = collectRecords(right, matchPairs.map((pair) => pair.rightColumn));
   if (leftRecords.records.length + rightRecords.records.length > MAX_COMPARE_ROWS) throw compareError('EXCEL_COMPARE_ROW_LIMIT', `비교할 데이터가 ${MAX_COMPARE_ROWS.toLocaleString('ko-KR')}행을 넘습니다.`);
   const matched = []; const ambiguous = []; const unmatchedA = []; const unmatchedB = []; const usedKeys = new Set();
   for (const [key, aRows] of leftRecords.byKey) {
@@ -145,18 +192,20 @@ function buildComparePlanFromLoaded(leftLoaded, rightLoaded, options = {}) {
   for (const [key, bRows] of rightRecords.byKey) if (!usedKeys.has(key)) unmatchedB.push(...bRows);
   unmatchedA.push(...leftRecords.records.filter((record) => !record.key));
   unmatchedB.push(...rightRecords.records.filter((record) => !record.key));
+  matched.sort((a, b) => a[baseSide].rowNumber - b[baseSide].rowNumber);
   const groups = new Map(); rules.forEach((rule) => { if (!groups.has(rule.groupName)) groups.set(rule.groupName, []); }); const other = [];
   for (const pair of matched) {
+    if (!rules.length) continue;
     const rule = rules.find((candidate) => ruleValue(candidate, pair, left, right).toLocaleLowerCase('ko-KR').includes(candidate.normalizedContains));
     if (rule) groups.get(rule.groupName).push(pair); else other.push(pair);
   }
   return {
-    left, right, rules, groups, other, ambiguous, unmatchedA, unmatchedB,
-    matchedCount: matched.length, classifiedCount: matched.length - other.length,
+    left, right, matchPairs, baseSide, outputColumns, rules, groups, matched, other, ambiguous, unmatchedA, unmatchedB,
+    matchedCount: matched.length, classifiedCount: rules.length ? matched.length - other.length : matched.length,
     groupCounts: [...groups].map(([name, pairs]) => ({ name, count: pairs.length })),
     warnings: [
-      ...(ambiguous.length ? ['같은 비교값이 한 파일에 여러 번 있는 행은 잘못 연결하지 않고 “중복 확인” 시트로 분리합니다.'] : []),
-      '여러 규칙에 동시에 해당하면 위에 있는 첫 번째 규칙을 적용합니다.'
+      ...(ambiguous.length ? ['선택한 비교값 조합이 한 파일에 여러 번 있는 행은 잘못 연결하지 않고 “중복 확인” 시트로 분리합니다.'] : []),
+      ...(rules.length ? ['여러 규칙에 동시에 해당하면 위에 있는 첫 번째 규칙을 적용합니다.'] : [])
     ]
   };
 }
@@ -188,11 +237,17 @@ function styleHeader(row) {
   row.alignment = { vertical: 'middle', wrapText: true }; row.height = 26;
 }
 
+function pairOutputValue(pair, plan, outputColumn) {
+  const selection = outputColumn.source === 'a' ? plan.left : plan.right; const record = outputColumn.source === 'a' ? pair.a : pair.b;
+  const offset = selection.columns.findIndex((column) => column.index === outputColumn.columnIndex);
+  return offset >= 0 ? record.values[offset] : '';
+}
+
 function addPairSheet(workbook, name, pairs, plan, used) {
   const sheet = workbook.addWorksheet(safeSheetName(name, used));
-  const headers = ['비교값', ...plan.left.columns.map((column) => `A · ${column.label}`), ...plan.right.columns.map((column) => `B · ${column.label}`)];
+  const headers = plan.outputColumns.map((column) => column.label);
   sheet.addRow(headers); styleHeader(sheet.getRow(1));
-  pairs.forEach((pair) => sheet.addRow([pair.a.rawKey || pair.b.rawKey, ...pair.a.values, ...pair.b.values]));
+  pairs.forEach((pair) => sheet.addRow(plan.outputColumns.map((column) => pairOutputValue(pair, plan, column))));
   sheet.views = [{ state: 'frozen', ySplit: 1 }]; sheet.autoFilter = { from: 'A1', to: { row: 1, column: headers.length } };
   sheet.columns.forEach((column) => { column.width = Math.min(42, Math.max(12, ...column.values.slice(1, 101).map((value) => String(value || '').length + 2))); });
   return sheet.name;
@@ -212,6 +267,7 @@ async function compareAndGroupExcelFiles(leftPath, rightPath, outputPath, option
   if (options.expectedLeftSha256 && leftLoaded.sourceSha256 !== options.expectedLeftSha256) throw compareError('EXCEL_COMPARE_INPUT_CHANGED', 'A 파일이 분석 후 바뀌었습니다. 다시 선택해주세요.');
   if (options.expectedRightSha256 && rightLoaded.sourceSha256 !== options.expectedRightSha256) throw compareError('EXCEL_COMPARE_INPUT_CHANGED', 'B 파일이 분석 후 바뀌었습니다. 다시 선택해주세요.');
   const plan = buildComparePlanFromLoaded(leftLoaded, rightLoaded, options); const output = new ExcelJS.Workbook(); const used = new Set(); const sheetResults = [];
+  if (plan.matched.length) sheetResults.push({ kind: 'matched', name: addPairSheet(output, '일괄 발송 명단', plan.matched, plan, used), rowCount: plan.matched.length });
   for (const [groupName, pairs] of plan.groups) {
     if (!pairs.length) continue;
     sheetResults.push({ kind: 'group', requestedName: groupName, name: addPairSheet(output, groupName, pairs, plan, used), rowCount: pairs.length });
@@ -246,4 +302,4 @@ async function compareAndGroupExcelFiles(leftPath, rightPath, outputPath, option
   } finally { await fs.promises.unlink(temporaryPath).catch(() => {}); }
 }
 
-module.exports = { MAX_COMPARE_ROWS, MAX_RULES, RESERVED_GROUP_NAMES, compareError, cellText, detectHeaderRow, sheetColumns, headerCandidates, inspectExcelCompareFile, normalizeKey, buildComparePlanFromLoaded, analyzeExcelCompareGroups, compareAndGroupExcelFiles };
+module.exports = { MAX_COMPARE_ROWS, MAX_RULES, MAX_MATCH_COLUMNS, MAX_OUTPUT_COLUMNS, RESERVED_GROUP_NAMES, compareError, cellText, detectHeaderRow, sheetColumns, headerCandidates, inspectExcelCompareFile, normalizeKey, normalizeMatchValue, buildComparePlanFromLoaded, analyzeExcelCompareGroups, compareAndGroupExcelFiles };

@@ -139,6 +139,7 @@ contextBridge.exposeInMainWorld('workspaceDesktop', {
   analyzeExcelDeduplicateReview: (payload) => invokeWithStructuredError('document-tools:excel-deduplicate:review', payload),
   runExcelDeduplicate: (payload) => invokeWithStructuredError('document-tools:excel-deduplicate:run', payload),
   chooseExcelCompareFile: (payload) => invokeWithStructuredError('document-tools:excel-compare:choose', payload),
+  refreshExcelCompareFile: (payload) => invokeWithStructuredError('document-tools:excel-compare:refresh', payload),
   analyzeExcelComparePlan: (payload) => invokeWithStructuredError('document-tools:excel-compare:analyze', payload),
   runExcelCompareGroup: (payload) => invokeWithStructuredError('document-tools:excel-compare:run', payload),
   chooseDocumentsToMerge: () => invokeWithStructuredError('document-tools:merge:choose', { kind: 'documents' }),

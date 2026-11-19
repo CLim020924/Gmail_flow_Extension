@@ -237,15 +237,22 @@
   };
   let excelDedupeCriteriaTimer = 0;
   let excelCompareRuleSequence = 0;
+  let excelCompareMatchSequence = 0;
   const createExcelCompareRule = (values = {}) => ({
     id: String(values.id || `excel-compare-rule-${++excelCompareRuleSequence}`), source: ['key', 'a', 'b'].includes(values.source) ? values.source : 'key',
     columnIndex: Number(values.columnIndex) || 0, contains: String(values.contains || ''), groupName: String(values.groupName || '')
   });
+  const createExcelCompareMatchPair = (values = {}) => ({
+    id: String(values.id || `excel-compare-match-${++excelCompareMatchSequence}`),
+    leftColumn: Number(values.leftColumn) || 0, rightColumn: Number(values.rightColumn) || 0
+  });
   const excelCompare = {
     files: { a: null, b: null }, selections: { a: { sheetIndex: 0, headerRow: 1, keyColumn: 0 }, b: { sheetIndex: 0, headerRow: 1, keyColumn: 0 } },
-    rules: [createExcelCompareRule()], outputToken: '', outputName: '', resultName: 'Excel 비교 분류 결과',
+    extraMatchPairs: [], baseSide: 'a', outputColumns: [], autoRefresh: false,
+    rules: [], outputToken: '', outputName: '', resultName: '일괄 발송 명단',
     analyzing: false, running: false, requestId: '', plan: null, planSignature: '', result: null, completed: false, outcome: ''
   };
+  let excelCompareRefreshTimer = 0;
   let excelCleanupTask = 'deduplicate';
   let documentSplitKind = 'pdf';
   let documentMode = 'pptxPdf';
@@ -2535,10 +2542,40 @@
     return excelCompareHeader(side)?.columns || excelCompareSheet(side)?.columns || [];
   }
 
+  function excelCompareMatchPairs() {
+    return [
+      { leftColumn: Number(excelCompare.selections.a.keyColumn), rightColumn: Number(excelCompare.selections.b.keyColumn) },
+      ...excelCompare.extraMatchPairs.map(({ leftColumn, rightColumn }) => ({ leftColumn: Number(leftColumn), rightColumn: Number(rightColumn) }))
+    ];
+  }
+
+  function excelCompareOutputKey(source, columnIndex) { return `${source}:${Number(columnIndex)}`; }
+
+  function resetExcelCompareOutputColumns() {
+    const side = excelCompare.baseSide; excelCompare.outputColumns = excelCompareColumns(side).map((column) => ({ source: side, columnIndex: Number(column.index), label: column.label }));
+  }
+
+  function sanitizeExcelCompareSelections() {
+    for (const side of ['a', 'b']) {
+      const columns = excelCompareColumns(side); const fallback = Number(columns[0]?.index) || 0;
+      if (!columns.some((column) => Number(column.index) === Number(excelCompare.selections[side].keyColumn))) excelCompare.selections[side].keyColumn = fallback;
+    }
+    excelCompare.extraMatchPairs = excelCompare.extraMatchPairs.map((pair) => ({
+      ...pair,
+      leftColumn: excelCompareColumns('a').some((column) => Number(column.index) === Number(pair.leftColumn)) ? Number(pair.leftColumn) : Number(excelCompareColumns('a')[0]?.index) || 0,
+      rightColumn: excelCompareColumns('b').some((column) => Number(column.index) === Number(pair.rightColumn)) ? Number(pair.rightColumn) : Number(excelCompareColumns('b')[0]?.index) || 0
+    }));
+    const available = new Set(['a', 'b'].flatMap((side) => excelCompareColumns(side).map((column) => excelCompareOutputKey(side, column.index))));
+    excelCompare.outputColumns = excelCompare.outputColumns.filter((item) => available.has(excelCompareOutputKey(item.source, item.columnIndex)));
+    if (!excelCompare.outputColumns.length && excelCompareColumns(excelCompare.baseSide).length) resetExcelCompareOutputColumns();
+  }
+
   function excelCompareConfig() {
     return {
       leftToken: excelCompare.files.a?.token || '', rightToken: excelCompare.files.b?.token || '',
       left: { ...excelCompare.selections.a }, right: { ...excelCompare.selections.b },
+      matchPairs: excelCompareMatchPairs(), baseSide: excelCompare.baseSide,
+      outputColumns: excelCompare.outputColumns.map(({ source, columnIndex, label }) => ({ source, columnIndex: Number(columnIndex), label })),
       rules: excelCompare.rules.map(({ source, columnIndex, contains, groupName }) => ({ source, columnIndex, contains: contains.trim(), groupName: groupName.trim() }))
     };
   }
@@ -2555,7 +2592,11 @@
       const columns = excelCompareColumns(side); const key = Number(excelCompare.selections[side].keyColumn);
       if (!columns.some((column) => Number(column.index) === key)) return false;
     }
-    if (!excelCompare.rules.length) return false;
+    if (!excelCompare.outputColumns.length) return false;
+    for (const pair of excelCompare.extraMatchPairs) {
+      if (!excelCompareColumns('a').some((column) => Number(column.index) === Number(pair.leftColumn))) return false;
+      if (!excelCompareColumns('b').some((column) => Number(column.index) === Number(pair.rightColumn))) return false;
+    }
     for (const rule of excelCompare.rules) {
       const group = rule.groupName.trim().toLocaleLowerCase('ko-KR');
       if (!rule.contains.trim() || !group) return false;
@@ -2572,7 +2613,7 @@
     $$('[data-excel-cleanup-panel]').forEach((panel) => { panel.hidden = panel.dataset.excelCleanupPanel !== excelCleanupTask; });
     $('#excelCleanupTitle').textContent = excelCleanupTask === 'compare' ? 'Excel 명단 비교·분류' : 'Excel 중복 행 정리';
     $('#excelCleanupDescription').textContent = excelCleanupTask === 'compare'
-      ? '서로 다른 두 파일에서 같은 사람을 찾고, 문자 포함 규칙에 따라 그룹별 시트로 나눕니다.'
+      ? '두 파일이나 같은 파일의 두 시트를 복수 열로 대조하고, 필요한 열만 골라 일괄 발송 명단을 만듭니다.'
       : '완전히 같은 행과 빈칸만 다른 행은 자동 통합하고, 값이 충돌하는 후보는 사용자가 선택한 묶음만 통합합니다. 원본은 바꾸지 않습니다.';
   }
 
@@ -2592,7 +2633,44 @@
     fillExcelCompareSelect($(`#excelCompare${upper}Header`), sheet?.headerCandidates || [], selection.headerRow, '열 이름 행 없음', (item) => item.row, (item) => `${Number(item.row) === Number(sheet?.headerRow) ? '자동 · ' : ''}${item.label}`);
     fillExcelCompareSelect($(`#excelCompare${upper}Key`), excelCompareColumns(side), selection.keyColumn, '비교 열 없음', (item) => item.index, (item) => `${item.letter} · ${item.label}`);
     $(`#chooseExcelCompare${upper}`).disabled = excelCompare.running || excelCompare.analyzing;
+    $(`#refreshExcelCompare${upper}`).disabled = !file || excelCompare.running || excelCompare.analyzing;
     $(`#chooseExcelCompare${upper} strong`).textContent = excelCompare.analyzing ? '분석 중…' : `${upper} 파일 선택`;
+  }
+
+  function renderExcelCompareMatchPairs() {
+    const list = $('#excelCompareMatchPairList'); list.replaceChildren();
+    excelCompare.extraMatchPairs.forEach((pair, index) => {
+      const row = element('div', 'excel-compare-match-pair'); row.dataset.excelCompareMatchPair = pair.id;
+      const leftField = element('label', 'form-field'); leftField.append(element('span', '', `${index + 2}번째 A 열`));
+      const left = element('select'); left.dataset.excelCompareMatchField = 'leftColumn';
+      excelCompareColumns('a').forEach((column) => { const option = element('option', '', `${column.letter} · ${column.label}`); option.value = String(column.index); left.append(option); }); left.value = String(pair.leftColumn); leftField.append(left);
+      const rightField = element('label', 'form-field'); rightField.append(element('span', '', `${index + 2}번째 B 열`));
+      const right = element('select'); right.dataset.excelCompareMatchField = 'rightColumn';
+      excelCompareColumns('b').forEach((column) => { const option = element('option', '', `${column.letter} · ${column.label}`); option.value = String(column.index); right.append(option); }); right.value = String(pair.rightColumn); rightField.append(right);
+      const remove = element('button', 'excel-compare-rule-remove', '×'); remove.type = 'button'; remove.dataset.removeExcelCompareMatch = pair.id; remove.title = '이 비교 조건 삭제';
+      [left, right, remove].forEach((control) => { control.disabled = excelCompare.running || excelCompare.analyzing; }); row.append(leftField, rightField, remove); list.append(row);
+    });
+    if (!excelCompare.extraMatchPairs.length) list.append(element('div', 'notice info', '첫 번째 비교 열만 같으면 같은 사람으로 판단합니다. 이름과 전화번호처럼 함께 확인하려면 조건을 추가하세요.'));
+    $('#addExcelCompareMatchPair').disabled = excelCompare.running || excelCompare.analyzing || excelCompare.extraMatchPairs.length >= 11 || !excelCompare.files.a || !excelCompare.files.b;
+    $('#excelCompareAutoRefresh').checked = excelCompare.autoRefresh; $('#excelCompareAutoRefresh').disabled = excelCompare.running || excelCompare.analyzing || !excelCompare.files.a || !excelCompare.files.b;
+    $$('input[name="excelCompareBaseSide"]').forEach((input) => { input.checked = input.value === excelCompare.baseSide; input.disabled = excelCompare.running || excelCompare.analyzing; });
+  }
+
+  function renderExcelCompareOutputColumns() {
+    const container = $('#excelCompareOutputColumns'); container.replaceChildren();
+    const columns = ['a', 'b'].flatMap((source) => excelCompareColumns(source).map((column) => ({ source, columnIndex: Number(column.index), label: column.label, letter: column.letter })));
+    if (!columns.length) { container.append(element('div', 'document-merge-preview-empty', 'A/B 파일의 열을 선택할 수 있습니다.')); return; }
+    const selectedKeys = excelCompare.outputColumns.map((item) => excelCompareOutputKey(item.source, item.columnIndex)); const selectedSet = new Set(selectedKeys);
+    const ordered = [...excelCompare.outputColumns.map((selected) => columns.find((column) => excelCompareOutputKey(column.source, column.columnIndex) === excelCompareOutputKey(selected.source, selected.columnIndex))).filter(Boolean), ...columns.filter((column) => !selectedSet.has(excelCompareOutputKey(column.source, column.columnIndex)))];
+    ordered.forEach((column) => {
+      const key = excelCompareOutputKey(column.source, column.columnIndex); const selectedIndex = selectedKeys.indexOf(key); const checked = selectedIndex >= 0;
+      const row = element('div', `excel-compare-output-column${checked ? ' selected' : ''}`); row.dataset.excelCompareOutputColumn = key;
+      const checkbox = element('input'); checkbox.type = 'checkbox'; checkbox.checked = checked; checkbox.disabled = excelCompare.running || excelCompare.analyzing; checkbox.dataset.toggleExcelCompareOutput = key; checkbox.setAttribute('aria-label', `${column.source.toUpperCase()} ${column.label} 결과 열 포함`);
+      const label = element('span', '', `${column.source.toUpperCase()} · ${column.letter} · ${column.label}`);
+      const up = element('button', '', '↑'); up.type = 'button'; up.dataset.moveExcelCompareOutput = key; up.dataset.direction = '-1'; up.disabled = !checked || selectedIndex <= 0 || excelCompare.running || excelCompare.analyzing; up.title = '앞으로 이동';
+      const down = element('button', '', '↓'); down.type = 'button'; down.dataset.moveExcelCompareOutput = key; down.dataset.direction = '1'; down.disabled = !checked || selectedIndex >= selectedKeys.length - 1 || excelCompare.running || excelCompare.analyzing; down.title = '뒤로 이동';
+      row.append(checkbox, label, up, down); container.append(row);
+    });
   }
 
   function renderExcelCompareRules() {
@@ -2615,6 +2693,7 @@
       [source, column, contains, group, remove].forEach((control) => { control.disabled = excelCompare.running || excelCompare.analyzing; });
       row.append(sourceField, columnField, containsField, groupField, remove); list.append(row);
     });
+    if (!excelCompare.rules.length) list.append(element('div', 'notice info', '그룹 시트가 필요하지 않으면 비워두세요. 일괄 발송 명단은 그대로 생성됩니다.'));
     $('#addExcelCompareRule').disabled = excelCompare.running || excelCompare.analyzing || excelCompare.rules.length >= 100;
   }
 
@@ -2623,9 +2702,9 @@
     $('#analyzeExcelCompare').disabled = !configured || excelCompare.running || excelCompare.analyzing;
     $('#analyzeExcelCompare').textContent = excelCompare.analyzing ? '비교 중…' : planCurrent ? '다시 확인' : '매칭 결과 확인';
     $('#excelCompareAnalysisTitle').textContent = excelCompare.outcome === 'analysisError' ? '비교하지 못했습니다' : planCurrent ? '매칭 결과 확인 완료' : configured ? '비교 준비 완료' : '비교 준비';
-    $('#excelCompareAnalysisStatus').textContent = excelCompare.outcome === 'analysisError' ? '입력한 시트·열·규칙을 확인해주세요.' : planCurrent
-      ? `동일 인물 ${excelCompare.plan.matchedCount}명 · 그룹 ${excelCompare.plan.classifiedCount}명 · 기타 ${excelCompare.plan.otherCount}명`
-      : configured ? '매칭 결과 확인을 누르면 저장 전에 그룹별 인원수를 계산합니다.' : '두 파일과 비교 열, 분류 규칙을 준비해주세요.';
+    $('#excelCompareAnalysisStatus').textContent = excelCompare.outcome === 'analysisError' ? '입력한 시트·비교 열·결과 열을 확인해주세요.' : planCurrent
+      ? `동일 인물 ${excelCompare.plan.matchedCount}명 · 결과 열 ${excelCompare.outputColumns.length}개 · 중복 확인 ${excelCompare.plan.ambiguousRowCount}행`
+      : configured ? '매칭 결과 확인을 누르면 저장 전에 동일 인물과 예외 행을 계산합니다.' : '두 파일과 비교 열, 결과 열을 준비해주세요.';
     const totals = $$('#excelCompareTotals strong'); const values = planCurrent ? [excelCompare.plan.matchedCount, excelCompare.plan.classifiedCount, excelCompare.plan.otherCount, excelCompare.plan.ambiguousRowCount] : [0, 0, 0, 0];
     totals.forEach((node, index) => { node.textContent = String(values[index] || 0); });
     const preview = $('#excelCompareGroupPreview'); preview.replaceChildren();
@@ -2637,21 +2716,21 @@
     $('#excelCompareOutputName').value = excelCompare.resultName; $('#excelCompareOutputName').disabled = excelCompare.running;
     $('#chooseExcelCompareOutput').disabled = excelCompare.running || excelCompare.analyzing;
     const output = $('#excelCompareOutputSummary');
-    if (excelCompare.outputToken) output.replaceChildren(element('strong', '', excelCompare.outputName || '선택한 폴더'), element('span', '', '그룹별 새 XLSX를 이 폴더에 저장합니다.'));
+    if (excelCompare.outputToken) output.replaceChildren(element('strong', '', excelCompare.outputName || '선택한 폴더'), element('span', '', '일괄 발송 명단이 포함된 새 XLSX를 이 폴더에 저장합니다.'));
     else output.replaceChildren(element('strong', '', '저장 폴더를 선택해주세요.'), element('span', '', '두 원본 파일은 변경하지 않습니다.'));
     const ready = planCurrent && excelCompare.outputToken && excelCompare.resultName.trim() && !excelCompare.running && !excelCompare.analyzing;
-    $('#runExcelCompare').disabled = !ready; $('#runExcelCompare').textContent = excelCompare.running ? '만드는 중…' : '그룹 시트 만들기';
-    $('#excelCompareRunTitle').textContent = excelCompare.outcome === 'runError' ? '파일을 만들지 못했습니다' : excelCompare.completed ? '그룹 시트 생성 완료' : ready ? '저장 준비 완료' : '저장 준비';
+    $('#runExcelCompare').disabled = !ready; $('#runExcelCompare').textContent = excelCompare.running ? '만드는 중…' : '일괄 발송 명단 만들기';
+    $('#excelCompareRunTitle').textContent = excelCompare.outcome === 'runError' ? '파일을 만들지 못했습니다' : excelCompare.completed ? '일괄 발송 명단 생성 완료' : ready ? '저장 준비 완료' : '저장 준비';
     $('#excelCompareRunStatus').textContent = excelCompare.outcome === 'runError' ? '오류를 확인하고 매칭 결과를 다시 확인해주세요.' : excelCompare.completed
       ? `${excelCompare.result.sheetCount}개 시트 · 동일 인물 ${excelCompare.result.matchedCount}명 분류 결과를 다시 검증했습니다.`
-      : !planCurrent ? '먼저 매칭 결과를 확인해주세요.' : !excelCompare.outputToken ? '결과를 저장할 폴더를 선택해주세요.' : '그룹별 시트가 포함된 새 Excel 파일을 만들 수 있습니다.';
+      : !planCurrent ? '먼저 매칭 결과를 확인해주세요.' : !excelCompare.outputToken ? '결과를 저장할 폴더를 선택해주세요.' : '선택한 열만 포함한 새 Excel 명단을 만들 수 있습니다.';
     const result = $('#excelCompareResult'); result.replaceChildren();
     (excelCompare.result?.sheets || []).forEach((sheet) => { const item = element('div', 'document-split-result-row'); const copy = element('div', 'document-split-result-copy'); copy.append(element('strong', '', sheet.name), element('small', '', `${sheet.rowCount}행`)); item.append(copy); result.append(item); });
     result.hidden = !excelCompare.completed; $('#previewExcelCompareOutput').hidden = !excelCompare.completed; $('#openExcelCompareOutput').hidden = !excelCompare.completed;
   }
 
   function renderExcelCompare() {
-    renderExcelCleanupTask(); renderExcelCompareSource('a'); renderExcelCompareSource('b'); renderExcelCompareRules(); updateExcelCompareReady();
+    sanitizeExcelCompareSelections(); renderExcelCleanupTask(); renderExcelCompareSource('a'); renderExcelCompareSource('b'); renderExcelCompareMatchPairs(); renderExcelCompareOutputColumns(); renderExcelCompareRules(); updateExcelCompareReady();
     $$('button[data-document-mode]', $('#page-documentEditor')).forEach((button) => { button.disabled = excelCompare.running || excelCompare.analyzing; });
   }
 
@@ -2664,10 +2743,51 @@
         excelCompare.files[side] = result.file; const sheet = result.file.sheets[0]; const header = sheet?.headerCandidates?.find((item) => Number(item.row) === Number(sheet.headerRow));
         excelCompare.selections[side] = { sheetIndex: Number(sheet?.index) || 0, headerRow: Number(sheet?.headerRow) || 1, keyColumn: Number(header?.columns?.[0]?.index || sheet?.columns?.[0]?.index) || 0 };
         excelCompare.rules.forEach((rule) => { if (rule.source === side) rule.columnIndex = Number(excelCompareColumns(side)[0]?.index) || 0; });
-        excelCompare.resultName = `${String(excelCompare.files.a?.name || 'A').replace(/\.xlsx$/i, '')}_${String(excelCompare.files.b?.name || 'B').replace(/\.xlsx$/i, '')}_분류`;
+        excelCompare.extraMatchPairs = [];
+        if (excelCompare.files.a && excelCompare.files.b) resetExcelCompareOutputColumns();
+        excelCompare.resultName = `${String(excelCompare.files.a?.name || 'A').replace(/\.xlsx$/i, '')}_${String(excelCompare.files.b?.name || 'B').replace(/\.xlsx$/i, '')}_일괄발송명단`;
       }
     } catch (error) { notify(`${side.toUpperCase()} 파일 분석 실패: ${error.message}`, 'error'); }
     finally { excelCompare.analyzing = false; renderExcelCompare(); }
+  }
+
+  async function refreshExcelCompareFile(side, { silent = false } = {}) {
+    const current = excelCompare.files[side]; if (!current?.token || excelCompare.running || excelCompare.analyzing) return false;
+    excelCompare.analyzing = true; renderExcelCompare();
+    try {
+      const result = await api().refreshExcelCompareFile({ slot: side, token: current.token });
+      if (!result?.file) return false;
+      excelCompare.files[side] = result.file; sanitizeExcelCompareSelections();
+      if (result.changed) {
+        invalidateExcelComparePlan();
+        if (!silent) notify(`${side.toUpperCase()} 파일의 최신 내용을 다시 읽었습니다. 매칭 결과를 확인해주세요.`, 'success');
+      } else if (!silent) notify(`${side.toUpperCase()} 파일은 선택 당시와 같습니다.`);
+      return Boolean(result.changed);
+    } catch (error) {
+      if (!silent) notify(`${side.toUpperCase()} 파일 새로고침 실패: ${error.message}`, 'error');
+      return false;
+    } finally { excelCompare.analyzing = false; renderExcelCompare(); }
+  }
+
+  async function refreshExcelCompareSources({ silent = false } = {}) {
+    if (excelCompare.running || excelCompare.analyzing) return;
+    excelCompare.analyzing = true; renderExcelCompare(); let changed = false;
+    try {
+      for (const side of ['a', 'b']) {
+        const current = excelCompare.files[side]; if (!current?.token) continue;
+        const result = await api().refreshExcelCompareFile({ slot: side, token: current.token });
+        if (result?.file) { excelCompare.files[side] = result.file; changed = Boolean(result.changed) || changed; }
+      }
+      sanitizeExcelCompareSelections();
+      if (changed) { invalidateExcelComparePlan(); if (!silent) notify('A/B 파일의 최신 내용을 읽었습니다. 매칭 결과를 다시 확인해주세요.', 'success'); }
+      else if (!silent) notify('A/B 파일은 선택 당시와 같습니다.');
+    } catch (error) { if (!silent) notify(`Excel 파일 최신 내용 확인 실패: ${error.message}`, 'error'); }
+    finally { excelCompare.analyzing = false; renderExcelCompare(); }
+  }
+
+  function updateExcelCompareAutoRefreshTimer() {
+    if (excelCompareRefreshTimer) { clearInterval(excelCompareRefreshTimer); excelCompareRefreshTimer = 0; }
+    if (excelCompare.autoRefresh) excelCompareRefreshTimer = setInterval(() => { refreshExcelCompareSources({ silent: true }); }, 30000);
   }
 
   async function analyzeExcelCompare() {
@@ -2677,7 +2797,7 @@
       const plan = await api().analyzeExcelComparePlan(excelCompareConfig());
       if (signature !== excelCompareSignature()) return;
       excelCompare.plan = plan; excelCompare.planSignature = signature; excelCompare.outcome = 'analyzed';
-      notify(`동일 인물 ${plan.matchedCount}명 중 ${plan.classifiedCount}명을 그룹으로 분류했습니다.`, 'success');
+      notify(`선택한 비교 조건으로 동일 인물 ${plan.matchedCount}명을 확인했습니다.`, 'success');
     } catch (error) { excelCompare.outcome = 'analysisError'; notify(`Excel 명단 비교 실패: ${error.message}`, 'error'); }
     finally { excelCompare.analyzing = false; renderExcelCompare(); }
   }
@@ -2695,8 +2815,8 @@
     try {
       const result = await api().runExcelCompareGroup({ ...excelCompareConfig(), requestId: excelCompare.requestId, outputToken: excelCompare.outputToken, outputName: excelCompare.resultName });
       excelCompare.result = result; excelCompare.completed = true; excelCompare.outcome = 'success'; $('#excelCompareProgress').value = 2;
-      notify(`그룹별 ${result.sheetCount}개 시트가 포함된 Excel 파일을 만들었습니다.`, 'success');
-      reportWorkflowStatus('documentEditor', 'needsReview', `Excel 동일 인물 ${result.matchedCount}명 비교·분류 완료`, { documentMode: 'excelDeduplicate' });
+      notify(`동일 인물 ${result.matchedCount}명의 일괄 발송 명단을 만들었습니다.`, 'success');
+      reportWorkflowStatus('documentEditor', 'needsReview', `Excel 동일 인물 ${result.matchedCount}명 일괄 발송 명단 생성 완료`, { documentMode: 'excelDeduplicate' });
     } catch (error) { excelCompare.outcome = 'runError'; notify(`Excel 비교·분류 실패: ${error.message}`, 'error'); }
     finally { excelCompare.running = false; excelCompare.requestId = ''; renderExcelCompare(); }
   }
@@ -5582,6 +5702,8 @@
     });
     $('#chooseExcelCompareA').addEventListener('click', () => chooseExcelCompareFile('a'));
     $('#chooseExcelCompareB').addEventListener('click', () => chooseExcelCompareFile('b'));
+    $('#refreshExcelCompareA').addEventListener('click', () => refreshExcelCompareFile('a'));
+    $('#refreshExcelCompareB').addEventListener('click', () => refreshExcelCompareFile('b'));
     for (const side of ['a', 'b']) {
       const upper = side.toUpperCase();
       $(`#excelCompare${upper}Sheet`).addEventListener('change', (event) => {
@@ -5590,6 +5712,7 @@
         const header = sheet.headerCandidates?.find((item) => Number(item.row) === Number(sheet.headerRow));
         excelCompare.selections[side] = { sheetIndex: Number(sheet.index), headerRow: Number(sheet.headerRow) || 1, keyColumn: Number(header?.columns?.[0]?.index || sheet.columns?.[0]?.index) || 0 };
         excelCompare.rules.forEach((rule) => { if (rule.source === side) rule.columnIndex = Number(excelCompareColumns(side)[0]?.index) || 0; });
+        excelCompare.extraMatchPairs = []; resetExcelCompareOutputColumns();
         invalidateExcelComparePlan(); renderExcelCompare();
       });
       $(`#excelCompare${upper}Header`).addEventListener('change', (event) => {
@@ -5597,10 +5720,42 @@
         excelCompare.selections[side].headerRow = Number(event.target.value); const columns = excelCompareColumns(side);
         if (!columns.some((item) => Number(item.index) === Number(excelCompare.selections[side].keyColumn))) excelCompare.selections[side].keyColumn = Number(columns[0]?.index) || 0;
         excelCompare.rules.forEach((rule) => { if (rule.source === side && !columns.some((item) => Number(item.index) === Number(rule.columnIndex))) rule.columnIndex = Number(columns[0]?.index) || 0; });
+        excelCompare.extraMatchPairs = []; resetExcelCompareOutputColumns();
         invalidateExcelComparePlan(); renderExcelCompare();
       });
       $(`#excelCompare${upper}Key`).addEventListener('change', (event) => { if (!excelCompare.running && !excelCompare.analyzing) { excelCompare.selections[side].keyColumn = Number(event.target.value); invalidateExcelComparePlan(); updateExcelCompareReady(); } });
     }
+    $('#excelCompareMatchPairList').addEventListener('change', (event) => {
+      const field = event.target.closest('[data-excel-compare-match-field]'); const row = field?.closest('[data-excel-compare-match-pair]'); if (!field || !row || excelCompare.running || excelCompare.analyzing) return;
+      const pair = excelCompare.extraMatchPairs.find((item) => item.id === row.dataset.excelCompareMatchPair); if (!pair) return;
+      pair[field.dataset.excelCompareMatchField] = Number(field.value); invalidateExcelComparePlan(); updateExcelCompareReady();
+    });
+    $('#excelCompareMatchPairList').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-remove-excel-compare-match]'); if (!button || excelCompare.running || excelCompare.analyzing) return;
+      excelCompare.extraMatchPairs = excelCompare.extraMatchPairs.filter((pair) => pair.id !== button.dataset.removeExcelCompareMatch); invalidateExcelComparePlan(); renderExcelCompare();
+    });
+    $('#addExcelCompareMatchPair').addEventListener('click', () => {
+      if (excelCompare.running || excelCompare.analyzing || excelCompare.extraMatchPairs.length >= 11) return;
+      excelCompare.extraMatchPairs.push(createExcelCompareMatchPair({ leftColumn: excelCompareColumns('a')[0]?.index, rightColumn: excelCompareColumns('b')[0]?.index })); invalidateExcelComparePlan(); renderExcelCompare();
+    });
+    $('#excelCompareAutoRefresh').addEventListener('change', (event) => { excelCompare.autoRefresh = Boolean(event.target.checked); updateExcelCompareAutoRefreshTimer(); renderExcelCompare(); });
+    $$('input[name="excelCompareBaseSide"]').forEach((input) => input.addEventListener('change', (event) => {
+      if (!event.target.checked || excelCompare.running || excelCompare.analyzing) return;
+      excelCompare.baseSide = event.target.value === 'b' ? 'b' : 'a'; resetExcelCompareOutputColumns(); invalidateExcelComparePlan(); renderExcelCompare();
+    }));
+    $('#excelCompareOutputColumns').addEventListener('change', (event) => {
+      const checkbox = event.target.closest('[data-toggle-excel-compare-output]'); if (!checkbox || excelCompare.running || excelCompare.analyzing) return;
+      const [source, rawIndex] = checkbox.dataset.toggleExcelCompareOutput.split(':'); const columnIndex = Number(rawIndex); const column = excelCompareColumns(source).find((item) => Number(item.index) === columnIndex);
+      if (checkbox.checked && column && !excelCompare.outputColumns.some((item) => excelCompareOutputKey(item.source, item.columnIndex) === checkbox.dataset.toggleExcelCompareOutput)) excelCompare.outputColumns.push({ source, columnIndex, label: source === excelCompare.baseSide ? column.label : `${source.toUpperCase()} · ${column.label}` });
+      if (!checkbox.checked) excelCompare.outputColumns = excelCompare.outputColumns.filter((item) => excelCompareOutputKey(item.source, item.columnIndex) !== checkbox.dataset.toggleExcelCompareOutput);
+      invalidateExcelComparePlan(); renderExcelCompare();
+    });
+    $('#excelCompareOutputColumns').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-move-excel-compare-output]'); if (!button || excelCompare.running || excelCompare.analyzing) return;
+      event.preventDefault(); const key = button.dataset.moveExcelCompareOutput; const index = excelCompare.outputColumns.findIndex((item) => excelCompareOutputKey(item.source, item.columnIndex) === key); const target = index + Number(button.dataset.direction);
+      if (index < 0 || target < 0 || target >= excelCompare.outputColumns.length) return;
+      [excelCompare.outputColumns[index], excelCompare.outputColumns[target]] = [excelCompare.outputColumns[target], excelCompare.outputColumns[index]]; invalidateExcelComparePlan(); renderExcelCompare();
+    });
     $('#excelCompareRuleList').addEventListener('input', (event) => {
       const field = event.target.closest('[data-excel-compare-rule-field]'); const row = field?.closest('[data-excel-compare-rule]'); if (!field || !row || excelCompare.running || excelCompare.analyzing) return;
       const rule = excelCompare.rules.find((item) => item.id === row.dataset.excelCompareRule); if (!rule) return;
@@ -6207,7 +6362,8 @@
     if (resetAll || kind === 'excelDeduplicate') {
       clearTimeout(excelDedupeCriteriaTimer);
       Object.assign(excelDedupe, { file: null, selectedSheetIndexes: [], outputToken: '', outputName: '', resultName: '중복 제거 결과', criteriaMode: 'all', columnIndexesBySheet: {}, criteriaDirty: false, criteriaAnalyzing: false, criteriaError: '', criteriaSequence: 0, requestId: '', analyzing: false, running: false, completed: false, result: null, outcome: '', review: null, reviewLoading: false, reviewSheetIndex: -1, activeReviewGroupId: '', mergeMissingValues: true, preferredRowsByGroup: {}, cellSourceRowsByGroup: {}, customValuesByGroup: {}, reviewedGroupIds: [], approvedGroupIds: [], activeColumnSheetIndex: 0 });
-      Object.assign(excelCompare, { files: { a: null, b: null }, selections: { a: { sheetIndex: 0, headerRow: 1, keyColumn: 0 }, b: { sheetIndex: 0, headerRow: 1, keyColumn: 0 } }, rules: [createExcelCompareRule()], outputToken: '', outputName: '', resultName: 'Excel 비교 분류 결과', analyzing: false, running: false, requestId: '', plan: null, planSignature: '', result: null, completed: false, outcome: '' });
+      Object.assign(excelCompare, { files: { a: null, b: null }, selections: { a: { sheetIndex: 0, headerRow: 1, keyColumn: 0 }, b: { sheetIndex: 0, headerRow: 1, keyColumn: 0 } }, extraMatchPairs: [], baseSide: 'a', outputColumns: [], autoRefresh: false, rules: [], outputToken: '', outputName: '', resultName: '일괄 발송 명단', analyzing: false, running: false, requestId: '', plan: null, planSignature: '', result: null, completed: false, outcome: '' });
+      updateExcelCompareAutoRefreshTimer();
       excelCleanupTask = 'deduplicate';
       renderExcelDeduplicate();
     }
@@ -6225,6 +6381,7 @@
     Object.entries(snapshot.splitStates || {}).forEach(([kind, saved]) => { if (splitStates[kind]) Object.assign(splitStates[kind], cloneGuideValue(saved)); });
     if (snapshot.excelDedupe) Object.assign(excelDedupe, cloneGuideValue(snapshot.excelDedupe));
     if (snapshot.excelCompare) Object.assign(excelCompare, cloneGuideValue(snapshot.excelCompare));
+    updateExcelCompareAutoRefreshTimer();
     excelCleanupTask = snapshot.excelCleanupTask === 'compare' ? 'compare' : 'deduplicate';
     documentSplitKind = DOCUMENT_SPLIT_META[snapshot.documentSplitKind] ? snapshot.documentSplitKind : 'pdf';
     applyEngineStatus(converter.capabilities || certificate.capabilities || {});
@@ -6410,18 +6567,20 @@
   function simulateGuideExcelCompareFile(side) {
     setDocumentMode('excelDeduplicate', { force: true }); excelCleanupTask = 'compare'; excelCompare.files[side] = guideExcelCompareFile(side);
     excelCompare.selections[side] = { sheetIndex: 0, headerRow: 2, keyColumn: side === 'a' ? 3 : 1 };
+    if (excelCompare.files.a && excelCompare.files.b) resetExcelCompareOutputColumns();
     invalidateExcelComparePlan(); renderExcelCompare(); return excelCompare;
   }
 
   function simulateGuideExcelCompareRules() {
     if (!excelCompare.files.a) simulateGuideExcelCompareFile('a'); if (!excelCompare.files.b) simulateGuideExcelCompareFile('b');
-    excelCompare.rules = [createExcelCompareRule({ source: 'key', contains: '.onsemi', groupName: '온세미' }), createExcelCompareRule({ source: 'b', columnIndex: 2, contains: '삼성', groupName: '삼성전자' })];
+    excelCompare.rules = [];
+    excelCompare.outputColumns = [{ source: 'a', columnIndex: 1, label: '이름' }, { source: 'a', columnIndex: 3, label: '이메일' }, { source: 'b', columnIndex: 3, label: '수료 여부' }];
     invalidateExcelComparePlan(); renderExcelCompare(); return excelCompare;
   }
 
   function simulateGuideExcelCompareAnalysis() {
     if (!excelCompare.rules.some((rule) => rule.contains)) simulateGuideExcelCompareRules();
-    excelCompare.plan = { matchedCount: 24, classifiedCount: 18, otherCount: 6, ambiguousRowCount: 2, unmatchedACount: 3, unmatchedBCount: 1, groupCounts: [{ name: '온세미', count: 11 }, { name: '삼성전자', count: 7 }] };
+    excelCompare.plan = { matchedCount: 24, classifiedCount: 24, otherCount: 0, ambiguousRowCount: 2, unmatchedACount: 3, unmatchedBCount: 1, groupCounts: [] };
     excelCompare.planSignature = excelCompareSignature(); excelCompare.outcome = 'analyzed'; renderExcelCompare(); return excelCompare;
   }
 
@@ -6431,7 +6590,7 @@
 
   function simulateGuideExcelCompareRun() {
     if (!excelCompare.outputToken) simulateGuideExcelCompareOutput();
-    excelCompare.result = { outputFileToken: 'guide-excel-compare-result', sheetCount: 6, matchedCount: 24, sheets: [{ name: '온세미', rowCount: 11 }, { name: '삼성전자', rowCount: 7 }, { name: '기타', rowCount: 6 }, { name: '중복 확인', rowCount: 2 }, { name: '미매칭 A', rowCount: 3 }, { name: '미매칭 B', rowCount: 1 }] };
+    excelCompare.result = { outputFileToken: 'guide-excel-compare-result', sheetCount: 4, matchedCount: 24, sheets: [{ name: '일괄 발송 명단', rowCount: 24 }, { name: '중복 확인', rowCount: 2 }, { name: '미매칭 A', rowCount: 3 }, { name: '미매칭 B', rowCount: 1 }] };
     excelCompare.completed = true; excelCompare.outcome = 'success'; renderExcelCompare(); return excelCompare;
   }
 
@@ -6552,10 +6711,10 @@
     }
     if (name === 'document-excel-compare-a') { simulateGuideExcelCompareFile('a'); return { completed: true, message: '가이드용 A 신청 명단과 이메일 열을 선택했습니다.' }; }
     if (name === 'document-excel-compare-b') { simulateGuideExcelCompareFile('b'); return { completed: true, message: '열 순서가 다른 가이드용 B 참석 결과와 메일 주소 열을 선택했습니다.' }; }
-    if (name === 'document-excel-compare-rules') { simulateGuideExcelCompareRules(); return { completed: true, message: '.onsemi 이메일과 삼성 회사명에 대한 두 그룹 규칙을 입력했습니다.' }; }
-    if (name === 'document-excel-compare-analysis') { const state = simulateGuideExcelCompareAnalysis(); return { completed: true, message: `동일 인물 ${state.plan.matchedCount}명의 그룹별 인원수를 계산했습니다.` }; }
+    if (name === 'document-excel-compare-rules') { simulateGuideExcelCompareRules(); return { completed: true, message: 'A 명단 기준으로 이름·이메일과 B 참여 여부 열만 결과에 넣도록 선택했습니다.' }; }
+    if (name === 'document-excel-compare-analysis') { const state = simulateGuideExcelCompareAnalysis(); return { completed: true, message: `동일 인물 ${state.plan.matchedCount}명과 예외 행을 계산했습니다.` }; }
     if (name === 'document-excel-compare-output') { simulateGuideExcelCompareOutput(); return { completed: true, message: '두 원본과 분리된 결과 폴더를 모의로 선택했습니다.' }; }
-    if (name === 'document-excel-compare-run') { const state = simulateGuideExcelCompareRun(); return { completed: true, message: `그룹·기타·중복·미매칭을 포함한 ${state.result.sheetCount}개 결과 시트를 만들었습니다.` }; }
+    if (name === 'document-excel-compare-run') { const state = simulateGuideExcelCompareRun(); return { completed: true, message: `일괄 발송 명단·중복·미매칭을 포함한 ${state.result.sheetCount}개 결과 시트를 만들었습니다.` }; }
     if (name === 'document-certificate-template') {
       showGuideCertificateTemplate();
       return { completed: true, message: '가이드용 수료증 양식을 불러왔습니다. 실제 PPTX는 열지 않았습니다.' };
