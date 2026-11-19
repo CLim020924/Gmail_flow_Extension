@@ -277,7 +277,10 @@
       <div class="gmail-message-header"><span class="gmail-avatar" aria-hidden="true">나</span><div><strong id="sendReviewSender">나</strong><p id="sendReviewTo" class="muted"></p></div></div>
       <div id="sendReviewBody" class="gmail-message-body preline"></div>
     </div>
-    <label class="review-check"><input id="sendReviewApproved" type="checkbox"> 이 대상에게 전송될 받는 사람·제목·본문을 확인했습니다.</label>
+    <div class="send-review-checks">
+      <label class="review-check"><input id="sendReviewApproved" type="checkbox"> 이 대상에게 전송될 받는 사람·제목·본문을 확인했습니다.</label>
+      <label class="review-check review-check-all"><input id="sendReviewApproveAll" type="checkbox"> 모든 대상의 받는 사람·제목·본문을 한 번에 체크합니다.</label>
+    </div>
     <div class="send-review-actions">
       <button id="cancelSendReview" class="button" type="button">취소</button>
       <div><button id="previousSendReview" class="button" type="button">이전</button><button id="nextSendReview" class="button" type="button">다음</button><button id="confirmSendReview" class="primary" type="button" disabled>모두 확인하고 발송</button></div>

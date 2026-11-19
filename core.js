@@ -48,6 +48,17 @@
     return EMAIL_PATTERN.test(cleanText(value));
   }
 
+  function createReviewApprovalSet(itemCount, approved) {
+    const count = Number.isSafeInteger(Number(itemCount)) ? Math.max(0, Number(itemCount)) : 0;
+    return approved ? new Set(Array.from({ length: count }, (_value, index) => index)) : new Set();
+  }
+
+  function reviewApprovalState(itemCount, approvedIndexes) {
+    const count = Number.isSafeInteger(Number(itemCount)) ? Math.max(0, Number(itemCount)) : 0;
+    const approvedCount = [...(approvedIndexes || [])].filter((index) => Number.isInteger(index) && index >= 0 && index < count).length;
+    return { approvedCount, all: count > 0 && approvedCount === count, partial: approvedCount > 0 && approvedCount < count };
+  }
+
   function getEmailColumns(columns) {
     const explicit = (columns || []).filter((column) => column.role === 'email');
     if (explicit.length) return explicit;
@@ -321,7 +332,7 @@
     return mergeStorageValue(baseline, localValue, latestValue);
   }
 
-  const api = { activeRows, createSyncRevisionTracker, createVariableMap, createWorkItems, extractVariables, getVariableNames, isValidEmail, mergeCloudStorageValue, normalizeCloudStorageValue, renderText, validateCompose, validateLabel };
+  const api = { activeRows, createReviewApprovalSet, createSyncRevisionTracker, createVariableMap, createWorkItems, extractVariables, getVariableNames, isValidEmail, mergeCloudStorageValue, normalizeCloudStorageValue, renderText, reviewApprovalState, validateCompose, validateLabel };
   globalScope.GmailFlowCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(globalThis);

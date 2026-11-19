@@ -2446,16 +2446,19 @@ function showHistoryMessage(itemId) {
 function renderSendReviewItem() {
   const item = sendReviewState.items[sendReviewState.index];
   if (!item) return;
+  const approval = GmailFlowCore.reviewApprovalState(sendReviewState.items.length, sendReviewState.approved);
   $('#sendReviewRecipient').value = String(sendReviewState.index);
-  $('#sendReviewProgress').textContent = `${sendReviewState.approved.size}/${sendReviewState.items.length}명 확인 · ${sendReviewState.index + 1}/${sendReviewState.items.length}${state.attachments.length ? ` · 첨부 ${state.attachments.length}개` : ''}`;
+  $('#sendReviewProgress').textContent = `${approval.approvedCount}/${sendReviewState.items.length}명 확인 · ${sendReviewState.index + 1}/${sendReviewState.items.length}${state.attachments.length ? ` · 첨부 ${state.attachments.length}개` : ''}`;
   $('#sendReviewSubject').textContent = item.subject || '(제목 없음)';
   $('#sendReviewSender').textContent = sendReviewState.senderEmail ? `나 <${sendReviewState.senderEmail}>` : '나';
   $('#sendReviewTo').textContent = `받는 사람: ${item.email || '없음'}`;
   $('#sendReviewBody').textContent = item.body || '(본문 없음)';
   $('#sendReviewApproved').checked = sendReviewState.approved.has(sendReviewState.index);
+  $('#sendReviewApproveAll').checked = approval.all;
+  $('#sendReviewApproveAll').indeterminate = approval.partial;
   $('#previousSendReview').disabled = sendReviewState.index === 0;
   $('#nextSendReview').disabled = sendReviewState.index >= sendReviewState.items.length - 1;
-  $('#confirmSendReview').disabled = sendReviewState.approved.size !== sendReviewState.items.length;
+  $('#confirmSendReview').disabled = !approval.all;
 }
 
 function finishSendReview(approved) {
@@ -2966,6 +2969,10 @@ function bindEvents() {
   $('#sendReviewApproved').addEventListener('change', (event) => {
     if (event.target.checked) sendReviewState.approved.add(sendReviewState.index);
     else sendReviewState.approved.delete(sendReviewState.index);
+    renderSendReviewItem();
+  });
+  $('#sendReviewApproveAll').addEventListener('change', (event) => {
+    sendReviewState.approved = GmailFlowCore.createReviewApprovalSet(sendReviewState.items.length, event.target.checked);
     renderSendReviewItem();
   });
   $('#previousSendReview').addEventListener('click', () => { if (sendReviewState.index > 0) { sendReviewState.index -= 1; renderSendReviewItem(); } });

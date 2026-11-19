@@ -235,7 +235,11 @@ button.compose-variable-chip { cursor: pointer; }
 .login-browser-actions > :only-child, .login-browser-actions > [data-login-browser-choice=""] { margin-left: auto; }
 .send-review-dialog { width: min(660px, calc(100vw - 24px)); }
 .send-review-message { max-height: 310px; overflow-y: auto; }
+.send-review-checks { margin: 12px 0; border: 1px solid #d8d8d4; background: #fafaf8; }
 .review-check { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0; color: #333; font-size: 13px; }
+.send-review-checks .review-check { margin: 0; padding: 10px 12px; }
+.send-review-checks .review-check + .review-check { border-top: 1px solid #e3e3df; }
+.review-check-all { background: #f3f5f6; color: #25313c; font-weight: 700; }
 .review-check input { margin-top: 2px; }
 .send-review-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .send-review-actions > div { display: flex; gap: 6px; }

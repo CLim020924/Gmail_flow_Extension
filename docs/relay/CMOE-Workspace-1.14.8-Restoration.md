@@ -304,3 +304,12 @@
 - 전체 Node 시험, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크가 통과했다.
 - 최종 운영 전환 산출물: `CMOE-Workspace-Setup-1.15.46-Windows.exe`, 111,711,150 bytes, SHA-256 `AB325D23350B0C95F203DCBE334D2F9986A71DC6259112726029B4E3088DFE7D`, FileVersion 1.15.46, NotSigned. blockmap 118,377 bytes, `latest.yml` size·SHA-512 일치.
 - GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.46`과 Cresero Worker `10f58166-f12b-43dd-9300-a558b2c7800e`를 공개했다. 기존 `update.json`과 새 `/updater/latest.yml`을 한 배포 단위로 1.15.46에 맞췄고, 공개 설치 파일 재다운로드 결과 111,711,150 bytes와 SHA-256이 원본과 일치했다. blockmap은 118,377 bytes다.
+
+## 1.15.47 최종 발송 본문 확인 일괄 체크
+
+- Gmail Flow의 즉시 발송·예약 발송 최종 확인창에 대상별 확인은 유지하고, 전체 대상의 받는 사람·제목·본문을 한 번에 확인하는 체크 항목을 복원했다.
+- 전체 체크를 켜면 모든 대상이 확인 상태가 되어 최종 발송 버튼이 활성화된다. 이후 한 명을 해제하면 전체 체크는 중간 상태가 되며, 모든 대상을 다시 확인하기 전에는 발송할 수 없다.
+- Chrome 확장, 독립 Gmail Flow, CMOE Workspace 내 Gmail Flow가 공유하는 화면·코어에 적용했다. 버전은 확장 0.6.1, 독립 Gmail Flow 0.7.1, Workspace 1.15.47이다.
+- 전체/일부/해제 상태 단위시험, Gmail Flow 전체 시험, Workspace 전체 시험, 빌드 사전검사를 통과했다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.47-Windows.exe`, 111,711,351 bytes, SHA-256 `AFDA7C88ADA1AE63E59F43A11A311F291938196A2D2E46175A170099E308402E`, FileVersion 1.15.47, NotSigned. blockmap은 118,374 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
+- 공개 GitHub Release와 Cresero 업데이트 피드 배포 결과는 배포 완료 후 이 항목에 이어서 기록한다.
