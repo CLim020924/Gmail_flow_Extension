@@ -1549,6 +1549,10 @@ body.guide-mode #saveStatus { color: #217452; font-weight: 700; }
 .excel-compare-auto-refresh { width: fit-content; }
 .excel-compare-base-choice { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0; padding: 11px 12px; border: 1px solid #d2dce1; }
 .excel-compare-base-choice legend { padding: 0 5px; color: #43545e; font-size: 10px; font-weight: 800; }
+.excel-compare-filter-list { display: grid; gap: 8px; }
+.excel-compare-filter { display: grid; grid-template-columns: minmax(110px, .55fr) minmax(150px, 1fr) minmax(130px, .8fr) minmax(150px, 1fr) auto; gap: 8px; align-items: end; padding: 10px; border: 1px solid #d2dce1; background: #f8fafb; }
+.excel-compare-filter .form-field { margin: 0; }
+.excel-compare-output-presets { display: flex; flex-wrap: wrap; gap: 7px; }
 .excel-compare-output-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; max-height: 330px; overflow: auto; padding: 2px; }
 .excel-compare-output-column { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 7px; align-items: center; min-width: 0; min-height: 38px; padding: 7px 8px; border: 1px solid #d2dce1; background: #fff; }
 .excel-compare-output-column.selected { border-color: #8bb79d; background: #f1f8f4; }
@@ -1571,7 +1575,7 @@ body.guide-mode #saveStatus { color: #217452; font-weight: 700; }
 .excel-compare-workbench progress { width: 100%; }
 @media (max-width: 760px) {
   .excel-compare-workbench, .excel-compare-output, .excel-compare-output-columns { grid-template-columns: 1fr; }
-  .excel-compare-match-pair, .excel-compare-rule { grid-template-columns: 1fr; }
+  .excel-compare-match-pair, .excel-compare-rule, .excel-compare-filter { grid-template-columns: 1fr; }
 }
 .document-split-source, .document-split-preview { min-height: 560px; }
 .document-split-output { grid-column: 1 / -1; grid-template-columns: minmax(260px, .72fr) minmax(300px, 1fr); }

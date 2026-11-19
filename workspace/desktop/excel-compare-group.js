@@ -11,6 +11,7 @@ const MAX_COMPARE_ROWS = 500000;
 const MAX_RULES = 100;
 const MAX_MATCH_COLUMNS = 12;
 const MAX_OUTPUT_COLUMNS = 200;
+const MAX_FILTERS = 50;
 const RESERVED_GROUP_NAMES = new Set(['기타', '중복 확인', '미매칭 a', '미매칭 b', '결과 없음']);
 
 function compareError(code, message, cause) {
@@ -123,6 +124,16 @@ function normalizeOutputColumns(rawColumns, left, right, baseSide = 'a') {
   if (!source.length || source.length > MAX_OUTPUT_COLUMNS) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_INVALID', `결과 열은 1개 이상 ${MAX_OUTPUT_COLUMNS}개 이하로 선택해주세요.`);
   const used = new Set();
   return source.map((raw, index) => {
+    if (raw?.source === 'merged') {
+      const leftColumn = Number(raw?.leftColumn); const rightColumn = Number(raw?.rightColumn); const prefer = raw?.prefer === 'b' ? 'b' : 'a';
+      const leftInfo = left.columns.find((column) => column.index === leftColumn); const rightInfo = right.columns.find((column) => column.index === rightColumn);
+      if (!leftInfo || !rightInfo) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_INVALID', `${index + 1}번째 통합 결과 열을 확인해주세요.`);
+      const key = `merged:${leftColumn}:${rightColumn}`;
+      if (used.has(key)) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_DUPLICATE', '같은 통합 결과 열을 두 번 선택할 수 없습니다.');
+      used.add(key);
+      const fallbackLabel = leftInfo.label === rightInfo.label ? leftInfo.label : `${leftInfo.label} / ${rightInfo.label}`;
+      return { source: 'merged', leftColumn, rightColumn, prefer, label: String(raw?.label || '').trim().slice(0, 100) || fallbackLabel };
+    }
     const side = raw?.source === 'b' ? 'b' : 'a'; const selection = side === 'a' ? left : right; const columnIndex = Number(raw?.columnIndex);
     const column = selection.columns.find((candidate) => candidate.index === columnIndex);
     if (!column) throw compareError('EXCEL_COMPARE_OUTPUT_COLUMNS_INVALID', `${index + 1}번째 결과 열을 확인해주세요.`);
@@ -131,6 +142,19 @@ function normalizeOutputColumns(rawColumns, left, right, baseSide = 'a') {
     used.add(key);
     const prefix = side === baseSide ? '' : `${side.toUpperCase()} · `;
     return { source: side, columnIndex, label: String(raw?.label || '').trim().slice(0, 100) || `${prefix}${column.label}` };
+  });
+}
+
+function normalizeFilters(filters, left, right) {
+  if (!Array.isArray(filters)) return [];
+  if (filters.length > MAX_FILTERS) throw compareError('EXCEL_COMPARE_FILTER_INVALID', `결과 조건은 ${MAX_FILTERS}개 이하로 입력해주세요.`);
+  const operators = new Set(['equals', 'contains', 'notEquals', 'notContains', 'empty', 'notEmpty']);
+  return filters.map((raw, index) => {
+    const source = raw?.source === 'b' ? 'b' : 'a'; const selection = source === 'a' ? left : right;
+    const columnIndex = Number(raw?.columnIndex); const operator = operators.has(raw?.operator) ? raw.operator : 'equals'; const value = String(raw?.value || '').trim();
+    if (!selection.columns.some((column) => column.index === columnIndex)) throw compareError('EXCEL_COMPARE_FILTER_COLUMN_INVALID', `${index + 1}번째 결과 조건의 열을 선택해주세요.`);
+    if (!['empty', 'notEmpty'].includes(operator) && !value) throw compareError('EXCEL_COMPARE_FILTER_INVALID', `${index + 1}번째 결과 조건의 비교값을 입력해주세요.`);
+    return { source, columnIndex, operator, value, normalizedValue: normalizeMatchValue(value) };
   });
 }
 
@@ -175,11 +199,21 @@ function ruleValue(rule, pair, left, right) {
   return offset >= 0 ? record.values[offset] : '';
 }
 
+function pairMatchesFilter(filter, pair, left, right) {
+  const raw = ruleValue(filter, pair, left, right); const normalized = normalizeMatchValue(raw);
+  if (filter.operator === 'empty') return !String(raw || '').trim();
+  if (filter.operator === 'notEmpty') return Boolean(String(raw || '').trim());
+  if (filter.operator === 'equals') return normalized === filter.normalizedValue;
+  if (filter.operator === 'notEquals') return normalized !== filter.normalizedValue;
+  if (filter.operator === 'contains') return normalized.includes(filter.normalizedValue);
+  return !normalized.includes(filter.normalizedValue);
+}
+
 function buildComparePlanFromLoaded(leftLoaded, rightLoaded, options = {}) {
   const left = normalizeSelection(leftLoaded.workbook, options.left, 'A'); const right = normalizeSelection(rightLoaded.workbook, options.right, 'B');
   const matchPairs = normalizeMatchPairs(options.matchPairs, left, right, { leftKeyColumn: options.left?.keyColumn, rightKeyColumn: options.right?.keyColumn });
   const baseSide = options.baseSide === 'b' ? 'b' : 'a'; const outputColumns = normalizeOutputColumns(options.outputColumns, left, right, baseSide);
-  const rules = normalizeRules(options.rules, left, right);
+  const filters = normalizeFilters(options.filters, left, right); const rules = normalizeRules(options.rules, left, right);
   const leftRecords = collectRecords(left, matchPairs.map((pair) => pair.leftColumn)); const rightRecords = collectRecords(right, matchPairs.map((pair) => pair.rightColumn));
   if (leftRecords.records.length + rightRecords.records.length > MAX_COMPARE_ROWS) throw compareError('EXCEL_COMPARE_ROW_LIMIT', `비교할 데이터가 ${MAX_COMPARE_ROWS.toLocaleString('ko-KR')}행을 넘습니다.`);
   const matched = []; const ambiguous = []; const unmatchedA = []; const unmatchedB = []; const usedKeys = new Set();
@@ -193,18 +227,21 @@ function buildComparePlanFromLoaded(leftLoaded, rightLoaded, options = {}) {
   unmatchedA.push(...leftRecords.records.filter((record) => !record.key));
   unmatchedB.push(...rightRecords.records.filter((record) => !record.key));
   matched.sort((a, b) => a[baseSide].rowNumber - b[baseSide].rowNumber);
+  const allMatchedCount = matched.length; const filteredMatched = filters.length ? matched.filter((pair) => filters.every((filter) => pairMatchesFilter(filter, pair, left, right))) : matched;
   const groups = new Map(); rules.forEach((rule) => { if (!groups.has(rule.groupName)) groups.set(rule.groupName, []); }); const other = [];
-  for (const pair of matched) {
+  for (const pair of filteredMatched) {
     if (!rules.length) continue;
     const rule = rules.find((candidate) => ruleValue(candidate, pair, left, right).toLocaleLowerCase('ko-KR').includes(candidate.normalizedContains));
     if (rule) groups.get(rule.groupName).push(pair); else other.push(pair);
   }
   return {
-    left, right, matchPairs, baseSide, outputColumns, rules, groups, matched, other, ambiguous, unmatchedA, unmatchedB,
-    matchedCount: matched.length, classifiedCount: rules.length ? matched.length - other.length : matched.length,
+    left, right, matchPairs, baseSide, outputColumns, filters, rules, groups, matched: filteredMatched, other, ambiguous, unmatchedA, unmatchedB,
+    allMatchedCount, filteredOutCount: allMatchedCount - filteredMatched.length,
+    matchedCount: filteredMatched.length, classifiedCount: rules.length ? filteredMatched.length - other.length : filteredMatched.length,
     groupCounts: [...groups].map(([name, pairs]) => ({ name, count: pairs.length })),
     warnings: [
       ...(ambiguous.length ? ['선택한 비교값 조합이 한 파일에 여러 번 있는 행은 잘못 연결하지 않고 “중복 확인” 시트로 분리합니다.'] : []),
+      ...(filters.length ? [`결과 조건 ${filters.length}개를 모두 만족하는 ${filteredMatched.length}명만 일괄 발송 명단에 포함합니다.`] : []),
       ...(rules.length ? ['여러 규칙에 동시에 해당하면 위에 있는 첫 번째 규칙을 적용합니다.'] : [])
     ]
   };
@@ -217,7 +254,7 @@ async function analyzeExcelCompareGroups(leftPath, rightPath, options = {}) {
   const plan = buildComparePlanFromLoaded(leftLoaded, rightLoaded, options);
   return {
     leftSha256: leftLoaded.sourceSha256, rightSha256: rightLoaded.sourceSha256,
-    matchedCount: plan.matchedCount, classifiedCount: plan.classifiedCount, otherCount: plan.other.length,
+    matchedCount: plan.matchedCount, allMatchedCount: plan.allMatchedCount, filteredOutCount: plan.filteredOutCount, classifiedCount: plan.classifiedCount, otherCount: plan.other.length,
     ambiguousRowCount: plan.ambiguous.length, unmatchedACount: plan.unmatchedA.length, unmatchedBCount: plan.unmatchedB.length,
     groupCounts: plan.groupCounts, warnings: plan.warnings
   };
@@ -238,6 +275,11 @@ function styleHeader(row) {
 }
 
 function pairOutputValue(pair, plan, outputColumn) {
+  if (outputColumn.source === 'merged') {
+    const leftOffset = plan.left.columns.findIndex((column) => column.index === outputColumn.leftColumn); const rightOffset = plan.right.columns.findIndex((column) => column.index === outputColumn.rightColumn);
+    const leftValue = leftOffset >= 0 ? pair.a.values[leftOffset] : ''; const rightValue = rightOffset >= 0 ? pair.b.values[rightOffset] : '';
+    return outputColumn.prefer === 'b' ? (rightValue || leftValue) : (leftValue || rightValue);
+  }
   const selection = outputColumn.source === 'a' ? plan.left : plan.right; const record = outputColumn.source === 'a' ? pair.a : pair.b;
   const offset = selection.columns.findIndex((column) => column.index === outputColumn.columnIndex);
   return offset >= 0 ? record.values[offset] : '';
@@ -267,7 +309,7 @@ async function compareAndGroupExcelFiles(leftPath, rightPath, outputPath, option
   if (options.expectedLeftSha256 && leftLoaded.sourceSha256 !== options.expectedLeftSha256) throw compareError('EXCEL_COMPARE_INPUT_CHANGED', 'A 파일이 분석 후 바뀌었습니다. 다시 선택해주세요.');
   if (options.expectedRightSha256 && rightLoaded.sourceSha256 !== options.expectedRightSha256) throw compareError('EXCEL_COMPARE_INPUT_CHANGED', 'B 파일이 분석 후 바뀌었습니다. 다시 선택해주세요.');
   const plan = buildComparePlanFromLoaded(leftLoaded, rightLoaded, options); const output = new ExcelJS.Workbook(); const used = new Set(); const sheetResults = [];
-  if (plan.matched.length) sheetResults.push({ kind: 'matched', name: addPairSheet(output, '일괄 발송 명단', plan.matched, plan, used), rowCount: plan.matched.length });
+  sheetResults.push({ kind: 'matched', name: addPairSheet(output, '일괄 발송 명단', plan.matched, plan, used), rowCount: plan.matched.length });
   for (const [groupName, pairs] of plan.groups) {
     if (!pairs.length) continue;
     sheetResults.push({ kind: 'group', requestedName: groupName, name: addPairSheet(output, groupName, pairs, plan, used), rowCount: pairs.length });
@@ -291,7 +333,7 @@ async function compareAndGroupExcelFiles(leftPath, rightPath, outputPath, option
     await fs.promises.copyFile(temporaryPath, outputPath, fs.constants.COPYFILE_EXCL); published = true; const stats = await fs.promises.stat(outputPath);
     return {
       outputPath, outputName: path.basename(outputPath), outputBytes: stats.size, sheetCount: verified.workbook.worksheets.length,
-      matchedCount: plan.matchedCount, classifiedCount: plan.classifiedCount, otherCount: plan.other.length,
+      matchedCount: plan.matchedCount, allMatchedCount: plan.allMatchedCount, filteredOutCount: plan.filteredOutCount, classifiedCount: plan.classifiedCount, otherCount: plan.other.length,
       ambiguousRowCount: plan.ambiguous.length, unmatchedACount: plan.unmatchedA.length, unmatchedBCount: plan.unmatchedB.length,
       sheets: sheetResults, warnings: plan.warnings, engine: 'cmoe-internal-excel', contentVerified: true, requiresPreview: true
     };
@@ -302,4 +344,4 @@ async function compareAndGroupExcelFiles(leftPath, rightPath, outputPath, option
   } finally { await fs.promises.unlink(temporaryPath).catch(() => {}); }
 }
 
-module.exports = { MAX_COMPARE_ROWS, MAX_RULES, MAX_MATCH_COLUMNS, MAX_OUTPUT_COLUMNS, RESERVED_GROUP_NAMES, compareError, cellText, detectHeaderRow, sheetColumns, headerCandidates, inspectExcelCompareFile, normalizeKey, normalizeMatchValue, buildComparePlanFromLoaded, analyzeExcelCompareGroups, compareAndGroupExcelFiles };
+module.exports = { MAX_COMPARE_ROWS, MAX_RULES, MAX_MATCH_COLUMNS, MAX_OUTPUT_COLUMNS, MAX_FILTERS, RESERVED_GROUP_NAMES, compareError, cellText, detectHeaderRow, sheetColumns, headerCandidates, inspectExcelCompareFile, normalizeKey, normalizeMatchValue, buildComparePlanFromLoaded, analyzeExcelCompareGroups, compareAndGroupExcelFiles };

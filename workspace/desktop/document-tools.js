@@ -3915,6 +3915,7 @@ class DocumentTools {
         matchPairs: Array.isArray(payload.matchPairs) ? payload.matchPairs.slice(0, ExcelCompareGroup.MAX_MATCH_COLUMNS + 1) : [],
         baseSide: payload.baseSide === 'b' ? 'b' : 'a',
         outputColumns: Array.isArray(payload.outputColumns) ? payload.outputColumns.slice(0, ExcelCompareGroup.MAX_OUTPUT_COLUMNS + 1) : [],
+        filters: Array.isArray(payload.filters) ? payload.filters.slice(0, ExcelCompareGroup.MAX_FILTERS + 1) : [],
         rules: Array.isArray(payload.rules) ? payload.rules.slice(0, ExcelCompareGroup.MAX_RULES + 1) : [],
         expectedLeftSha256: left.metadata?.sourceSha256,
         expectedRightSha256: right.metadata?.sourceSha256
