@@ -103,7 +103,7 @@
     "actualSignatureStatus": "NotSigned (no trusted Windows code-signing certificate configured)",
     "sourceLicenseZip": null,
     "localInstallResult": "all current Node tests, build preflight, and 11-guide/215-step Electron UI smoke passed; the 1.15.49 installer was built and metadata/package contents were inspected; the isolated 1.15.46-to-1.15.47 standard-updater E2E remains the updater architecture baseline; production installation was not changed",
-    "siteDeploymentExplicitScope": "1.15.49 public deployment was not requested in this change turn",
-    "siteDeploymentResult": "not performed for 1.15.49; the previously published 1.15.48 feeds remain unchanged"
+    "siteDeploymentExplicitScope": "the user explicitly requested the split correction as an update and asked to replace the existing cresero.com download installer",
+    "siteDeploymentResult": "published source and distribution releases cmoe-workspace-v1.15.49 and deployed Cresero Worker 6e857d2c-8937-41fb-a857-835272fd2339; update.json, latest.yml, the download page, blockmap, release notes, and scheduler ZIP were verified; the full public installer redownload matched 111723129 bytes and SHA-256 D55EE1DA4C7D00C4859EC8CEDFF0D16ACC5D35AE383E9C0545A8C9BE24B6FD1D"
   }
 }

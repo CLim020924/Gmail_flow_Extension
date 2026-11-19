@@ -332,5 +332,6 @@
 - Gmail API 발송 응답만으로 성공 처리하지 않는다. 반환된 메시지 ID를 다시 조회해 `SENT` 시스템 라벨이 확인된 경우에만 `발송 확인`으로 완료한다. 조회 지연은 조회만 최대 10회 재시도하며 절대 다시 발송하지 않는다. 끝내 확인하지 못하면 `전송 확인 실패`로 분리하고 실패 대상 재전송에서 제외한다.
 - 전체 Gmail Flow 및 Workspace Node 시험, 11개 가이드·215단계 Electron UI 스모크, 빌드 사전검사를 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.49-Windows.exe`, 111,723,129 bytes, SHA-256 `D55EE1DA4C7D00C4859EC8CEDFF0D16ACC5D35AE383E9C0545A8C9BE24B6FD1D`, FileVersion/ProductVersion 1.15.49, NotSigned. blockmap 118,402 bytes이며 `latest.yml`과 일치한다.
-- 패키지의 Gmail Flow와 `online-scheduler-setup`에 전송 간격 UI, 정책 버전 3, 보낸편지함 확인 코드가 포함된 것을 확인했다. 1.15.49 공개 배포는 이번 변경 시점에 수행하지 않았으며 기존 1.15.48 피드는 유지된다.
+- 패키지의 Gmail Flow와 `online-scheduler-setup`에 전송 간격 UI, 정책 버전 3, 보낸편지함 확인 코드가 포함된 것을 확인했다.
 - 후속 분류 보강: 명확한 Gmail 거절만 `미발송 확인`으로 두고, 네트워크·Gmail 5xx 등 요청 결과가 불명확했던 대상은 `결과 불명`으로 분리한다. 재전송 버튼은 `failed`인 미발송 확인 대상만 추출하고 `unconfirmed` 결과 불명 대상은 제외한다.
+- GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.49`과 Cresero Worker `6e857d2c-8937-41fb-a857-835272fd2339`를 공개했다. `update.json`, `updater/latest.yml`, 다운로드 페이지가 모두 1.15.49를 제공하며 공개 설치 파일 전체 재다운로드의 크기·SHA-256이 로컬 원본과 일치했다. 공개 blockmap은 118,402 bytes, 변경 안내는 1,550 bytes, 온라인 설정 ZIP은 8,659 bytes다.
