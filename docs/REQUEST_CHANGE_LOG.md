@@ -461,8 +461,8 @@
 - 버전: CMOE Workspace 1.15.50. Gmail Flow 데스크톱 0.7.3과 Chrome 확장 0.6.3은 변경하지 않았다.
 - 검증: 동일 통합문서의 두 시트, 이름+전화번호 복합 대조, 전화번호 표기 차이, B 기준 순서, 선택 열·출력 순서, 미일치 시트 생성을 검사하는 회귀 시험을 추가했다. Workspace 및 루트 전체 Node 시험, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크, 패키지 ASAR 포함 검사를 통과했다.
 - 설치 파일: 111,725,767 bytes, SHA-256 `DD1D9E911E7D9DA7F31A2C615E7A6A5B9FF4E45CF72514C265973C78C43DCD61`, FileVersion/ProductVersion 1.15.50, 서명 없음. blockmap은 118,412 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
-- 배포: 진행 중.
-- 커밋: 진행 중.
+- 배포: GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.50`, Cresero Worker `547c2246-4d25-4b9d-963d-e455a41b8d29`. 공개 `update.json`과 `updater/latest.yml`, 다운로드 페이지가 1.15.50을 제공한다. 공개 설치 파일 전체 재다운로드 결과 111,725,767 bytes와 위 SHA-256이 로컬 원본과 일치했고 blockmap 118,412 bytes, 변경 안내 1,465 bytes, 온라인 설정 ZIP 8,659 bytes를 확인했다.
+- 커밋: 앱 `fd7057a`, 사이트 런타임 `9e5dfb5`, 배포 기록 `9d26220`.
 
 ## 현재 미완료 또는 계속 개선할 항목
 

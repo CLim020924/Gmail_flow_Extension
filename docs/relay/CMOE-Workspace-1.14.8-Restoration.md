@@ -344,4 +344,4 @@
 - 앱이 열린 동안 로컬 또는 동기화된 Excel의 변경을 수동으로 다시 읽거나 30초마다 확인할 수 있다. 이는 Google Sheets API 직접 실시간 구독이 아니며 결과 파일은 검토 후 사용자가 저장한다.
 - 동일 통합문서 두 시트, 복합 키, 전화번호 정규화, B 기준 정렬, 선택 열 출력, 검토 시트를 회귀 시험으로 확인했다. 전체 Node 시험, preflight, 11개 가이드·215단계 Electron UI 스모크, ASAR 포함 검사를 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.50-Windows.exe`, 111,725,767 bytes, SHA-256 `DD1D9E911E7D9DA7F31A2C615E7A6A5B9FF4E45CF72514C265973C78C43DCD61`, FileVersion/ProductVersion 1.15.50, NotSigned. blockmap 118,412 bytes, `latest.yml` size·SHA-512 일치.
-- GitHub Release와 Cresero 업데이트 피드 배포는 진행 중이다.
+- GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.50`과 Cresero Worker `547c2246-4d25-4b9d-963d-e455a41b8d29`를 공개했다. `update.json`, `updater/latest.yml`, 다운로드 페이지가 모두 1.15.50을 제공하며, 공개 설치 파일 전체 재다운로드의 크기·SHA-256이 로컬 원본과 일치했다. 공개 blockmap은 118,412 bytes, 변경 안내는 1,465 bytes, 온라인 설정 ZIP은 8,659 bytes다.
