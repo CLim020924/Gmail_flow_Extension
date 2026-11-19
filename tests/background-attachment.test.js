@@ -8,6 +8,7 @@ let profileEmail = 'chrome-default@example.com';
 let tokenProfileEmail = 'sender@example.com';
 let driveTokenProfileEmail = 'sender@example.com';
 let alarmListener;
+const alarmCreates = [];
 let blockNextMailBatchRead = false;
 let releaseBlockedMailBatchRead;
 let failNextCancelRequestWrite = false;
@@ -52,7 +53,7 @@ global.chrome = {
   },
   alarms: {
     clear: async () => true,
-    create: async () => {},
+    create: async (name, info) => { alarmCreates.push({ name, info }); },
     onAlarm: { addListener: (listener) => { alarmListener = listener; } }
   }
 };
@@ -162,6 +163,56 @@ function send(message) {
   const canceledEnqueue = await enqueuePromise;
   assert.equal(canceledEnqueue.ok, true);
   assert.deepEqual(data.mailBatches[0].items.map((item) => item.status), ['completed', 'canceled']);
+
+  let pacedLocalSendCount = 0;
+  global.fetch = async (url, options = {}) => {
+    if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    pacedLocalSendCount += 1;
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: `paced-local-${pacedLocalSendCount}`, threadId: `paced-thread-${pacedLocalSendCount}` }) };
+  };
+  const pacedLocalResponse = await send({
+    type: 'enqueue-mail-batch',
+    payload: {
+      name: 'paced local', method: '즉시 발송', senderEmail: 'sender@example.com', label: '', scheduledAt: '', attachments: [],
+      items: [
+        { email: 'paced-one@example.com', subject: 'one', body: 'one', variables: {} },
+        { email: 'paced-two@example.com', subject: 'two', body: 'two', variables: {} }
+      ]
+    }
+  });
+  assert.equal(pacedLocalResponse.ok, true);
+  const pacedLocalBatch = data.mailBatches.find((batch) => batch.name === 'paced local');
+  assert.equal(pacedLocalSendCount, 1, 'a local queue run must not burst-send consecutive recipients');
+  assert.deepEqual(pacedLocalBatch.items.map((item) => item.status), ['completed', 'queued']);
+  assert(new Date(pacedLocalBatch.nextSendAt).getTime() >= Date.now() + 4_000, 'the next recipient must wait for the safe interval');
+  assert(alarmCreates.some(({ info }) => Number(info?.when) >= new Date(pacedLocalBatch.nextSendAt).getTime()), 'the remaining recipient must be resumed by a durable alarm');
+  pacedLocalBatch.nextSendAt = '';
+  global.fetch = async (url, options = {}) => {
+    if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    return { ok: false, status: 400, headers: { get: () => '' }, text: async () => JSON.stringify({ error: { message: 'Invalid recipient', errors: [{ reason: 'invalidArgument' }] } }) };
+  };
+  assert.equal((await send({ type: 'process-queue' })).ok, true);
+  assert.deepEqual(pacedLocalBatch.items.map((item) => item.status), ['completed', 'failed']);
+  assert.equal(pacedLocalBatch.status, 'failed', 'a mixed completed/failed batch must finish as failed instead of remaining active forever');
+
+  global.fetch = async (url, options = {}) => {
+    if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    return {
+      ok: false, status: 429, headers: { get: (name) => String(name).toLowerCase() === 'retry-after' ? '120' : '' },
+      text: async () => JSON.stringify({ error: { message: 'Quota exceeded for quota metric Total Query Cost', errors: [{ reason: 'userRateLimitExceeded' }] } })
+    };
+  };
+  const quotaResponse = await send({
+    type: 'enqueue-mail-batch',
+    payload: { name: 'quota retry', method: '즉시 발송', senderEmail: 'sender@example.com', label: '', scheduledAt: '', attachments: [], items: [{ email: 'quota@example.com', subject: 'quota', body: 'quota', variables: {} }] }
+  });
+  assert.equal(quotaResponse.ok, true);
+  const quotaBatch = data.mailBatches.find((batch) => batch.name === 'quota retry');
+  assert.equal(quotaBatch.items[0].status, 'queued');
+  assert.equal(quotaBatch.items[0].attempts, 1);
+  assert(new Date(quotaBatch.items[0].nextAttemptAt).getTime() >= Date.now() + 119_000, 'Gmail Retry-After must control the retry time');
+  assert.equal(quotaBatch.nextSendAt, quotaBatch.items[0].nextAttemptAt, 'rate limiting must pause all batches for the sender');
+  assert.equal((await send({ type: 'cancel-mail-batch', batchId: quotaBatch.id })).ok, true);
 
   let releaseFirstConcurrentSend;
   let concurrentSendCount = 0;

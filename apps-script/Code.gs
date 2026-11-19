@@ -1,10 +1,14 @@
 const GF_CONFIG = Object.freeze({
+  deliveryPolicyVersion: 2,
   sheetName: '_gmail_flow_online_queue',
   spreadsheetIdKey: 'GF_SPREADSHEET_ID',
   folderIdKey: 'GF_FOLDER_ID',
   secretKey: 'GF_SHARED_SECRET',
   triggerHandler: 'runScheduledJobs',
-  maxAttempts: 3,
+  maxAttempts: 8,
+  maxJobsPerRun: 5,
+  maxItemsPerJobRun: 12,
+  sendIntervalMs: 5000,
   terminalRetentionDays: 90,
   columns: ['jobId', 'status', 'senderEmail', 'scheduledAt', 'total', 'completed', 'failed', 'canceled', 'createdAt', 'updatedAt', 'fileId', 'lastError']
 });
@@ -87,6 +91,8 @@ function health_() {
     senderEmail: effectiveEmail_(),
     timeZone: Session.getScriptTimeZone(),
     triggerReady: ScriptApp.getProjectTriggers().some(function(trigger) { return trigger.getHandlerFunction() === GF_CONFIG.triggerHandler; }),
+    deliveryPolicyVersion: GF_CONFIG.deliveryPolicyVersion,
+    sendIntervalMs: GF_CONFIG.sendIntervalMs,
     checkedAt: new Date().toISOString()
   };
 }
@@ -171,7 +177,7 @@ function runScheduledJobs() {
     const now = Date.now();
     readAllRecords_().filter(function(record) {
       return record.status === 'scheduled' && new Date(record.scheduledAt).getTime() <= now;
-    }).slice(0, 40).forEach(function(record) {
+    }).slice(0, GF_CONFIG.maxJobsPerRun).forEach(function(record) {
       processDueJob_(record);
     });
     cleanupOldJobs_();
@@ -186,8 +192,13 @@ function processDueJob_(record) {
   const job = readJobFile_(record.fileId);
   job.status = 'processing'; job.updatedAt = new Date().toISOString();
   updateRecord_(found.row, job, record.fileId, '');
+  let attemptsThisRun = 0;
   job.items.forEach(function(item) {
     if (item.status !== 'scheduled') return;
+    if (attemptsThisRun >= GF_CONFIG.maxItemsPerJobRun) return;
+    if (item.nextAttemptAt && new Date(item.nextAttemptAt).getTime() > Date.now()) return;
+    if (attemptsThisRun > 0) Utilities.sleep(GF_CONFIG.sendIntervalMs);
+    attemptsThisRun += 1;
     item.attempts = Number(item.attempts || 0) + 1;
     item.updatedAt = new Date().toISOString();
     try {
@@ -197,13 +208,15 @@ function processDueJob_(record) {
         item.error = 'Gmail 초안을 찾을 수 없어 중복 발송 방지를 위해 다시 보내지 않았습니다.';
       } else {
         const sent = draft.send();
-        item.status = 'completed'; item.error = '';
+        item.status = 'completed'; item.error = ''; item.nextAttemptAt = '';
         item.messageId = sent && sent.getId ? sent.getId() : '';
         item.threadId = sent && sent.getThread && sent.getThread() ? sent.getThread().getId() : '';
       }
     } catch (error) {
       item.error = error.message || String(error);
-      item.status = item.attempts >= GF_CONFIG.maxAttempts ? 'failed' : 'scheduled';
+      const retryable = isRetryableSendError_(error);
+      item.status = !retryable || item.attempts >= GF_CONFIG.maxAttempts ? 'failed' : 'scheduled';
+      item.nextAttemptAt = item.status === 'scheduled' ? new Date(Date.now() + appsScriptRetryDelayMs_(error, item.attempts)).toISOString() : '';
     }
     job.updatedAt = new Date().toISOString();
     summarizeJob_(job);
@@ -213,6 +226,17 @@ function processDueJob_(record) {
   summarizeJob_(job);
   writeJobFile_(record.fileId, job);
   updateRecord_(found.row, job, record.fileId, job.items.find(function(item) { return item.error; })?.error || '');
+}
+
+function isRetryableSendError_(error) {
+  const text = String(error && error.message || error || '').toLowerCase();
+  return /quota|rate|limit exceeded|service invoked too many|temporar|try again|backend|internal error|unavailable|timeout/.test(text);
+}
+
+function appsScriptRetryDelayMs_(error, attempt) {
+  const text = String(error && error.message || error || '').toLowerCase();
+  const base = /quota|rate|limit exceeded|service invoked too many/.test(text) ? 10 * 60 * 1000 : 60 * 1000;
+  return Math.min(6 * 60 * 60 * 1000, base * (2 ** Math.max(0, Math.min(8, Number(attempt || 1) - 1))));
 }
 
 function validateJob_(job) {

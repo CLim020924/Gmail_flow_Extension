@@ -396,6 +396,23 @@
 - 상태: 구현·회귀 검증·설치형 빌드·공개 배포 완료
 - 커밋: 앱 `c920853`, 사이트 `84ed737`
 
+### REQ-20261119-02 · 대량 발송 속도 제한과 실패 대상 재전송
+
+- 사용자 확인: 회사 메일 대상 대량 발송 중 반송이 발생했고 Gmail API에서 `Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'` 오류가 표시됐다.
+- 공식 기준: Gmail API는 사용자당 분당 6,000 quota units이고 `messages.send`는 100 units다. Google은 대량 발송을 burst로 보내지 말고 일정한 속도로 보내며, 403/429/5xx에는 서버의 재시도 시각 또는 지수 백오프를 적용하도록 안내한다.
+- 결정: 단순 이론 한도인 분당 60통을 사용하지 않는다. 계정 확인·라벨·초안·상태 조회와 수신 회사 서버의 속도 제한 여유를 남기기 위해 실제 전송을 계정당 5초에 한 통, 최대 분당 12통으로 고정한다.
+- 로컬 발송: 한 번의 큐 실행에서 같은 발신 계정의 메일 한 통만 전송한다. 다음 대상은 영속 `nextSendAt`과 알람으로 이어가며 작업 큐에 `안전 간격 대기`를 표시한다.
+- 제한 대응: Gmail API의 오류 reason과 `Retry-After`를 보존한다. 403 rate limit, 429, 5xx와 일시 네트워크 오류만 최대 8회 지수 백오프로 다시 시도하며, 영구 오류는 반복하지 않는다. 발신 계정 하나가 제한되면 그 계정의 다른 작업도 같은 시각까지 일시 정지한다.
+- 온라인 예약: Apps Script도 5초 간격, 한 트리거의 작업당 최대 12명으로 나누고 나머지는 다음 1분 트리거에서 이어간다. 일시 제한은 최대 8회 백오프한다. 안전 정책 버전 2가 없는 이전 스크립트는 새 예약 등록을 막고 갱신 절차를 안내한다.
+- 실패 재전송: 발송 기록에 `실패 대상 다시 보내기`를 표시한다. 실패 상태인 사람만 추출하고 성공 대상은 제외하며, 받는 사람·제목·본문 최종 확인 후 새 즉시 발송 작업으로 안전 간격 전송한다.
+- 보존: 기존 성공 기록과 원본 작업은 수정하지 않는다. 혼합 결과(성공+실패) 작업이 영구적으로 처리 중에 남던 요약 오류도 실패 완료 상태로 교정한다.
+- 공식 자료: `https://developers.google.com/workspace/gmail/api/reference/quota`, `https://developers.google.com/workspace/gmail/api/guides/handle-errors`, `https://support.google.com/mail/answer/81126`.
+- 버전: Gmail Flow 0.7.2, Chrome 확장 0.6.2, CMOE Workspace 1.15.48.
+- 검증: Gmail Flow·Workspace 전체 Node 시험, Retry-After 120초, 영구 오류 중단, 성공+실패 혼합 종료, 로컬 한 통 처리·영속 알람, Apps Script 12명 분할·5초 간격, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크를 통과했다.
+- 설치 파일: 111,720,067 bytes, SHA-256 `1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4`, FileVersion 1.15.48, 서명 없음. blockmap은 118,413 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
+- 상태: 구현·전체 회귀 검증·설치형 빌드 완료 · 공개 배포 진행 중
+- 커밋: 진행 중
+
 ## 현재 미완료 또는 계속 개선할 항목
 
 - 임의 Excel 서식을 셀 병합·수식·인쇄 영역까지 보존하는 자유 출력 틀 편집기

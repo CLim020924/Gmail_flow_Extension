@@ -16,6 +16,7 @@ const drafts = new Map();
 const triggers = [];
 let nextId = 1;
 let sentCount = 0;
+const sleepCalls = [];
 
 class Range {
   constructor(sheet, row, column, rows, columns) { Object.assign(this, { sheet, row, column, rows, columns }); }
@@ -111,7 +112,8 @@ const context = vm.createContext({
   Utilities: {
     getUuid: () => `uuid-${nextId++}-abcdefghijklmnopqrstuvwxyz`,
     base64Decode: (value) => Buffer.from(value, 'base64'),
-    newBlob: (bytes, type, name) => ({ bytes, type, name })
+    newBlob: (bytes, type, name) => ({ bytes, type, name }),
+    sleep: (milliseconds) => sleepCalls.push(milliseconds)
   },
   ScriptApp: {
     getProjectTriggers: () => triggers,
@@ -162,6 +164,24 @@ assert.equal(drafts.size, 0);
 const completed = post({ action: 'status', secret: setup.secret, jobIds: ['job-1'] });
 assert.equal(completed.data.jobs[0].status, 'completed');
 assert.match(completed.data.jobs[0].items[0].messageId, /^message-draft-/);
+assert.deepEqual(sleepCalls, [], 'a single recipient does not need an interval wait');
+
+const pacedJob = {
+  ...job, id: 'job-paced', scheduledAt: '2026-11-12T00:03:01.000Z',
+  items: Array.from({ length: 14 }, (_, index) => ({ id: `paced-${index + 1}`, email: `paced-${index + 1}@example.com`, subject: '제목', body: '본문', variables: {} }))
+};
+assert.equal(post({ action: 'enqueue', secret: setup.secret, job: pacedJob }).ok, true);
+now += 2_000;
+context.runScheduledJobs();
+let pacedStatus = post({ action: 'status', secret: setup.secret, jobIds: ['job-paced'] }).data.jobs[0];
+assert.equal(pacedStatus.completed, 12, 'one trigger run must cap a job to the safe delivery slice');
+assert.equal(pacedStatus.status, 'scheduled');
+assert.equal(sleepCalls.filter((value) => value === 5000).length, 11, 'five-second spacing is applied between sends');
+now += 60 * 1000;
+context.runScheduledJobs();
+pacedStatus = post({ action: 'status', secret: setup.secret, jobIds: ['job-paced'] }).data.jobs[0];
+assert.equal(pacedStatus.completed, 14);
+assert.equal(pacedStatus.status, 'completed');
 
 now = Date.parse('2026-11-12T00:04:00.000Z');
 const cancelJob = { ...job, id: 'job-2', scheduledAt: '2026-11-12T00:10:00.000Z' };

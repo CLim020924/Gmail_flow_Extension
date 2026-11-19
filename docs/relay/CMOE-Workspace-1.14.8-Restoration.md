@@ -313,3 +313,13 @@
 - 전체/일부/해제 상태 단위시험, Gmail Flow 전체 시험, Workspace 전체 시험, 빌드 사전검사를 통과했다.
 - 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.47-Windows.exe`, 111,711,351 bytes, SHA-256 `AFDA7C88ADA1AE63E59F43A11A311F291938196A2D2E46175A170099E308402E`, FileVersion 1.15.47, NotSigned. blockmap은 118,374 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
 - GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.47`과 Cresero Worker `2c536791-07d3-43eb-90a2-de6a75b7ba84`를 공개했다. `update.json`과 `updater/latest.yml`은 1.15.47을 제공한다. 공개 설치 파일을 다시 내려받아 111,711,351 bytes와 SHA-256이 로컬 원본과 일치함을 확인했고 공개 blockmap은 118,374 bytes다.
+
+## 1.15.48 대량 발송 안전 속도와 실패 대상 이어 보내기
+
+- Gmail API `Total Query Cost` 분당 사용자 한도와 회사 수신 서버의 burst 제한을 함께 고려해 실제 전송을 발신 계정당 5초에 한 통으로 제한했다. 이론상 `messages.send`만 계산한 분당 60통을 목표로 사용하지 않는다.
+- 즉시 발송과 로컬 큐는 한 번에 한 대상만 보내고 영속 알람으로 다음 대상을 이어간다. Gmail 403 rate limit·429·5xx의 reason과 `Retry-After`를 읽어 최대 8회 지수 백오프하며 영구 오류는 자동 반복하지 않는다.
+- 온라인 Apps Script는 작업당 한 트리거에서 최대 12명을 5초 간격으로 처리한다. 남은 대상은 다음 1분 트리거에서 이어지며 이전 안전 정책 스크립트는 갱신 전 새 예약을 막는다.
+- 발송 기록의 `실패 대상 다시 보내기`는 실패 항목만 추출하고 성공 항목을 제외한다. 사용자가 받는 사람·제목·본문을 다시 확인한 뒤 새 안전 발송 작업으로 등록한다.
+- 기존 프로젝트·명단·템플릿·계정 자료와 원본 작업 기록은 보존한다.
+- 전체 Node 시험, Retry-After·영구 오류·혼합 결과·로컬 영속 큐·온라인 12명 분할 시험, 빌드 사전검사, 11개 가이드·215단계 UI 스모크를 통과했다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.48-Windows.exe`, 111,720,067 bytes, SHA-256 `1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4`, FileVersion 1.15.48, NotSigned. blockmap은 118,413 bytes이며 `latest.yml`과 일치한다. 공개 배포 결과는 배포 후 기록한다.

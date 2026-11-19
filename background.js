@@ -2,14 +2,19 @@ if (!globalThis.GmailFlowOnlineScheduler) {
   if (typeof importScripts === 'function') importScripts('online-scheduler-client.js');
   else if (typeof require === 'function') globalThis.GmailFlowOnlineScheduler = require('./online-scheduler-client.js');
 }
+if (!globalThis.GmailFlowMailDeliveryPolicy) {
+  if (typeof importScripts === 'function') importScripts('mail-delivery-policy.js');
+  else if (typeof require === 'function') globalThis.GmailFlowMailDeliveryPolicy = require('./mail-delivery-policy.js');
+}
 
 const BATCHES_KEY = 'mailBatches';
 const BATCH_CANCEL_REQUESTS_KEY = 'mailBatchCancelRequests';
 const ONLINE_SCHEDULER_CONFIG_KEY = 'onlineSchedulerConfig';
+const ONLINE_DELIVERY_POLICY_VERSION = 2;
 const QUEUE_ALARM = 'gmail-flow-queue';
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = GmailFlowMailDeliveryPolicy.policy.maxAttempts;
 const BATCH_SIZE = 40;
-const RETRY_DELAY_MS = 60 * 1000;
+const SEND_INTERVAL_MS = GmailFlowMailDeliveryPolicy.policy.sendIntervalMs;
 const OAUTH_PLACEHOLDER = 'replace-with-google-oauth-client';
 const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
 const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
@@ -159,6 +164,13 @@ async function requestOnlineScheduler(action, payload = {}, config = null) {
   return GmailFlowOnlineScheduler.request(config || await getOnlineSchedulerConfig(), action, payload);
 }
 
+function assertOnlineDeliveryPolicy(health) {
+  if (Number(health?.deliveryPolicyVersion || 0) >= ONLINE_DELIVERY_POLICY_VERSION) return health;
+  const error = new Error('온라인 예약 발송 스크립트가 이전 버전입니다. 설치 파일에 포함된 online-scheduler-setup의 Code.gs로 Apps Script를 갱신하고 웹 앱을 새 버전으로 다시 배포한 뒤 연결 테스트를 해주세요.');
+  error.code = 'ONLINE_SCHEDULER_UPDATE_REQUIRED';
+  throw error;
+}
+
 async function getCancelRequests() {
   const result = await chrome.storage.local.get(BATCH_CANCEL_REQUESTS_KEY);
   return Array.isArray(result[BATCH_CANCEL_REQUESTS_KEY]) ? result[BATCH_CANCEL_REQUESTS_KEY].map(String) : [];
@@ -234,6 +246,9 @@ async function gmailFetchWithToken(token, path, options = {}) {
     const error = new Error(data?.error?.message || `Gmail API 오류 (${response.status})`);
     error.status = response.status;
     error.code = response.status === 401 ? 'AUTH_REQUIRED' : 'GMAIL_API_ERROR';
+    error.reasons = (data?.error?.errors || []).map((entry) => entry?.reason).filter(Boolean);
+    error.reason = error.reasons[0] || '';
+    error.retryAfterMs = GmailFlowMailDeliveryPolicy.parseRetryAfter(response.headers?.get?.('retry-after'));
     throw error;
   }
   return data;
@@ -706,15 +721,22 @@ async function sendDraft(item, request = gmailFetch) {
   return { messageId: message.id || '', threadId: message.threadId || '' };
 }
 
-function canProcess(item, now) {
+function isDeliveryStep(batch, item) {
+  return batch.method === '즉시 발송' && item.status === 'queued'
+    || batch.method === '예약 발송' && item.status === 'scheduled';
+}
+
+function canProcess(batch, item, now) {
   if (isTerminal(item.status) || item.status === 'waiting-auth') return false;
   if (item.nextAttemptAt && new Date(item.nextAttemptAt).getTime() > now) return false;
+  if (isDeliveryStep(batch, item) && batch.nextSendAt && new Date(batch.nextSendAt).getTime() > now) return false;
   if (item.status === 'scheduled') return new Date(item.scheduledAt).getTime() <= now;
   return item.status === 'queued';
 }
 
 async function processItem(batch, item, labelCache, request) {
   const previousStatus = item.status;
+  const deliveryStep = isDeliveryStep(batch, item);
   try {
     if (batch.method === '임시 저장') {
       Object.assign(item, await createDraft(item, [batch.label], labelCache, batch.attachments, request));
@@ -733,15 +755,17 @@ async function processItem(batch, item, labelCache, request) {
     item.error = '';
     item.nextAttemptAt = '';
     item.updatedAt = nowIso();
+    return { sent: deliveryStep };
   } catch (error) {
     item.error = error?.message || '알 수 없는 오류';
     item.updatedAt = nowIso();
     if (error?.code === 'AUTH_REQUIRED' || error?.code === 'OAUTH_NOT_CONFIGURED' || error?.code === 'ACCOUNT_MISMATCH') {
       item.status = 'waiting-auth';
-      return;
+      return { auth: true };
     }
     item.attempts = Number(item.attempts || 0) + 1;
-    if (item.attempts >= MAX_ATTEMPTS) {
+    const failure = GmailFlowMailDeliveryPolicy.classify(error);
+    if (!failure.retryable || item.attempts >= MAX_ATTEMPTS) {
       item.status = 'failed';
       if (batch.method === '예약 발송' && item.messageId) {
         try {
@@ -752,9 +776,18 @@ async function processItem(batch, item, labelCache, request) {
     }
     else {
       item.status = previousStatus;
-      item.nextAttemptAt = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
+      item.nextAttemptAt = new Date(Date.now() + GmailFlowMailDeliveryPolicy.retryDelayMs(error, item.attempts)).toISOString();
     }
+    return { retryAt: item.nextAttemptAt || '', rateLimited: failure.rateLimited, retryable: failure.retryable };
   }
+}
+
+function deferSenderBatches(batches, senderEmail, nextSendAt) {
+  const normalized = normalizeEmail(senderEmail);
+  if (!normalized || !nextSendAt) return;
+  batches.forEach((batch) => {
+    if (normalizeEmail(batch.senderEmail) === normalized && batch.items.some((item) => !isTerminal(item.status))) batch.nextSendAt = nextSendAt;
+  });
 }
 
 function updateBatchSummary(batch) {
@@ -766,7 +799,7 @@ function updateBatchSummary(batch) {
   batch.failed = failed;
   batch.updatedAt = nowIso();
   if (completed === batch.items.length) batch.status = 'completed';
-  else if (failed + canceled === batch.items.length) batch.status = failed ? 'failed' : 'canceled';
+  else if (completed + failed + canceled === batch.items.length) batch.status = failed ? 'failed' : 'canceled';
   else if (waitingAuth) batch.status = 'waiting-auth';
   else if (batch.items.some((item) => item.status === 'scheduled')) batch.status = 'scheduled';
   else batch.status = 'processing';
@@ -777,8 +810,9 @@ async function scheduleNextRun(batches) {
   if (queuePausedForQuit) return;
   const times = [];
   batches.filter((batch) => batch.schedulerMode !== 'online').forEach((batch) => batch.items.forEach((item) => {
-    if (item.status === 'queued') times.push(item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : Date.now() + 1000);
-    if (item.status === 'scheduled') times.push(Math.max(new Date(item.scheduledAt).getTime(), item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : 0));
+    const pacedAt = isDeliveryStep(batch, item) && batch.nextSendAt ? new Date(batch.nextSendAt).getTime() : 0;
+    if (item.status === 'queued') times.push(Math.max(item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : Date.now() + 1000, pacedAt));
+    if (item.status === 'scheduled') times.push(Math.max(new Date(item.scheduledAt).getTime(), item.nextAttemptAt ? new Date(item.nextAttemptAt).getTime() : 0, pacedAt));
   }));
   const next = times.filter(Number.isFinite).sort((a, b) => a - b)[0];
   if (next) await chrome.alarms.create(QUEUE_ALARM, { when: Math.max(next, Date.now() + 1000) });
@@ -854,13 +888,15 @@ async function processQueueExclusive() {
           await acknowledgeBatchCancellation(batch.id);
           break;
         }
-        if (!canProcess(item, now)) continue;
+        if (!canProcess(batch, item, now)) continue;
         const statusBeforeProcessing = item.status;
         batch.currentItemId = item.id;
         batch.status = 'processing';
         batch.updatedAt = nowIso();
         await saveBatches(batches);
-        await processItem(batch, item, labelCache, account.request);
+        const outcome = await processItem(batch, item, labelCache, account.request);
+        if (outcome?.sent) deferSenderBatches(batches, batch.senderEmail, new Date(Date.now() + SEND_INTERVAL_MS).toISOString());
+        else if (outcome?.rateLimited && outcome.retryAt) deferSenderBatches(batches, batch.senderEmail, outcome.retryAt);
         processed += 1;
         if (cancelRequestedBatches.has(batch.id)) {
           const createdUnsentDraft = item.draftId && (batch.method === '임시 저장' || (batch.method === '예약 발송' && statusBeforeProcessing === 'queued'));
@@ -986,6 +1022,7 @@ async function enqueueOnlineBatch(payload) {
   const config = await getOnlineSchedulerConfig();
   GmailFlowOnlineScheduler.validateConfig(config);
   if (!config.verifiedAt) throw new Error('설정에서 온라인 예약 발송 연결 테스트를 먼저 완료해주세요.');
+  assertOnlineDeliveryPolicy(await requestOnlineScheduler('health', {}, config));
   const attachments = normalizeAttachments(payload?.attachments);
   const createdAt = nowIso();
   const jobId = crypto.randomUUID();
@@ -1123,6 +1160,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const config = message.config ? GmailFlowOnlineScheduler.normalizeConfig({ ...message.config, mode: 'online' }) : await getOnlineSchedulerConfig();
       GmailFlowOnlineScheduler.validateConfig(config);
       const health = await requestOnlineScheduler('health', {}, config);
+      assertOnlineDeliveryPolicy(health);
       const account = await verifiedGmailContext();
       if (health.senderEmail && normalizeEmail(health.senderEmail) !== account.email) throw accountMismatchError(account.email, normalizeEmail(health.senderEmail));
       const verifiedAt = nowIso();

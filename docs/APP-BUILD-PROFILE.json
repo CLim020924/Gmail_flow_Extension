@@ -26,7 +26,7 @@
     "appId": "kr.co.cmoe.workspace",
     "productSlug": "cmoe-workspace",
     "exeName": "CMOE Workspace.exe",
-    "version": "1.15.47",
+    "version": "1.15.48",
     "versionComparisonPolicy": "three numeric components; only a numerically newer installer may update; same-version reinstall and downgrade are blocked",
     "installScope": "per-user",
     "installDirectory": "%LOCALAPPDATA%/Programs/CMOE Workspace for new installs; an existing registered installation is updated in place",
@@ -79,25 +79,28 @@
       "E2E opened CMOE Workspace, Gmail Flow, and the document editor; all three app windows closed before the native NSIS progress window continued",
       "E2E completed differential download, installed FileVersion 1.15.47, restarted automatically, preserved the synthetic data marker, and created a before-1.15.47 backup snapshot",
       "final production latest.yml size and SHA-512 match the built 1.15.47 installer",
-      "Gmail Flow final-send bulk approval tests cover all, partial, and cleared review states"
+      "Gmail Flow final-send bulk approval tests cover all, partial, and cleared review states",
+      "mail delivery policy tests cover five-second pacing, Gmail Retry-After, exponential backoff, permanent failure stop, mixed completion, failed-only retry UI, and online scheduler slicing",
+      "Electron UI smoke passed all 11 guides and 215 steps for the 1.15.48 source",
+      "final production latest.yml size and SHA-512 match the built 1.15.48 installer and the packaged online-scheduler-setup contains Code.gs, appsscript.json, and README.md"
     ],
     "unverified": ["trusted Windows code signing", "real Google time-trigger delivery", "real Google Drive backup and new-PC restore"],
     "evidencePaths": ["docs/relay/CMOE-Workspace-1.14.8-Restoration.md", "workspace/tests/standard-updater.test.js", "workspace/tests/update-data-backup.test.js", "workspace/tests/update-shutdown-policy.test.js", "workspace/build/update-e2e.config.js", "workspace/scripts/serve-update-e2e.js", "workspace/scripts/preflight-build.js"]
   },
   "delivery": {
-    "installerPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.47-Windows.exe",
-    "blockmapPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.47-Windows.exe.blockmap",
+    "installerPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.48-Windows.exe",
+    "blockmapPath": "workspace/desktop-dist/CMOE-Workspace-Setup-1.15.48-Windows.exe.blockmap",
     "latestYmlPath": "workspace/desktop-dist/latest.yml",
     "portablePath": null,
-    "version": "1.15.47",
+    "version": "1.15.48",
     "architecture": "x64",
-    "installerBytes": 111711351,
-    "installerSha256": "AFDA7C88ADA1AE63E59F43A11A311F291938196A2D2E46175A170099E308402E",
-    "blockmapBytes": 118374,
+    "installerBytes": 111720067,
+    "installerSha256": "1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4",
+    "blockmapBytes": 118413,
     "actualSignatureStatus": "NotSigned (no trusted Windows code-signing certificate configured)",
     "sourceLicenseZip": null,
     "localInstallResult": "all current Node tests and build preflight passed; the isolated 1.15.46-to-1.15.47 standard-updater E2E remains the updater baseline; production installation was not changed during this feature build",
     "siteDeploymentExplicitScope": "publish 1.15.47 through the standard updater directory while retaining the legacy bridge feed",
-    "siteDeploymentResult": "GitHub source and distribution releases cmoe-workspace-v1.15.47 published; Cresero Worker 2c536791-07d3-43eb-90a2-de6a75b7ba84 deployed; legacy update.json and standard latest.yml report 1.15.47; public installer and blockmap bytes match and the re-downloaded installer SHA-256 matches the local build"
+    "siteDeploymentResult": "pending 1.15.48 build and public deployment"
   }
 }
