@@ -2184,7 +2184,7 @@ function showTemplateDetail(id) {
   pushSubView('template-detail');
 }
 
-const STATUS_TEXT = { queued: '대기', processing: '처리 중', canceling: '취소 중', scheduled: '예약 대기', verifying: '보낸편지함 확인 중', 'waiting-auth': 'Gmail 연결 필요', completed: '발송 확인', failed: '발송 실패', unconfirmed: '전송 확인 실패', canceled: '취소' };
+const STATUS_TEXT = { queued: '대기', processing: '처리 중', canceling: '취소 중', scheduled: '예약 대기', verifying: '보낸편지함 확인 중', 'waiting-auth': 'Gmail 연결 필요', completed: '발송 확인', failed: '미발송 확인', unconfirmed: '결과 불명', canceled: '취소' };
 
 function statusText(status) { return STATUS_TEXT[status] || status || '대기'; }
 
@@ -2371,7 +2371,7 @@ function showHistoryBatch(id, { push = true, checkStatus = true } = {}) {
     : '';
   const deliveryResultText = batch.method === '임시 저장'
     ? ''
-    : ` · 보낸편지함 확인 ${batch.completed || 0} · 발송 실패 ${batch.failed || 0}${batch.unconfirmed ? ` · 확인 실패 ${batch.unconfirmed}` : ''}`;
+    : ` · 보낸편지함 확인 ${batch.completed || 0} · 미발송 확인 ${batch.failed || 0}${batch.unconfirmed ? ` · 결과 불명 ${batch.unconfirmed}` : ''}`;
   $('#historyBatchMeta').textContent = `${formatDateTime(batch.createdAt)} · ${batch.method} · ${statusText(batch.status)} ${batch.completed || 0}/${batch.total || batch.items.length}${deliveryResultText}${batch.sendIntervalMs ? ` · ${Math.round(batch.sendIntervalMs / 1000)}초 간격` : ''}${batch.attachments?.length ? ` · 첨부 ${batch.attachments.length}개` : ''}${draftStatusText}`;
   $('#editDraftBatch').hidden = batch.method !== '임시 저장' || !batch.items.some((item) => item.draftId);
   $('#refreshDraftStatus').hidden = batch.method !== '임시 저장' || !batch.items.some((item) => item.draftId);
@@ -3545,7 +3545,7 @@ function bindEvents() {
       await showAlert(`이 작업은 ${batch.senderEmail} 계정으로 보낸 작업입니다. 같은 계정으로 연결한 뒤 다시 시도해주세요.`);
       return;
     }
-    if (!await showConfirm(`실패한 ${failedItems.length}명에게만 즉시 다시 보낼까요?\n이미 성공한 대상은 포함하지 않습니다.`, '실패 대상 재전송', '본문 확인')) return;
+    if (!await showConfirm(`미발송이 확인된 ${failedItems.length}명에게만 즉시 다시 보낼까요?\n발송 확인 및 결과 불명 대상은 포함하지 않습니다.`, '미발송 확인 대상 재전송', '본문 확인')) return;
     const retryReviewResult = await openSendReview(failedItems, '즉시 발송', '', connection.email || '', batch.attachments || []);
     if (!retryReviewResult) return;
     const button = $('#retryFailedBatch');
@@ -3562,7 +3562,7 @@ function bindEvents() {
         }
       });
       await refreshMailActivity();
-      await showAlert(`${failedItems.length}명의 실패 대상만 새 작업으로 등록했습니다.\n안전 발송 간격으로 이어서 전송합니다.`, '재전송 등록 완료');
+      await showAlert(`${failedItems.length}명의 미발송 확인 대상만 새 작업으로 등록했습니다.\n안전 발송 간격으로 이어서 전송합니다.`, '재전송 등록 완료');
       showHistoryBatch(retried.id, { push: false, checkStatus: false });
     } catch (error) {
       await showAlert(error.message, '재전송 등록 실패');

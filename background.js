@@ -823,9 +823,14 @@ async function processItem(batch, item, labelCache, request) {
     }
     item.attempts = Number(item.attempts || 0) + 1;
     const failure = GmailFlowMailDeliveryPolicy.classify(error);
+    if (failure.network || failure.server) item.deliveryUncertain = true;
     if (!failure.retryable || item.attempts >= MAX_ATTEMPTS) {
-      item.status = 'failed';
-      if (batch.method === '예약 발송' && item.messageId) {
+      item.status = item.deliveryUncertain ? 'unconfirmed' : 'failed';
+      if (item.deliveryUncertain) {
+        item.sentRecordState = 'unconfirmed';
+        item.error = '네트워크 또는 Gmail 서버 응답이 불완전해 실제 발송 여부를 확정할 수 없습니다. 중복 방지를 위해 미발송 확인 대상 재전송에는 포함하지 않습니다.';
+      }
+      if (item.status === 'failed' && batch.method === '예약 발송' && item.messageId) {
         try {
           await removeLabel(item.messageId, batch.scheduleLabel, labelCache, request);
           await applyLabel(item.messageId, '예약발송 실패', labelCache, request);

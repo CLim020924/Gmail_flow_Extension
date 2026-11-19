@@ -215,8 +215,10 @@ function processDueJob_(record) {
       try {
         const draft = GmailApp.getDraft(item.draftId);
         if (!draft) {
-          item.status = 'failed';
-          item.error = 'Gmail 초안을 찾을 수 없어 중복 발송 방지를 위해 다시 보내지 않았습니다.';
+          item.status = item.deliveryUncertain ? 'unconfirmed' : 'failed';
+          item.error = item.deliveryUncertain
+            ? '이전 발송 시도의 결과가 불명확하고 Gmail 초안도 없어 실제 발송 여부를 확정할 수 없습니다. 중복 방지를 위해 재전송 대상에서 제외합니다.'
+            : 'Gmail 초안을 찾을 수 없어 중복 발송 방지를 위해 다시 보내지 않았습니다.';
         } else {
           const sent = draft.send();
           item.status = 'verifying'; item.error = ''; item.nextAttemptAt = '';
@@ -227,7 +229,13 @@ function processDueJob_(record) {
       } catch (error) {
         item.error = error.message || String(error);
         const retryable = isRetryableSendError_(error);
-        item.status = !retryable || item.attempts >= GF_CONFIG.maxAttempts ? 'failed' : 'scheduled';
+        if (isAmbiguousSendError_(error)) item.deliveryUncertain = true;
+        const terminal = !retryable || item.attempts >= GF_CONFIG.maxAttempts;
+        item.status = terminal ? (item.deliveryUncertain ? 'unconfirmed' : 'failed') : 'scheduled';
+        if (terminal && item.deliveryUncertain) {
+          item.sentRecordState = 'unconfirmed';
+          item.error = '네트워크 또는 Gmail 서버 응답이 불완전해 실제 발송 여부를 확정할 수 없습니다. 중복 방지를 위해 미발송 확인 대상 재전송에는 포함하지 않습니다.';
+        }
         item.nextAttemptAt = item.status === 'scheduled' ? new Date(Date.now() + appsScriptRetryDelayMs_(error, item.attempts)).toISOString() : '';
       }
     }
@@ -264,6 +272,11 @@ function processDueJob_(record) {
 function isRetryableSendError_(error) {
   const text = String(error && error.message || error || '').toLowerCase();
   return /quota|rate|limit exceeded|service invoked too many|temporar|try again|backend|internal error|unavailable|timeout/.test(text);
+}
+
+function isAmbiguousSendError_(error) {
+  const text = String(error && error.message || error || '').toLowerCase();
+  return /temporar|try again|backend|internal error|unavailable|timeout|timed out|network|connection/.test(text);
 }
 
 function appsScriptRetryDelayMs_(error, attempt) {

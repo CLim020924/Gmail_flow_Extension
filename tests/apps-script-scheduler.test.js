@@ -139,6 +139,9 @@ const context = vm.createContext({
 
 vm.runInContext(fs.readFileSync(require.resolve('../apps-script/Code.gs'), 'utf8'), context, { filename: 'Code.gs' });
 
+assert.equal(context.isAmbiguousSendError_(new Error('Backend error: connection timed out')), true);
+assert.equal(context.isAmbiguousSendError_(new Error('Service invoked too many times: Gmail')), false);
+
 function post(payload) {
   return JSON.parse(context.doPost({ postData: { contents: JSON.stringify(payload) } }).getContent());
 }

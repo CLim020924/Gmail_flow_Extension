@@ -23,9 +23,12 @@ assert.equal(Delivery.retryDelayMs({ status: 503 }, 3, () => 0), 20_000);
 const popupHtml = fs.readFileSync(path.join(__dirname, '..', 'popup.html'), 'utf8');
 const popupScript = fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8');
 assert.match(popupHtml, /id="retryFailedBatch"/);
+assert.match(popupHtml, /미발송 확인 대상 다시 보내기/);
 assert.match(popupHtml, /id="sendReviewIntervalSeconds"[^>]*min="2"[^>]*max="60"[^>]*value="5"/);
 assert.match(popupScript, /sendIntervalMs: \(sendReviewResult\?\.sendIntervalSeconds \|\| 5\) \* 1000/);
 assert.match(popupScript, /filter\(\(item\) => item\.status === 'failed'\)/);
-assert.match(popupScript, /이미 성공한 대상은 포함하지 않습니다/);
+assert.match(popupScript, /failed: '미발송 확인'/);
+assert.match(popupScript, /unconfirmed: '결과 불명'/);
+assert.match(popupScript, /발송 확인 및 결과 불명 대상은 포함하지 않습니다/);
 
 console.log('mail delivery pacing and backoff tests passed');

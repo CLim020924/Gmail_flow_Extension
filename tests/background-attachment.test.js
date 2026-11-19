@@ -227,6 +227,23 @@ function send(message) {
 
   global.fetch = async (url, options = {}) => {
     if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
+    throw new TypeError('fetch failed after the request may have left this PC');
+  };
+  assert.equal((await send({
+    type: 'enqueue-mail-batch',
+    payload: { name: 'ambiguous network result', method: '즉시 발송', senderEmail: 'sender@example.com', label: '', scheduledAt: '', attachments: [], items: [{ email: 'unknown@example.com', subject: 'unknown', body: 'unknown', variables: {} }] }
+  })).ok, true);
+  const ambiguousBatch = data.mailBatches.find((batch) => batch.name === 'ambiguous network result');
+  assert.equal(ambiguousBatch.items[0].status, 'queued');
+  ambiguousBatch.items[0].attempts = 7;
+  ambiguousBatch.items[0].nextAttemptAt = '';
+  assert.equal((await send({ type: 'process-queue' })).ok, true);
+  assert.equal(ambiguousBatch.items[0].status, 'unconfirmed', 'an exhausted network failure must remain unknown, not become a confirmed non-delivery');
+  assert.equal(ambiguousBatch.items[0].deliveryUncertain, true);
+  data.mailBatches = data.mailBatches.filter((batch) => batch.id !== ambiguousBatch.id);
+
+  global.fetch = async (url, options = {}) => {
+    if (isGmailProfileRequest(url)) return gmailProfileResponse(options);
     return {
       ok: false, status: 429, headers: { get: (name) => String(name).toLowerCase() === 'retry-after' ? '120' : '' },
       text: async () => JSON.stringify({ error: { message: 'Quota exceeded for quota metric Total Query Cost', errors: [{ reason: 'userRateLimitExceeded' }] } })
@@ -242,7 +259,11 @@ function send(message) {
   assert.equal(quotaBatch.items[0].attempts, 1);
   assert(new Date(quotaBatch.items[0].nextAttemptAt).getTime() >= Date.now() + 119_000, 'Gmail Retry-After must control the retry time');
   assert.equal(quotaBatch.nextSendAt, quotaBatch.items[0].nextAttemptAt, 'rate limiting must pause all batches for the sender');
-  assert.equal((await send({ type: 'cancel-mail-batch', batchId: quotaBatch.id })).ok, true);
+  quotaBatch.items[0].attempts = 7;
+  quotaBatch.items[0].nextAttemptAt = '';
+  quotaBatch.nextSendAt = '';
+  assert.equal((await send({ type: 'process-queue' })).ok, true);
+  assert.equal(quotaBatch.items[0].status, 'failed', 'an explicit Gmail quota rejection remains a confirmed non-delivery after retries');
 
   let releaseFirstConcurrentSend;
   let concurrentSendCount = 0;

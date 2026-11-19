@@ -331,5 +331,6 @@
 - 로컬 Gmail 큐는 선택 간격을 작업에 영속 저장하고 발신 계정 전체 대기 시각에 적용한다. 온라인 Apps Script는 정책 버전 3에서 같은 간격을 사용하며, 긴 간격에는 실행당 처리 수를 줄여 누적 sleep이 4분을 넘지 않게 한다.
 - Gmail API 발송 응답만으로 성공 처리하지 않는다. 반환된 메시지 ID를 다시 조회해 `SENT` 시스템 라벨이 확인된 경우에만 `발송 확인`으로 완료한다. 조회 지연은 조회만 최대 10회 재시도하며 절대 다시 발송하지 않는다. 끝내 확인하지 못하면 `전송 확인 실패`로 분리하고 실패 대상 재전송에서 제외한다.
 - 전체 Gmail Flow 및 Workspace Node 시험, 11개 가이드·215단계 Electron UI 스모크, 빌드 사전검사를 통과했다.
-- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.49-Windows.exe`, 111,722,707 bytes, SHA-256 `4E5D35C7C0EEAE35D97730841845457877C394B6ACDE69911F194270C8F7F842`, FileVersion/ProductVersion 1.15.49, NotSigned. blockmap 118,438 bytes이며 `latest.yml`과 일치한다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.49-Windows.exe`, 111,723,129 bytes, SHA-256 `D55EE1DA4C7D00C4859EC8CEDFF0D16ACC5D35AE383E9C0545A8C9BE24B6FD1D`, FileVersion/ProductVersion 1.15.49, NotSigned. blockmap 118,402 bytes이며 `latest.yml`과 일치한다.
 - 패키지의 Gmail Flow와 `online-scheduler-setup`에 전송 간격 UI, 정책 버전 3, 보낸편지함 확인 코드가 포함된 것을 확인했다. 1.15.49 공개 배포는 이번 변경 시점에 수행하지 않았으며 기존 1.15.48 피드는 유지된다.
+- 후속 분류 보강: 명확한 Gmail 거절만 `미발송 확인`으로 두고, 네트워크·Gmail 5xx 등 요청 결과가 불명확했던 대상은 `결과 불명`으로 분리한다. 재전송 버튼은 `failed`인 미발송 확인 대상만 추출하고 `unconfirmed` 결과 불명 대상은 제외한다.
