@@ -322,4 +322,5 @@
 - 발송 기록의 `실패 대상 다시 보내기`는 실패 항목만 추출하고 성공 항목을 제외한다. 사용자가 받는 사람·제목·본문을 다시 확인한 뒤 새 안전 발송 작업으로 등록한다.
 - 기존 프로젝트·명단·템플릿·계정 자료와 원본 작업 기록은 보존한다.
 - 전체 Node 시험, Retry-After·영구 오류·혼합 결과·로컬 영속 큐·온라인 12명 분할 시험, 빌드 사전검사, 11개 가이드·215단계 UI 스모크를 통과했다.
-- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.48-Windows.exe`, 111,720,067 bytes, SHA-256 `1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4`, FileVersion 1.15.48, NotSigned. blockmap은 118,413 bytes이며 `latest.yml`과 일치한다. 공개 배포 결과는 배포 후 기록한다.
+- 설치형: `workspace/desktop-dist/CMOE-Workspace-Setup-1.15.48-Windows.exe`, 111,720,067 bytes, SHA-256 `1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4`, FileVersion 1.15.48, NotSigned. blockmap은 118,413 bytes이며 `latest.yml`과 일치한다.
+- GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.48`과 Cresero Worker `f0136cc6-110e-4ac2-aa26-8cbda98320f3`를 공개했다. 공개 피드 2종, 설치 파일, blockmap, 변경 안내와 온라인 설정 ZIP을 확인했고 재다운로드 설치 파일의 크기·SHA-256이 로컬 원본과 일치했다.

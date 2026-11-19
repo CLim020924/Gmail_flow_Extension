@@ -101,6 +101,6 @@
     "sourceLicenseZip": null,
     "localInstallResult": "all current Node tests and build preflight passed; the isolated 1.15.46-to-1.15.47 standard-updater E2E remains the updater baseline; production installation was not changed during this feature build",
     "siteDeploymentExplicitScope": "publish 1.15.47 through the standard updater directory while retaining the legacy bridge feed",
-    "siteDeploymentResult": "pending 1.15.48 build and public deployment"
+    "siteDeploymentResult": "GitHub source and distribution releases cmoe-workspace-v1.15.48 published; Cresero Worker f0136cc6-110e-4ac2-aa26-8cbda98320f3 deployed; legacy update.json and standard latest.yml report 1.15.48; public installer, blockmap, release notes and online scheduler setup ZIP bytes match, and the re-downloaded installer SHA-256 matches the local build"
   }
 }

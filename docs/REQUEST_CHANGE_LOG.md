@@ -410,8 +410,9 @@
 - 버전: Gmail Flow 0.7.2, Chrome 확장 0.6.2, CMOE Workspace 1.15.48.
 - 검증: Gmail Flow·Workspace 전체 Node 시험, Retry-After 120초, 영구 오류 중단, 성공+실패 혼합 종료, 로컬 한 통 처리·영속 알람, Apps Script 12명 분할·5초 간격, 빌드 사전검사, 11개 가이드·215단계 Electron UI 스모크를 통과했다.
 - 설치 파일: 111,720,067 bytes, SHA-256 `1EF2BDBC8AE154D54E9402E8C910B941DAA81505EEED3820C5978CC454C24BD4`, FileVersion 1.15.48, 서명 없음. blockmap은 118,413 bytes이며 `latest.yml`의 크기·SHA-512와 일치한다.
-- 상태: 구현·전체 회귀 검증·설치형 빌드 완료 · 공개 배포 진행 중
-- 커밋: 진행 중
+- 배포: GitHub 소스·배포 자산 Release `cmoe-workspace-v1.15.48`, Cresero Worker `f0136cc6-110e-4ac2-aa26-8cbda98320f3`. 공개 `update.json`과 `updater/latest.yml`이 1.15.48을 제공하며 설치 파일·blockmap·변경 안내·온라인 설정 ZIP을 확인했다. 공개 설치 파일 재다운로드 결과 크기·SHA-256이 로컬 원본과 일치했다.
+- 상태: 구현·전체 회귀 검증·설치형 빌드·공개 배포 완료
+- 커밋: 앱 `2b81fd1`, 사이트 `dd4a8b2`
 
 ## 현재 미완료 또는 계속 개선할 항목
 
